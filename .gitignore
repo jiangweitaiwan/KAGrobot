@@ -1,0 +1,19 @@
+sbert_onnx/
+
+# 系統檔案 (Windows / Mac)
+Thumbs.db
+.DS_Store
+
+# 依賴套件 (最重要！不要上傳 node_modules)
+node_modules/
+dist/
+build/
+
+# 敏感資訊 (絕對不能上傳)
+.env
+*.pem
+*.key
+
+# 編輯器設定
+.vscode/
+.idea/
