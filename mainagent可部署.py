@@ -1973,7 +1973,7 @@ class SocratesChatBot:
             "chains_raw": state.get("chains_raw") or [],
             "query":      state.get("query"),
         })
-        new_agent_msgs: List[BaseMessage] = list(graph_result["messages"])
+        new_agent_msgs: List[BaseMessage] = graph_result["messages"]
         state["agent_messages"] = new_agent_msgs
 
         # ── Step 3：從 graph_result 同步 tool_executor 存入的欄位 ──
@@ -2174,7 +2174,7 @@ class SocratesChatBot:
             if isinstance(msg, AIMessage) and msg.content:
                 print(f"msg.content --> {msg.content}")
                 print(f"msg --> {msg}")
-                raw = msg.content['text'].strip()
+                raw = msg.content[0]['text'].strip()
                 
                 break
 
