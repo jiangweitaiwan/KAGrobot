@@ -1686,6 +1686,13 @@ Resulting Concept 中，選出最符合其實際需求的模型或分析方法�
 """
 
 
+
+class OutputSchema(BaseModel):
+    action: Literal["ask", "resolved"]
+    ai_message: str
+
+    
+
 # ===================================================================
 # Serialization helpers
 # ===================================================================
@@ -1911,6 +1918,7 @@ class SocratesChatBot:
             self._retrieve_tool  = self._make_retrieve_tool()
             # Gemini 支援 bind_tools，會自動處理 StructuredTool 轉換
             self._llm_with_tools = base_llm.bind_tools([self._retrieve_tool])
+            self._llm_with_tools_and_structured_output = self._llm_with_tools.with_structured_output(OutputSchema)
             self._graph          = self._build_graph()
 
 
@@ -2017,7 +2025,7 @@ class SocratesChatBot:
         tool_executor 直接將 candidates / chains_raw 存入 state 欄位，
         ToolMessage 只包含精簡 display，不含大型 JSON。
         """
-        llm      = self._llm_with_tools
+        llm      = self._llm_with_tools_and_structured_output
         tool_map = {self._retrieve_tool.name: self._retrieve_tool}
 
         def agent_node(state: _InternalState) -> dict:

@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 from settings import get_settings
 
-_s = get_settings()
+
 
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
 
