@@ -20,7 +20,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage,SystemM
 from langchain_core.tools import tool
 import operator
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Sequence, TypedDict
+from typing import Any, Callable, Dict, List, Optional, Sequence, TypedDict,Literal
 from langgraph.types import interrupt, Command
 from langgraph.checkpoint.memory import MemorySaver
 from datetime import datetime
@@ -1686,12 +1686,9 @@ Resulting Concept 中，選出最符合其實際需求的模型或分析方法�
 """
 
 
-
 class OutputSchema(BaseModel):
-    action: Literal["ask", "resolved"]
-    ai_message: str
-
-    
+    action: Literal["ask", "resolved"] = Field(description="本輪狀態：ask=需要追問/等待使用者選擇；resolved=已明確完成選擇。")
+    ai_message: str = Field(description="繁體中文回覆內容，用於引導使用者或確認已完成選擇。")
 
 # ===================================================================
 # Serialization helpers
@@ -1855,13 +1852,7 @@ def _parse_selection(text: str, candidates: List[dict]) -> Optional[int]:
     return None
 
 
-# ===================================================================
-# Session Cache
-# ===================================================================
 
-class _SessionData(TypedDict, total=False):
-    candidates: List[dict]
-    chains_raw: List[dict]
 
 
 # ===================================================================
@@ -1918,7 +1909,6 @@ class SocratesChatBot:
             self._retrieve_tool  = self._make_retrieve_tool()
             # Gemini 支援 bind_tools，會自動處理 StructuredTool 轉換
             self._llm_with_tools = base_llm.bind_tools([self._retrieve_tool])
-            self._llm_with_tools_and_structured_output = self._llm_with_tools.with_structured_output(OutputSchema)
             self._graph          = self._build_graph()
 
 
@@ -2025,7 +2015,7 @@ class SocratesChatBot:
         tool_executor 直接將 candidates / chains_raw 存入 state 欄位，
         ToolMessage 只包含精簡 display，不含大型 JSON。
         """
-        llm      = self._llm_with_tools_and_structured_output
+        llm      = self._llm_with_tools
         tool_map = {self._retrieve_tool.name: self._retrieve_tool}
 
         def agent_node(state: _InternalState) -> dict:
@@ -2168,6 +2158,48 @@ class SocratesChatBot:
     # JSON 解析：從最後一則 AIMessage 取出 action / ai_message
     # ------------------------------------------------------------------
 
+
+
+    @staticmethod
+    def _extract_raw_content(msgs: List[BaseMessage]) -> str:
+        """從 agent_messages 中找最後一則有 content 的 AIMessage，回傳原始文字。
+
+        相容兩種 Gemini 回傳格式：
+          - content 為 list[dict]：text 在 content[0]['text']
+          - content 為 str：直接回傳
+        任何情況下找不到內容皆 raise。
+        """
+        for msg in reversed(msgs):
+            if not (isinstance(msg, AIMessage) and msg.content):
+                continue
+            print(f"msg.content --> {msg.content}")
+            print(f"msg --> {msg}")
+            if isinstance(msg.content, list):
+                if not msg.content:
+                    raise ValueError("AIMessage content list is empty.")
+                item = msg.content[0]
+                if isinstance(item, dict):
+                    raw = item.get('text', '')
+                else:
+                    raw = str(item)
+            else:
+                raw = str(msg.content)
+            raw = raw.strip()
+            if not raw:
+                raise ValueError("AIMessage content is blank.")
+            return raw
+        raise ValueError("No AIMessage with content found in agent_messages.")
+
+
+
+
+
+
+
+
+
+
+
     @staticmethod
     def _parse_bot_response(msgs: List[BaseMessage]) -> dict:
         """從 agent_messages 中找最後一則有 content 的 AIMessage，解析 JSON。
@@ -2177,17 +2209,7 @@ class SocratesChatBot:
 
         若解析失敗（LLM 沒遵守格式），回傳預設值讓對話繼續。
         """
-        raw = ""
-        for msg in reversed(msgs):
-            if isinstance(msg, AIMessage) and msg.content:
-                print(f"msg.content --> {msg.content}")
-                print(f"msg --> {msg}")
-                raw = msg.content[0]['text'].strip()
-                
-                break
-
-        if not raw:
-            return {"action": "ask", "ai_message": ""}
+        raw = SocratesChatBot._extract_raw_content(msgs)
 
         # 容錯：去除可能的 markdown code block 包裝
         if raw.startswith("```"):
