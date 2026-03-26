@@ -68,6 +68,10 @@ class OrchestratorState(TypedDict, total=False):
     # 用來保存 MainAgent 的完整歷史（含工具回合產生的訊息）
     main_state: Annotated[List[BaseMessage], add_messages]
 
+    # ── 新增：Socratic → MainAgent 的銜接任務書 ──
+    # socratic_node 在 resolved 時填入；main_agent_node 第一輪讀取後清除
+    handoff_task: Optional[str]
+
 
 # ======================================================================
 # 全域單例：Retriever / SocratesChatBot / MainAgent
@@ -79,8 +83,6 @@ def _build_retriever() -> Neo4jReasoningRetriever:
 
     s = get_settings()
     base_dir = Path(__file__).resolve().parent
-
-    
 
     model_path = str(base_dir / "sbert_onnx" / "sbert_multilingual.onnx")
     tokenizer_dir = str(base_dir / "sbert_onnx")
@@ -115,6 +117,50 @@ shared_main_agent = MainAgent(
 
 
 # ======================================================================
+# 銜接任務書組裝（方案二核心）
+# ======================================================================
+
+def _build_handoff_task(socrates_state: ChatState) -> str:
+    """在 Socratic resolved 的瞬間，從 socrates_state 合成結構化任務書。
+
+    這條訊息將作為 MainAgent 第一輪的 user_input，
+    確保 MainAgent 拿到的是完整語意的任務描述，而非使用者輸入的選項編號。
+
+    格式範例：
+        使用者需求：預測台灣 GDP
+        選定模型：Extended New Keynesian DSGE Model with Bayesian Estimation
+        可用工具：identify_shocks、forecast_economy
+        請根據以上需求與工具，開始執行分析。
+    """
+    query = socrates_state.get("query") or "（未提供）"
+
+    # 選定模型名稱：從 candidates[selected_index] 取出
+    model_name = "（未指定）"
+    candidates = socrates_state.get("candidates") or []
+    selected_idx = socrates_state.get("selected_index")
+    if selected_idx is not None and candidates:
+        chosen = candidates[selected_idx] if selected_idx < len(candidates) else None
+        if chosen:
+            model_name = chosen.get("rc_name") or model_name
+
+    # 主要工具清單（排除依賴工具，只列使用者感知到的主工具）
+    tools_info = socrates_state.get("tools") or []
+    primary_tools = [
+        t["tool_name"]
+        for t in tools_info
+        if not t.get("is_dependency", False)
+    ]
+    tools_str = "、".join(primary_tools) if primary_tools else "（無）"
+
+    return (
+        f"使用者需求：{query}\n"
+        f"選定模型：{model_name}\n"
+        f"可用工具：{tools_str}\n"
+        f"請根據以上需求與工具，開始執行分析。"
+    )
+
+
+# ======================================================================
 # LangGraph 節點實作
 # ======================================================================
 
@@ -142,28 +188,45 @@ def socratic_node(state: OrchestratorState) -> OrchestratorState:
     new_socrates_state = shared_socrates_bot.process_message(
         old_socrates_state, user_msg
     )
-    reply_text = shared_socrates_bot.get_last_reply(new_socrates_state)
 
     # 根據 Socrates 狀態是否已 RESOLVED 決定下一階段
-    next_phase = (
-        "main_agent"
-        if new_socrates_state.get("phase") == ConversationPhase.RESOLVED.value
-        else "socratic"
+    is_resolved = (
+        new_socrates_state.get("phase") == ConversationPhase.RESOLVED.value
     )
+    next_phase = "main_agent" if is_resolved else "socratic"
+
+    if is_resolved:
+        # ── 方案四：用流暢的「確認 + 接力」開場白取代 socratic bot 的原始回覆 ──
+        model_name = "（未指定）"
+        candidates = new_socrates_state.get("candidates") or []
+        selected_idx = new_socrates_state.get("selected_index")
+        if selected_idx is not None and candidates:
+            chosen = candidates[selected_idx] if selected_idx < len(candidates) else None
+            if chosen:
+                model_name = chosen.get("rc_name") or model_name
+
+        reply_text = (
+            f"好的，已確認您選擇「{model_name}」。\n"
+            f"我現在開始為您進行分析，請稍候⋯⋯"
+        )
+
+        # ── 方案二：組裝結構化任務書，傳給 main_agent_node ──
+        handoff_task = _build_handoff_task(new_socrates_state)
+    else:
+        # Socratic 對話仍在進行，正常取用 bot 的回覆
+        reply_text = shared_socrates_bot.get_last_reply(new_socrates_state)
+        handoff_task = None
 
     return OrchestratorState(
         messages=[AIMessage(content=reply_text)],
         phase=next_phase,
         socrates_state=new_socrates_state,
+        handoff_task=handoff_task,
     )
 
 
 def main_agent_node(state: OrchestratorState) -> OrchestratorState:
     """MainAgent 階段：使用工具真正解題。"""
-    messages = state.get("messages") or []
-    user_msg = _last_human_content(messages)
-    if not user_msg:
-        return {}
 
     socrates_state = state.get("socrates_state")
     if not socrates_state:
@@ -172,6 +235,18 @@ def main_agent_node(state: OrchestratorState) -> OrchestratorState:
             messages=[AIMessage(content="目前尚未完成需求釐清，請先重新描述你的需求。")],
             phase="socratic",
         )
+
+    # ── 方案二：優先使用銜接任務書；後續輪次才讀使用者的真實輸入 ──
+    handoff_task = state.get("handoff_task")
+    if handoff_task:
+        # 第一輪（從 Socratic 轉入）：用任務書驅動 MainAgent
+        user_msg = handoff_task
+    else:
+        # 後續輪次（使用者繼續與 MainAgent 對話）：讀取真實 user input
+        messages = state.get("messages") or []
+        user_msg = _last_human_content(messages)
+        if not user_msg:
+            return {}
 
     # MainAgent 的上下文只使用 main_state（與 Orchestrator messages 分離）
     # main_state 由 LangGraph checkpointer 隨 thread_id 持久化
@@ -187,6 +262,8 @@ def main_agent_node(state: OrchestratorState) -> OrchestratorState:
         messages=[AIMessage(content=result["content"])],
         phase="main_agent",
         socrates_state=socrates_state,
+        # handoff_task 使用後清除，避免下一輪誤用
+        handoff_task=None,
         # 將 MainAgent 更新後的完整歷史存回 main_state
         main_state=result.get("messages") or [],
     )
@@ -215,8 +292,22 @@ workflow.set_conditional_entry_point(
     },
 )
 
+# 進入 `socratic` 節點後，若在本輪將 phase 推進到 `main_agent`，
+# 就在同一次請求內接著跑 `main_agent_node`；否則直接結束本輪 graph。
+def socratic_to_next_router(state: OrchestratorState) -> str:
+    phase = state.get("phase") or "socratic"
+    return "main_agent" if phase == "main_agent" else "end"
+
+
 # 單輪對話結束就結束 graph，下次由同一個 thread_id 繼續
-workflow.add_edge("socratic", END)
+workflow.add_conditional_edges(
+    "socratic",
+    socratic_to_next_router,
+    {
+        "main_agent": "main_agent",
+        "end": END,
+    },
+)
 workflow.add_edge("main_agent", END)
 
 memory = MemorySaver()
