@@ -1,0 +1,122 @@
+:root {
+  color-scheme: dark;
+  --bg: #0a0f1f;
+  --panel: #11182b;
+  --panel-2: #161f35;
+  --text: #f6f8ff;
+  --muted: #9db0db;
+  --user: #2d67ff;
+  --ai: #203052;
+  --border: #26365e;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: radial-gradient(circle at top, #111a34, var(--bg) 50%);
+  color: var(--text);
+}
+
+main {
+  max-width: 960px;
+  margin: 0 auto;
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: 16px;
+  padding: 20px;
+}
+
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.session {
+  color: var(--muted);
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+
+button {
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.chat-box {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 16px;
+  background: color-mix(in oklab, var(--panel), black 7%);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.msg {
+  max-width: 85%;
+  border-radius: 14px;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
+.msg.user {
+  align-self: flex-end;
+  background: var(--user);
+}
+
+.msg.ai {
+  align-self: flex-start;
+  background: var(--ai);
+  border: 1px solid var(--border);
+}
+
+.meta {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-top: 4px;
+}
+
+form {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+}
+
+textarea {
+  resize: none;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  padding: 12px;
+  min-height: 72px;
+  font-size: 0.95rem;
+}
+
+.status {
+  color: var(--muted);
+  font-size: 0.85rem;
+}

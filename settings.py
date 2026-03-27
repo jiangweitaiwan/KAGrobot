@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     # --- Runtime / server ---
     host: str = Field(default="0.0.0.0", alias="HOST")
     port: int = Field(default=8000, alias="PORT")
+    cors_allow_origins: str = Field(default="*", alias="CORS_ALLOW_ORIGINS")
 
     # --- LLM ---
     google_api_key: str = Field(default="", alias="GOOGLE_API_KEY")

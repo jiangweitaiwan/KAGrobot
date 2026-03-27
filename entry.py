@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Annotated, List, Optional, TypedDict
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from langgraph.graph import StateGraph, END
@@ -333,6 +334,16 @@ class ChatResponse(BaseModel):
 
 
 api = FastAPI()
+
+cors_origins = [origin.strip() for origin in s.cors_allow_origins.split(",") if origin.strip()]
+if cors_origins:
+    api.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 @api.post("/chat", response_model=ChatResponse)
