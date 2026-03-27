@@ -2597,7 +2597,7 @@ class MainAgent:
         # llm_configured = self._base_llm.with_config(
         #     config={"system_instruction": system_prompt}
         # )
-        llm_bound = _base_llm.bind_tools(tools) if has_tools else llm_configured
+        llm_bound = self._base_llm.bind_tools(tools) if has_tools else llm_configured
 
         # 4. 即時組裝 LangGraph (在 Python 中組裝圖表極快，微秒級別)
         def call_model(state: AgentState) -> AgentState:
