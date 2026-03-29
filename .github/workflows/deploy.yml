@@ -2,9 +2,9 @@ name: Auto Deploy Backend
 
 on:
   push:
-    branches: [ "main" ] # 只有 push 到 main 分支時才執行
+    branches: [ "main" ]
     paths:
-      - 'backend/**'    # 只有當 backend 資料夾有變動時才觸發，省資源！
+      - 'backend/**' # 只有 backend 有變動時才跑
 
 jobs:
   deploy:
@@ -12,6 +12,7 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        # 這裡不需要 lfs: true 了，省下 GitHub 流量！
 
       - name: Auth Google Cloud
         uses: 'google-github-actions/auth@v2'
@@ -21,19 +22,23 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Configure Docker
-        run: gcloud auth configure-docker asia-east1-docker.pkg.dev
-
-      - name: Build and Push
+      # 直接將構建任務交給 Google Cloud Build 處理
+      - name: Build and Push (via Cloud Build)
         run: |
           IMAGE_URL="asia-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/my-repo/kagrobot:${{ github.sha }}"
-          docker build -t $IMAGE_URL -f backend/Dockerfile ./backend
-          docker push $IMAGE_URL
+          
+          # 我們在根目錄執行，告訴 Google 去 backend 資料夾找 Dockerfile 並構建
+          gcloud builds submit \
+            --tag $IMAGE_URL \
+            ./backend
 
       - name: Deploy to Cloud Run
         run: |
           IMAGE_URL="asia-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/my-repo/kagrobot:${{ github.sha }}"
+          
           gcloud run deploy kagrobot \
             --image $IMAGE_URL \
             --region asia-east1 \
-            --platform managed
+            --platform managed \
+            --memory 2Gi \
+            --timeout 600
