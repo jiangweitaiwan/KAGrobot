@@ -1565,6 +1565,19 @@ register_langchain_tool("variance_decomposition", variance_decomposition)
 register_langchain_tool("compare_scenarios", compare_scenarios)
 register_langchain_tool("fetch_economic_data", fetch_economic_data)
 
+
+
+
+
+
+
+
+
+
+
+
+
+
 """#Node
 
 ##agent_parser
@@ -2159,44 +2172,33 @@ class SocratesChatBot:
     # ------------------------------------------------------------------
 
 
+@staticmethod
+def _extract_raw_content(msgs: List[BaseMessage]) -> str:
+    """從 agent_messages 中找最後一則有 content 的 AIMessage，回傳原始文字。
 
-    @staticmethod
-    def _extract_raw_content(msgs: List[BaseMessage]) -> str:
-        """從 agent_messages 中找最後一則有 content 的 AIMessage，回傳原始文字。
-
-        相容兩種 Gemini 回傳格式：
-          - content 為 list[dict]：text 在 content[0]['text']
-          - content 為 str：直接回傳
-        任何情況下找不到內容皆 raise。
-        """
-        for msg in reversed(msgs):
-            if not (isinstance(msg, AIMessage) and msg.content):
-                continue
-            print(f"msg.content --> {msg.content}")
-            print(f"msg --> {msg}")
-            if isinstance(msg.content, list):
-                if not msg.content:
-                    raise ValueError("AIMessage content list is empty.")
-                item = msg.content[0]
-                if isinstance(item, dict):
-                    raw = item.get('text', '')
-                else:
-                    raw = str(item)
+    相容兩種 Gemini 回傳格式：
+        - content 為 list[dict]：text 在 content[0]['text']
+        - content 為 str：直接回傳
+    任何情況下找不到內容皆 raise。
+    """
+    for msg in reversed(msgs):
+        if not (isinstance(msg, AIMessage) and msg.content):
+            continue 
+        if isinstance(msg.content, list):
+            if not msg.content:
+                raise ValueError("AIMessage content list is empty.")
+            item = msg.content[0]
+            if isinstance(item, dict):
+                raw = item.get('text', '')
             else:
-                raw = str(msg.content)
-            raw = raw.strip()
-            if not raw:
-                raise ValueError("AIMessage content is blank.")
-            return raw
-        raise ValueError("No AIMessage with content found in agent_messages.")
-
-
-
-
-
-
-
-
+                raw = str(item)
+        else:
+            raw = str(msg.content)
+        raw = raw.strip()
+        if not raw:
+            raise ValueError("AIMessage content is blank.")
+        return raw
+    raise ValueError("No AIMessage with content found in agent_messages.")
 
 
 
@@ -2635,8 +2637,9 @@ class MainAgent:
 
         # 7. 整理並解析回傳結果
         updated_messages = list(result["messages"])
-        last_msg = updated_messages[-1]
-        content = last_msg.content if hasattr(last_msg, "content") else str(last_msg)
+        content = SocratesChatBot._extract_raw_content(updated_messages)
+        # last_msg = updated_messages[-1]
+        # content = last_msg.content if hasattr(last_msg, "content") else str(last_msg)
 
         # 找出「本次對話」中新增的工具呼叫
         tool_calls_made: List[str] = []
