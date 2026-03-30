@@ -5,6 +5,7 @@ on:
     branches: [ "main" ]
     paths:
       - 'backend/**' # 只有 backend 有變動時才跑
+  workflow_dispatch:
 
 jobs:
   deploy:
