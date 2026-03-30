@@ -2172,33 +2172,33 @@ class SocratesChatBot:
     # ------------------------------------------------------------------
 
 
-@staticmethod
-def _extract_raw_content(msgs: List[BaseMessage]) -> str:
-    """從 agent_messages 中找最後一則有 content 的 AIMessage，回傳原始文字。
+    @staticmethod
+    def _extract_raw_content(msgs: List[BaseMessage]) -> str:
+        """從 agent_messages 中找最後一則有 content 的 AIMessage，回傳原始文字。
 
-    相容兩種 Gemini 回傳格式：
-        - content 為 list[dict]：text 在 content[0]['text']
-        - content 為 str：直接回傳
-    任何情況下找不到內容皆 raise。
-    """
-    for msg in reversed(msgs):
-        if not (isinstance(msg, AIMessage) and msg.content):
-            continue 
-        if isinstance(msg.content, list):
-            if not msg.content:
-                raise ValueError("AIMessage content list is empty.")
-            item = msg.content[0]
-            if isinstance(item, dict):
-                raw = item.get('text', '')
+        相容兩種 Gemini 回傳格式：
+            - content 為 list[dict]：text 在 content[0]['text']
+            - content 為 str：直接回傳
+        任何情況下找不到內容皆 raise。
+        """
+        for msg in reversed(msgs):
+            if not (isinstance(msg, AIMessage) and msg.content):
+                continue 
+            if isinstance(msg.content, list):
+                if not msg.content:
+                    raise ValueError("AIMessage content list is empty.")
+                item = msg.content[0]
+                if isinstance(item, dict):
+                    raw = item.get('text', '')
+                else:
+                    raw = str(item)
             else:
-                raw = str(item)
-        else:
-            raw = str(msg.content)
-        raw = raw.strip()
-        if not raw:
-            raise ValueError("AIMessage content is blank.")
-        return raw
-    raise ValueError("No AIMessage with content found in agent_messages.")
+                raw = str(msg.content)
+            raw = raw.strip()
+            if not raw:
+                raise ValueError("AIMessage content is blank.")
+            return raw
+        raise ValueError("No AIMessage with content found in agent_messages.")
 
 
 

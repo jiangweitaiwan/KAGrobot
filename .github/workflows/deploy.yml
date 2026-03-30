@@ -42,5 +42,5 @@ jobs:
             --image $IMAGE_URL \
             --region asia-east1 \
             --platform managed \
-            --memory 2Gi \
+            --memory 4Gi \
             --timeout 600
