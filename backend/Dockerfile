@@ -29,8 +29,8 @@
   
   # 1. 先從搬運工那裡把「模型」拿過來 (放在最前面，因為模型不常變動)
   # 注意：這裡的路徑需根據你 tar 壓縮時的結構調整
-  COPY --from=model-fetcher /tmp/extracted_model /app/sbert_onnx
-  
+  #COPY --from=model-fetcher /tmp/extracted_model /app/sbert_onnx
+  COPY --from=model-fetcher /tmp/extracted_model/sbert_onnx/ /app/sbert_onnx/
   # 2. 安裝 Python 依賴
   COPY requirements.txt /app/requirements.txt
   RUN pip install --upgrade pip \
