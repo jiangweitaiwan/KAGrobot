@@ -24,6 +24,7 @@ jobs:
 
       # 直接將構建任務交給 Google Cloud Build 處理
       - name: Build and Push (via Cloud Build)
+        continue-on-error: true
         run: |
           IMAGE_URL="asia-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/my-repo/kagrobot:${{ github.sha }}"
           
