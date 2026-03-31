@@ -1669,40 +1669,53 @@ class _InternalState(TypedDict):
 _SYSTEM_PROMPT = """\
 你是一位專業經濟學顧問，目標是協助使用者從知識圖譜的
 Resulting Concept 中，選出最符合其實際需求的模型或分析方法。
-
+ 
 ## 工作流程
-
+ 
 ### 階段 1：需求釐清
 - 了解使用者需求
-
+ 
 ### 階段 2：查詢知識圖譜
 - 呼叫 `retrieve_concepts` tool，傳入精確的**英文**查詢語句。
 - 若結果為空（found=false），告知使用者並請重新描述需求後再試。
-
+ 
 ### 階段 3：展示候選，等待使用者選擇
 - 將 `retrieve_concepts` 回傳的 `display` 欄位內容展示給使用者。
 - 請使用者輸入選項編號（如 "1"）或模型名稱。
 - 此時 action = "ask"。
-
+ 
 ### 階段 4：確認選擇
 - 使用者明確給出編號或可辨識的名稱後：
   * 在 ai_message 中說明已選擇的項目與摘要。
   * 將 action 設為 "resolved"。
 - 若使用者的輸入模糊或無法對應到任何候選，繼續追問，action 仍為 "ask"。
-
+ 
 ## 輸出格式（強制）
 每輪必須輸出合法 JSON，不得有任何前綴文字或 markdown code block：
-{"action": "ask"|"resolved", "ai_message": "<繁體中文回覆>"}
-
+{"action": "ask"|"resolved", "ai_message": "<繁體中文回覆>", "selected_index": null}
+ 
+**selected_index 規則（非常重要）：**
+- action="ask" 時：selected_index 必須為 null。
+- action="resolved" 時：selected_index 必須填入使用者所選項目的**編號**（整數，與展示的 [1][2]... 一致）。
+  例如：使用者選了 [2]，則 selected_index=2。
+  例如：使用者說「第一個」或「用1號」，則 selected_index=1。
+  你必須在此時確保 selected_index 不為 null，這是系統路由的關鍵依據。
+ 
 - 對話以繁體中文；retrieve_concepts 的查詢語句用英文。
 - 未完成選擇前，action 絕對不能為 "resolved"。
 """
-
-
+ 
+ 
 class OutputSchema(BaseModel):
     action: Literal["ask", "resolved"] = Field(description="本輪狀態：ask=需要追問/等待使用者選擇；resolved=已明確完成選擇。")
     ai_message: str = Field(description="繁體中文回覆內容，用於引導使用者或確認已完成選擇。")
-
+    selected_index: Optional[int] = Field(
+        default=None,
+        description=(
+            "action='resolved' 時必填。使用者所選候選項目的 1-based 編號（與展示給使用者的 [1][2]... 一致）。"
+            "action='ask' 時設為 null。"
+        ),
+    )
 # ===================================================================
 # Serialization helpers
 # ===================================================================
@@ -1978,8 +1991,24 @@ class SocratesChatBot:
 
         # ── Step 2：ReAct loop ──
         prior = state.get("agent_messages") or []
+
+        # 避免多輪對話時重複注入 system prompt：
+        # - graph_result["messages"] 會包含本輪輸入的完整 messages（通常也包含 SystemMessage）
+        # - 若下一輪又在最前面加一次 SystemMessage，system prompt 會不斷累積
+        normalized_prior: List[BaseMessage] = []
+        first_system: Optional[SystemMessage] = None
+        for m in prior:
+            if isinstance(m, SystemMessage):
+                if first_system is None:
+                    first_system = m
+                # 其他 SystemMessage（包含重複注入）一律略過
+                continue
+            normalized_prior.append(m)
+
+        system_msg = first_system or SystemMessage(content=_SYSTEM_PROMPT)
+
         graph_result = self._graph.invoke({
-            "messages":   [SystemMessage(content=_SYSTEM_PROMPT)] + prior + [HumanMessage(content=user_input)],
+            "messages":   [system_msg] + normalized_prior + [HumanMessage(content=user_input)],
             "candidates": state.get("candidates") or [],
             "chains_raw": state.get("chains_raw") or [],
             "query":      state.get("query"),
@@ -2005,8 +2034,7 @@ class SocratesChatBot:
         state["messages"].append(AIMessage(content=ai_text))
 
         if action == "resolved":
-            self._handle_resolved(state,user_input)
-
+            self._handle_resolved(state, user_input, bot_resp)
         return state
 
     def get_last_reply(self, state: ChatState) -> str:
@@ -2205,27 +2233,27 @@ class SocratesChatBot:
     @staticmethod
     def _parse_bot_response(msgs: List[BaseMessage]) -> dict:
         """從 agent_messages 中找最後一則有 content 的 AIMessage，解析 JSON。
-
+ 
         LLM 被 system prompt 要求輸出：
-            {"action": "ask"|"resolved", "ai_message": "..."}
-
+            {"action": "ask"|"resolved", "ai_message": "...", "selected_index": null|int}
+ 
         若解析失敗（LLM 沒遵守格式），回傳預設值讓對話繼續。
         """
         raw = SocratesChatBot._extract_raw_content(msgs)
-
+ 
         # 容錯：去除可能的 markdown code block 包裝
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-
+ 
         try:
             data = json.loads(raw)
             if "action" in data and "ai_message" in data:
                 return data
         except (json.JSONDecodeError, TypeError):
             pass
-
+ 
         # 解析失敗：把原始內容當作 ai_message，action 維持 ask
-        return {"action": "ask", "ai_message": raw}
+        return {"action": "ask", "ai_message": raw, "selected_index": None}
 
     # ------------------------------------------------------------------
     # 處理 resolved
@@ -2235,28 +2263,45 @@ class SocratesChatBot:
         self,
         state:      ChatState,
         user_input: str,
+        bot_resp:   dict,
     ) -> None:
         """
         LLM 輸出 action="resolved" 後，由 process_message 呼叫此方法。
-
-        從 user_input 解析候選索引 → 填入 tools / parameters → 設定 RESOLVED。
-        若解析失敗（LLM 誤判），維持 RUNNING，讓下一輪繼續追問。
+ 
+        解析策略（兩層 fallback）：
+        1. 優先使用 LLM 在 bot_resp["selected_index"] 中回填的 1-based 編號。
+           這是主要路徑，因為 LLM 在決定 resolved 的當下已掌握完整上下文。
+        2. 若 LLM 未填或填入無效值，退回舊的 _parse_selection 規則式解析。
+        3. 兩者均失敗（LLM 誤判為 resolved），靜默維持 RUNNING，讓下一輪追問。
         """
-        # candidates = cache.get("candidates") or []
-        # chains_raw = cache.get("chains_raw") or []
         candidates = state.get("candidates") or []
-        chains_raw = state.get("reasoning_chains") or []  # 注意 key 名稱
-
-        chosen_idx = _parse_selection(user_input, candidates)
-        if chosen_idx is None or not candidates:
-            # LLM 誤判為 resolved → 靜默維持 RUNNING
+        chains_raw = state.get("reasoning_chains") or []
+ 
+        if not candidates:
             return
-
+ 
+        chosen_idx: Optional[int] = None
+ 
+        # ── 層 1：使用 LLM 提供的 selected_index（1-based → 轉成 0-based）──
+        llm_index = bot_resp.get("selected_index")
+        if isinstance(llm_index, (int, float)) and llm_index is not None:
+            llm_index = int(llm_index)
+            if 1 <= llm_index <= len(candidates):
+                chosen_idx = llm_index - 1
+ 
+        # ── 層 2：Fallback — 規則式解析 user_input ──
+        if chosen_idx is None:
+            chosen_idx = _parse_selection(user_input, candidates)
+ 
+        # ── 層 3：兩者皆失敗 → LLM 誤判，靜默維持 RUNNING ──
+        if chosen_idx is None:
+            return
+ 
         chosen        = candidates[chosen_idx]
         tools, params = _resolve_tools_from_candidate(
             chosen, chains_raw, self._concept_to_agent
         )
-
+ 
         state["selected_index"] = chosen_idx
         state["tools"]          = tools
         state["parameters"]     = params
@@ -2603,7 +2648,14 @@ class MainAgent:
 
         # 4. 即時組裝 LangGraph (在 Python 中組裝圖表極快，微秒級別)
         def call_model(state: AgentState) -> AgentState:
-            response = llm_bound.invoke([SystemMessage(content=system_prompt)] + state["messages"])
+            # 避免在多輪/工具回合中，history 裡若意外包含 SystemMessage
+            # 造成 system prompt 疊加；本次一律只注入一份當輪動態 system_prompt。
+            normalized_messages: List[BaseMessage] = [
+                m for m in state["messages"] if not isinstance(m, SystemMessage)
+            ]
+            response = llm_bound.invoke(
+                [SystemMessage(content=system_prompt)] + normalized_messages
+            )
             return {"messages": [response]}
 
         def should_continue(state: AgentState) -> str:
