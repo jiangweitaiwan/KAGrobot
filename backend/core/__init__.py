@@ -1,0 +1,14 @@
+"""
+tools 套件：所有可用工具的集中匯出點。
+
+新增工具步驟：
+  1. 在 tools/ 下建立新的 .py 檔案（參考 dsge.py 格式）
+  2. 在該檔案底部用 register_langchain_tool / @register_tool 完成註冊
+  3. 在本 __init__.py 中 import 你的新模組（觸發副作用式註冊）
+  4. 在 core/registry.py 的 TOOLS_REGISTRY / AGENTS_REGISTRY 補充描述
+"""
+
+# 觸發各工具模組的副作用式註冊
+from tools import data_collection  # noqa: F401
+from tools import dsge              # noqa: F401
+from tools import knowledge         # noqa: F401
