@@ -169,7 +169,7 @@ export default function KnowledgeGraph({
           .strength(0.6)
       )
       .force("charge",
-        d3.forceManyBody()
+        d3.forceManyBody<GraphNode>()
           .strength((d) => (d.node_type === "paper" ? -80 : -200))
       )
       .force("center", d3.forceCenter(width / 2, height / 2))
