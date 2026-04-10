@@ -8,7 +8,4 @@ tools 套件：所有可用工具的集中匯出點。
   4. 在 core/registry.py 的 TOOLS_REGISTRY / AGENTS_REGISTRY 補充描述
 """
 
-# 觸發各工具模組的副作用式註冊
-from tools import data_collection  # noqa: F401
-from tools import dsge              # noqa: F401
-from tools import knowledge         # noqa: F401
+
