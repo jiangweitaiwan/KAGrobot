@@ -2,7 +2,7 @@ name: Auto Deploy Backend
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main" ,"KAGrobot/v2"]
     paths:
       - 'backend/**' # 只有 backend 有變動時才跑
   workflow_dispatch:

@@ -1,122 +1,189 @@
 :root {
   color-scheme: dark;
-  --bg: #0a0f1f;
-  --panel: #11182b;
-  --panel-2: #161f35;
-  --text: #f6f8ff;
-  --muted: #9db0db;
-  --user: #2d67ff;
-  --ai: #203052;
-  --border: #26365e;
+  --bg:       #0a0f1f;
+  --panel:    #11182b;
+  --panel-2:  #161f35;
+  --text:     #f6f8ff;
+  --muted:    #9db0db;
+  --user:     #2d67ff;
+  --ai:       #203052;
+  --border:   #26365e;
+  --teal:     #00d4aa;
 }
 
-* {
-  box-sizing: border-box;
-}
+* { box-sizing: border-box; }
 
 body {
   margin: 0;
-  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: "IBM Plex Sans", "Noto Sans TC", system-ui, sans-serif;
   background: radial-gradient(circle at top, #111a34, var(--bg) 50%);
   color: var(--text);
 }
 
+/* ── outer shell ──────────────────────────────────────────── */
 main {
-  max-width: 960px;
+  max-width: 1200px;
   margin: 0 auto;
   min-height: 100vh;
   display: grid;
-  grid-template-rows: auto 1fr auto;
-  gap: 16px;
+  grid-template-rows: auto 1fr;
+  gap: 12px;
   padding: 20px;
 }
 
+/* ── header ───────────────────────────────────────────────── */
 header {
-  display: flex;
+  display:         flex;
   justify-content: space-between;
-  align-items: center;
-  gap: 12px;
+  align-items:     center;
+  gap:             12px;
 }
 
-h1 {
-  margin: 0;
-  font-size: 1.1rem;
-}
+h1   { margin: 0; font-size: 1.1rem; }
 
 .session {
-  color: var(--muted);
-  font-size: 0.85rem;
+  color:      var(--muted);
+  font-size:  0.8rem;
   word-break: break-all;
 }
 
+/* ── buttons ──────────────────────────────────────────────── */
 button {
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--text);
+  border:        1px solid var(--border);
+  background:    var(--panel-2);
+  color:         var(--text);
   border-radius: 10px;
-  padding: 8px 12px;
-  cursor: pointer;
+  padding:       8px 12px;
+  cursor:        pointer;
+  transition:    background 0.15s, border-color 0.15s;
+}
+button:hover:not(:disabled) { background: #1f2e50; }
+button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* ── content area: chat + optional graph ─────────────────── */
+.content-area {
+  display:   flex;
+  gap:       16px;
+  min-height: 0;
+  height:    calc(100vh - 100px);
 }
 
-button:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
+/* ── chat column ─────────────────────────────────────────── */
+.chat-column {
+  display:        flex;
+  flex-direction: column;
+  gap:            12px;
+  flex:           1 1 380px;
+  min-width:      0;
 }
 
 .chat-box {
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 16px;
-  background: color-mix(in oklab, var(--panel), black 7%);
-  overflow-y: auto;
-  display: flex;
+  border:         1px solid var(--border);
+  border-radius:  16px;
+  padding:        16px;
+  background:     color-mix(in oklab, var(--panel), black 7%);
+  overflow-y:     auto;
+  display:        flex;
   flex-direction: column;
-  gap: 12px;
+  gap:            12px;
+  flex:           1;
 }
 
 .msg {
-  max-width: 85%;
+  max-width:   85%;
   border-radius: 14px;
-  padding: 10px 12px;
+  padding:     10px 12px;
   white-space: pre-wrap;
   line-height: 1.5;
 }
+.msg.user { align-self: flex-end; background: var(--user); }
+.msg.ai   { align-self: flex-start; background: var(--ai); border: 1px solid var(--border); }
 
-.msg.user {
-  align-self: flex-end;
-  background: var(--user);
-}
-
-.msg.ai {
-  align-self: flex-start;
-  background: var(--ai);
-  border: 1px solid var(--border);
-}
-
-.meta {
-  color: var(--muted);
-  font-size: 0.8rem;
-  margin-top: 4px;
-}
+.meta   { color: var(--muted); font-size: 0.8rem; margin-top: 4px; }
+.status { color: var(--muted); font-size: 0.85rem; }
 
 form {
-  display: grid;
+  display:               grid;
   grid-template-columns: 1fr auto;
-  gap: 12px;
+  gap:                   12px;
 }
-
 textarea {
-  resize: none;
+  resize:        none;
   border-radius: 12px;
-  border: 1px solid var(--border);
-  background: var(--panel);
-  color: var(--text);
-  padding: 12px;
-  min-height: 72px;
-  font-size: 0.95rem;
+  border:        1px solid var(--border);
+  background:    var(--panel);
+  color:         var(--text);
+  padding:       12px;
+  min-height:    72px;
+  font-size:     0.95rem;
 }
 
-.status {
-  color: var(--muted);
-  font-size: 0.85rem;
+/* ── graph panel ─────────────────────────────────────────── */
+.graph-panel {
+  flex:           0 0 540px;
+  display:        flex;
+  flex-direction: column;
+  gap:            10px;
+  border:         1px solid var(--border);
+  border-radius:  16px;
+  padding:        14px;
+  background:     color-mix(in oklab, var(--panel), black 10%);
+  overflow:       hidden;
 }
+
+.graph-header {
+  display:     flex;
+  align-items: center;
+  gap:         10px;
+  flex-shrink: 0;
+}
+.graph-title {
+  font-size:   0.85rem;
+  font-weight: 600;
+  color:       var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.graph-selected {
+  font-size: 0.8rem;
+  color:     var(--teal);
+}
+
+/* ── path legend chips ───────────────────────────────────── */
+.path-legend {
+  display:    flex;
+  flex-wrap:  wrap;
+  gap:        6px;
+  flex-shrink: 0;
+}
+.path-chip {
+  font-size:     0.75rem;
+  padding:       4px 10px;
+  border-radius: 20px;
+  border:        1px solid var(--border);
+  background:    transparent;
+  color:         var(--muted);
+  cursor:        pointer;
+  transition:    border-color 0.15s, color 0.15s, background 0.15s;
+}
+.path-chip:hover { background: #1a2840; }
+.path-chip.active {
+  background: #0d1a30;
+  font-weight: 600;
+}
+
+/* ── confirm button ──────────────────────────────────────── */
+.confirm-btn {
+  margin-top:    auto;
+  width:         100%;
+  background:    linear-gradient(135deg, #0d3060, #0a4a38);
+  border:        1px solid var(--teal);
+  color:         var(--teal);
+  font-size:     0.85rem;
+  font-weight:   600;
+  border-radius: 10px;
+  padding:       10px;
+  cursor:        pointer;
+  transition:    background 0.2s;
+}
+.confirm-btn:hover { background: linear-gradient(135deg, #143878, #0d5a46); }

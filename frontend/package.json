@@ -3,20 +3,22 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev":   "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint":  "next lint"
   },
   "dependencies": {
-    "next": "latest",
-    "react": "latest",
-    "react-dom": "latest"
+    "next":       "latest",
+    "react":      "latest",
+    "react-dom":  "latest",
+    "d3":         "^7.9.0"
   },
   "devDependencies": {
-    "typescript": "latest",
-    "@types/node": "latest",
-    "@types/react": "latest",
-    "@types/react-dom": "latest"
+    "typescript":        "latest",
+    "@types/node":       "latest",
+    "@types/react":      "latest",
+    "@types/react-dom":  "latest",
+    "@types/d3":         "^7.4.3"
   }
 }
