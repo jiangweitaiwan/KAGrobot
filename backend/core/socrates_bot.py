@@ -31,6 +31,7 @@ import neo4jreasoningretriever as nrr
 from core.registry import (
     AGENTS_REGISTRY, AgentType, CONCEPT_TO_AGENT, TOOLS_REGISTRY,
 )
+from core.llm_retry import call_with_retry
 from settings import get_settings
 
 Neo4jReasoningRetriever = nrr.Neo4jReasoningRetriever
@@ -453,7 +454,8 @@ class SocratesChatBot:
         tool_map = {self._retrieve_tool.name: self._retrieve_tool}
 
         def agent_node(state: _InternalState) -> dict:
-            return {"messages": [llm.invoke(state["messages"])]}
+            response = call_with_retry(lambda: llm.invoke(state["messages"]))
+            return {"messages": [response]}
 
         def tool_executor_node(state: _InternalState) -> dict:
             last          = state["messages"][-1]

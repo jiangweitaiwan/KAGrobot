@@ -23,6 +23,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from typing_extensions import Annotated
 
+from core.llm_retry import call_with_retry
 from core.registry import AGENTS_REGISTRY, AgentType, TOOLS_REGISTRY
 from core.socrates_bot import (
     ChatState,
@@ -269,8 +270,8 @@ class MainAgent:
             normalized = [
                 m for m in state["messages"] if not isinstance(m, SystemMessage)
             ]
-            response = llm_bound.invoke(
-                [SystemMessage(content=system_prompt)] + normalized
+            response = call_with_retry(
+                lambda: llm_bound.invoke([SystemMessage(content=system_prompt)] + normalized)
             )
             return {"messages": [response]}
 
