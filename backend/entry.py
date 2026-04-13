@@ -1,14 +1,18 @@
 # -*- coding: utf-8 -*-
 """entry.py  — FastAPI + LangGraph orchestrator.
 
-Changes vs original:
-  • ChatResponse gains an optional `graph_data` field.
-  • /chat endpoint attaches graph_data in two cases:
-      1. socrates phase just turned "running" and retrieve_graph data is
-         available on socrates_state  (candidate browsing stage).
-      2. socrates phase == "resolved"  (user confirmed a selection).
-  • SocratesChatBot._make_retrieve_tool now stores the raw retrieve_graph
-    payload into socrates_state["graph_data"] so we can pass it through.
+Workflow:
+  socratic_node
+      └─ (resolved)             → resolved_node
+      └─ (still running)        → END
+
+  resolved_node
+      └─ (no selected_path_id)  → END   # 回傳 graph_data，等前端點選
+      └─ (has selected_path_id) → main_agent_node
+
+  main_agent_node → END
+
+entry_point router accepts phases: "socratic" | "resolved" | "main_agent"
 """
 
 from __future__ import annotations
@@ -47,11 +51,12 @@ from MainAgent import MainAgent
 # ======================================================================
 
 class OrchestratorState(TypedDict, total=False):
-    messages:       Annotated[List[BaseMessage], add_messages]
-    phase:          str
-    socrates_state: ChatState
-    main_state:     Annotated[List[BaseMessage], add_messages]
-    handoff_task:   Optional[str]
+    messages:         Annotated[List[BaseMessage], add_messages]
+    phase:            str
+    socrates_state:   ChatState
+    main_state:       Annotated[List[BaseMessage], add_messages]
+    handoff_task:     Optional[str]
+    selected_path_id: Optional[int]   # 前端用戶在圖譜上點選並確認的 path id
 
 
 # ======================================================================
@@ -72,86 +77,21 @@ def _build_retriever() -> Neo4jReasoningRetriever:
     return retriever
 
 
-shared_retriever = _build_retriever()
-s = get_settings()
-
+shared_retriever    = _build_retriever()
+s                   = get_settings()
 shared_socrates_bot = SocratesChatBot(
     retriever=shared_retriever,
     model=s.socrates_model,
     api_key=s.google_api_key,
 )
-shared_main_agent = MainAgent(
+shared_main_agent   = MainAgent(
     model=s.main_agent_model,
     api_key=s.google_api_key,
 )
 
 
 # ======================================================================
-# Handoff task builder  (unchanged)
-# ======================================================================
-
-def _build_handoff_task(socrates_state: ChatState) -> str:
-    query      = socrates_state.get("query") or "（未提供）"
-    model_name = "（未指定）"
-    candidates = socrates_state.get("candidates") or []
-    selected_idx = socrates_state.get("selected_index")
-    if selected_idx is not None and candidates:
-        chosen = candidates[selected_idx] if selected_idx < len(candidates) else None
-        if chosen:
-            model_name = chosen.get("rc_name") or model_name
-
-    tools_info   = socrates_state.get("tools") or []
-    primary_tools = [t["tool_name"] for t in tools_info
-                     if not t.get("is_dependency", False)]
-    tools_str = "、".join(primary_tools) if primary_tools else "（無）"
-
-    return (
-        f"使用者需求：{query}\n"
-        f"選定模型：{model_name}\n"
-        f"可用工具：{tools_str}\n"
-        f"請根據以上需求與工具，開始執行分析。"
-    )
-
-
-# ======================================================================
-# Graph data extractor
-# ======================================================================
-
-def _extract_graph_data(socrates_state: Optional[ChatState]) -> Optional[Dict[str, Any]]:
-    """Pull the graph_data dict stored by _make_retrieve_tool, if present."""
-    if not socrates_state or not isinstance(socrates_state, dict):
-        return None
-    return socrates_state.get("graph_data")
-
-
-def _build_resolved_graph_data(socrates_state: ChatState) -> Optional[Dict[str, Any]]:
-    """After resolution, annotate the graph_data with the selected path_id
-    so the front-end knows which path to highlight immediately."""
-    gd = _extract_graph_data(socrates_state)
-    if not gd:
-        return None
-
-    selected_idx = socrates_state.get("selected_index")
-    candidates   = socrates_state.get("candidates") or []
-
-    if selected_idx is None or not candidates:
-        return gd
-
-    chosen    = candidates[selected_idx] if selected_idx < len(candidates) else None
-    rc_name   = (chosen.get("rc_name") or "").lower() if chosen else ""
-
-    # find the path whose final_label matches the chosen RC name
-    selected_path_id: Optional[int] = None
-    for path in gd.get("paths", []):
-        if (path.get("final_label") or "").lower() == rc_name:
-            selected_path_id = path["path_id"]
-            break
-
-    return {**gd, "selected_path_id": selected_path_id}
-
-
-# ======================================================================
-# LangGraph nodes
+# Pure helpers
 # ======================================================================
 
 def _last_human_content(messages: List[BaseMessage]) -> Optional[str]:
@@ -161,6 +101,112 @@ def _last_human_content(messages: List[BaseMessage]) -> Optional[str]:
     return None
 
 
+def _find_path_by_id(
+    graph_data: Optional[Dict[str, Any]],
+    path_id: int,
+) -> Optional[Dict[str, Any]]:
+    if not graph_data:
+        return None
+    for path in graph_data.get("paths", []):
+        if path.get("path_id") == path_id:
+            return path
+    return None
+
+
+def _build_resolved_graph_data(
+    socrates_state: ChatState,
+) -> Optional[Dict[str, Any]]:
+    """附上 selected_path_id 標記，供前端立即 highlight 對應路徑。"""
+    graph_data = socrates_state.get("graph_data")
+    if not graph_data:
+        return None
+
+    selected_idx = socrates_state.get("selected_index")
+    candidates   = socrates_state.get("candidates") or []
+    if selected_idx is None or not candidates:
+        return graph_data
+
+    chosen  = candidates[selected_idx] if selected_idx < len(candidates) else None
+    rc_name = (chosen.get("rc_name") or "").lower() if chosen else ""
+
+    selected_path_id: Optional[int] = None
+    for path in graph_data.get("paths", []):
+        if (path.get("final_label") or "").lower() == rc_name:
+            selected_path_id = path["path_id"]
+            break
+
+    return {**graph_data, "selected_path_id": selected_path_id}
+
+
+def _build_handoff_task(
+    socrates_state: ChatState,
+    selected_path:  Optional[Dict[str, Any]] = None,
+) -> str:
+    """建構 MainAgent 的 handoff task 字串。
+
+    優先使用用戶在知識圖譜上點選的 selected_path（含完整節點序列與論文資訊）。
+    若無 selected_path，退回原本的 candidates[selected_index] 邏輯。
+    """
+    query = socrates_state.get("query") or "（未提供）"
+
+    if selected_path:
+        model_name  = selected_path.get("final_label") or "（未指定）"
+        graph_data  = socrates_state.get("graph_data") or {}
+        nodes_by_id = {n["id"]: n for n in graph_data.get("nodes", [])}
+
+        # concept 節點序列
+        path_labels: List[str] = []
+        for nid in (selected_path.get("node_ids") or []):
+            node = nodes_by_id.get(nid)
+            if node and node.get("node_type") == "concept":
+                path_labels.append(node.get("label", nid))
+        path_description = " → ".join(path_labels) if path_labels else model_name
+
+        # paper 節點資訊
+        paper_info_lines: List[str] = []
+        for nid in (selected_path.get("node_ids") or []):
+            node = nodes_by_id.get(nid)
+            if node and node.get("node_type") == "paper":
+                meta        = node.get("meta") or {}
+                line        = f"  論文：{node.get('label', '')}"
+                premises    = meta.get("conceptual_premises") or ""
+                constraints = meta.get("contextual_model_constraints") or ""
+                if premises:
+                    line += f"\n    前提假設：{premises}"
+                if constraints:
+                    line += f"\n    模型約束：{constraints}"
+                paper_info_lines.append(line)
+        paper_section = "\n".join(paper_info_lines) if paper_info_lines else "（無論文資訊）"
+
+    else:
+        model_name   = "（未指定）"
+        candidates   = socrates_state.get("candidates") or []
+        selected_idx = socrates_state.get("selected_index")
+        if selected_idx is not None and candidates:
+            chosen = candidates[selected_idx] if selected_idx < len(candidates) else None
+            if chosen:
+                model_name = chosen.get("rc_name") or model_name
+        path_description = model_name
+        paper_section    = "（無路徑資訊）"
+
+    tools_info    = socrates_state.get("tools") or []
+    primary_tools = [t["tool_name"] for t in tools_info if not t.get("is_dependency", False)]
+    tools_str     = "、".join(primary_tools) if primary_tools else "（無）"
+
+    return (
+        f"使用者需求：{query}\n"
+        f"選定模型：{model_name}\n"
+        f"推理路徑：{path_description}\n"
+        f"關聯論文資訊：\n{paper_section}\n"
+        f"可用工具：{tools_str}\n"
+        f"請根據以上需求、推理路徑與工具，開始執行分析。"
+    )
+
+
+# ======================================================================
+# LangGraph nodes
+# ======================================================================
+
 def socratic_node(state: OrchestratorState) -> OrchestratorState:
     messages = state.get("messages") or []
     user_msg = _last_human_content(messages)
@@ -168,34 +214,80 @@ def socratic_node(state: OrchestratorState) -> OrchestratorState:
         return {}
 
     old_socrates_state = state.get("socrates_state") or SocratesChatBot.init_state()
-    new_socrates_state = shared_socrates_bot.process_message(
-        old_socrates_state, user_msg)
+    new_socrates_state = shared_socrates_bot.process_message(old_socrates_state, user_msg)
 
-    is_resolved = (
-        new_socrates_state.get("phase") == ConversationPhase.RESOLVED.value)
-    next_phase  = "main_agent" if is_resolved else "socratic"
+    is_resolved = new_socrates_state.get("phase") == ConversationPhase.RESOLVED.value
 
     if is_resolved:
-        model_name = "（未指定）"
+        model_name   = "（未指定）"
         candidates   = new_socrates_state.get("candidates") or []
         selected_idx = new_socrates_state.get("selected_index")
         if selected_idx is not None and candidates:
             chosen = candidates[selected_idx] if selected_idx < len(candidates) else None
             if chosen:
                 model_name = chosen.get("rc_name") or model_name
-        reply_text   = (
+        reply_text = (
             f"好的，已確認您選擇「{model_name}」。\n"
-            f"我現在開始為您進行分析，請稍候⋯⋯"
+            f"知識圖譜載入中，請在右側圖譜中點選您想分析的路徑，"
+            f"確認後系統將開始執行分析。"
         )
-        handoff_task = _build_handoff_task(new_socrates_state)
+        next_phase = "resolved"
     else:
-        reply_text   = shared_socrates_bot.get_last_reply(new_socrates_state)
-        handoff_task = None
+        reply_text = shared_socrates_bot.get_last_reply(new_socrates_state)
+        next_phase = "socratic"
 
     return OrchestratorState(
         messages       = [AIMessage(content=reply_text)],
         phase          = next_phase,
         socrates_state = new_socrates_state,
+    )
+
+
+def resolved_node(state: OrchestratorState) -> OrchestratorState:
+    """resolved 後的兩段式處理節點。
+
+    第一段（selected_path_id is None）：
+      - 呼叫 retrieve_graph()，寫入 socrates_state["graph_data"]
+      - 回傳給前端，等待用戶點選路徑
+
+    第二段（selected_path_id is not None）：
+      - 從 graph_data 找到對應 path
+      - 建構 handoff_task
+      - 交由 resolved_router 導向 main_agent_node
+    """
+    socrates_state   = state.get("socrates_state")
+    selected_path_id = state.get("selected_path_id")
+
+    if socrates_state is None:
+        return OrchestratorState(
+            messages=[AIMessage(content="對話狀態遺失，請重新開始。")],
+            phase="socratic",
+        )
+
+    # ── 第一段：尚無 path 選擇，執行 retrieve_graph ──────────────
+    if selected_path_id is None:
+        query = socrates_state.get("query") or ""
+        try:
+            graph_data = shared_retriever.retrieve_graph(query)
+        except Exception:
+            graph_data = None
+        socrates_state["graph_data"] = graph_data
+
+        return OrchestratorState(
+            phase          = "resolved",
+            socrates_state = socrates_state,
+        )
+
+    # ── 第二段：有 path 選擇，建構 handoff_task ──────────────────
+    selected_path = _find_path_by_id(
+        socrates_state.get("graph_data"),
+        selected_path_id,
+    )
+    handoff_task = _build_handoff_task(socrates_state, selected_path)
+
+    return OrchestratorState(
+        phase          = "main_agent",
+        socrates_state = socrates_state,
         handoff_task   = handoff_task,
     )
 
@@ -209,13 +301,9 @@ def main_agent_node(state: OrchestratorState) -> OrchestratorState:
         )
 
     handoff_task = state.get("handoff_task")
-    if handoff_task:
-        user_msg = handoff_task
-    else:
-        messages = state.get("messages") or []
-        user_msg = _last_human_content(messages)
-        if not user_msg:
-            return {}
+    user_msg     = handoff_task or _last_human_content(state.get("messages") or [])
+    if not user_msg:
+        return {}
 
     history: List[BaseMessage] = state.get("main_state") or []
     result = shared_main_agent.chat(
@@ -234,28 +322,49 @@ def main_agent_node(state: OrchestratorState) -> OrchestratorState:
 
 
 # ======================================================================
-# LangGraph workflow
+# LangGraph routers
 # ======================================================================
 
-def router(state: OrchestratorState) -> str:
-    return state.get("phase") or "socratic"
+def entry_router(state: OrchestratorState) -> str:
+    phase = state.get("phase") or "socratic"
+    if phase in ("socratic", "resolved", "main_agent"):
+        return phase
+    return "socratic"
 
 
-def socratic_to_next_router(state: OrchestratorState) -> str:
+def socratic_router(state: OrchestratorState) -> str:
+    return "resolved" if state.get("phase") == "resolved" else "end"
+
+
+def resolved_router(state: OrchestratorState) -> str:
     return "main_agent" if state.get("phase") == "main_agent" else "end"
 
 
+# ======================================================================
+# Build workflow
+# ======================================================================
+
 workflow = StateGraph(OrchestratorState)
 workflow.add_node("socratic",   socratic_node)
+workflow.add_node("resolved",   resolved_node)
 workflow.add_node("main_agent", main_agent_node)
-workflow.set_conditional_entry_point(router, {
-    "socratic":   "socratic",
-    "main_agent": "main_agent",
-})
-workflow.add_conditional_edges("socratic", socratic_to_next_router, {
-    "main_agent": "main_agent",
-    "end":        END,
-})
+
+workflow.set_conditional_entry_point(
+    entry_router,
+    {
+        "socratic":   "socratic",
+        "resolved":   "resolved",
+        "main_agent": "main_agent",
+    },
+)
+workflow.add_conditional_edges(
+    "socratic", socratic_router,
+    {"resolved": "resolved", "end": END},
+)
+workflow.add_conditional_edges(
+    "resolved", resolved_router,
+    {"main_agent": "main_agent", "end": END},
+)
 workflow.add_edge("main_agent", END)
 
 memory           = MemorySaver()
@@ -267,16 +376,16 @@ orchestrator_app = workflow.compile(checkpointer=memory)
 # ======================================================================
 
 class ChatRequest(BaseModel):
-    session_id: str
-    message:    str
-    phase:      Optional[str] = None
+    session_id:       str
+    message:          str
+    phase:            Optional[str] = None
+    selected_path_id: Optional[int] = None   # 前端圖譜點選後傳入
 
 
 class ChatResponse(BaseModel):
     reply:          str
     phase:          str
-    socrates_phase: Optional[str]          = None
-    # NEW — D3 graph payload; present during socratic stage and on resolution
+    socrates_phase: Optional[str]            = None
     graph_data:     Optional[Dict[str, Any]] = None
 
 
@@ -295,18 +404,19 @@ if cors_origins:
 
 @api.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest) -> ChatResponse:
-    config = {"configurable": {"thread_id": request.session_id}}
+    config        = {"configurable": {"thread_id": request.session_id}}
     initial_phase = request.phase or "socratic"
 
-    result = await orchestrator_app.ainvoke(
-        {
-            "messages": [HumanMessage(content=request.message)],
-            "phase":    initial_phase,
-        },
-        config=config,
-    )
+    invoke_input: dict = {
+        "messages": [HumanMessage(content=request.message)],
+        "phase":    initial_phase,
+    }
+    if request.selected_path_id is not None:
+        invoke_input["selected_path_id"] = request.selected_path_id
 
-    messages: List[BaseMessage] = result["messages"]
+    result = await orchestrator_app.ainvoke(invoke_input, config=config)
+
+    messages   = result.get("messages") or []
     last_msg   = messages[-1] if messages else AIMessage(content="")
     reply_text = getattr(last_msg, "content", str(last_msg))
 
@@ -317,15 +427,16 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
         else None
     )
 
-    # ── graph_data assembly ──────────────────────────────────
+    # graph_data：僅在 resolved_node 第一段結束（等待前端點選）時回傳
     graph_data: Optional[Dict[str, Any]] = None
-    if socrates_state and isinstance(socrates_state, dict):
-        if socrates_phase == ConversationPhase.RESOLVED.value:
-            # resolved: annotate which path was selected
-            graph_data = _build_resolved_graph_data(socrates_state)
-        else:
-            # still running: pass raw graph for browsing
-            graph_data = _extract_graph_data(socrates_state)
+    if (
+        socrates_state
+        and isinstance(socrates_state, dict)
+        and socrates_phase == ConversationPhase.RESOLVED.value
+        and result.get("phase") == "resolved"
+        and request.selected_path_id is None
+    ):
+        graph_data = _build_resolved_graph_data(socrates_state)
 
     return ChatResponse(
         reply          = reply_text,

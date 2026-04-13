@@ -3,13 +3,10 @@ core/socrates_bot.py
 ─────────────────────────────────────────────────────────────
 SocratesChatBot：需求釐清 + 模型選擇的對話機器人。
 
-Changes vs original:
-  • ChatState gains  graph_data: Optional[Dict[str, Any]]
-  • _make_retrieve_tool: also calls retriever.retrieve_graph() and
-    embeds the result as "graph_data" in the tool's JSON response.
-  • tool_executor_node: reads "graph_data" from the tool response and
-    stores it in LangGraph state so entry.py can forward it to the
-    front-end.
+Changes:
+  • retrieve_concepts tool 只呼叫 retrieve()，不再呼叫 retrieve_graph()。
+  • graph_data 改由 entry.py 在 phase=resolved 後填入 socrates_state。
+  • ChatState.graph_data 欄位保留，供 entry.py 寫入。
 """
 
 from __future__ import annotations
@@ -59,12 +56,12 @@ class ChatState(TypedDict, total=False):
     selected_index:   Optional[int]
     tools:            Optional[List[dict]]
     parameters:       Optional[List[dict]]
-    # ── NEW ──────────────────────────────────────────────────
-    graph_data:       Optional[Dict[str, Any]]   # D3 graph payload
+    # graph_data 由 entry.py 在 phase=resolved 後填入
+    graph_data:       Optional[Dict[str, Any]]
 
 
 # ═══════════════════════════════════════════════════════════════
-# Tool dependency resolver  (unchanged)
+# Tool dependency resolver
 # ═══════════════════════════════════════════════════════════════
 
 def collect_tools_with_deps(tool_names: List[str]) -> List[str]:
@@ -93,11 +90,10 @@ class _InternalState(TypedDict):
     candidates: Optional[List[dict]]
     chains_raw: Optional[List[dict]]
     query:      Optional[str]
-    graph_data: Optional[Dict[str, Any]]   # ← NEW
 
 
 # ═══════════════════════════════════════════════════════════════
-# System prompt & OutputSchema  (unchanged)
+# System prompt & OutputSchema
 # ═══════════════════════════════════════════════════════════════
 
 _SYSTEM_PROMPT = """\
@@ -154,7 +150,7 @@ class OutputSchema(BaseModel):
 
 
 # ═══════════════════════════════════════════════════════════════
-# Serialization helpers  (unchanged)
+# Serialization helpers
 # ═══════════════════════════════════════════════════════════════
 
 def _concept_to_dict(c: ConceptNode) -> dict:
@@ -195,7 +191,7 @@ def _serialize_chain(chain: ReasoningChain) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════
-# Internal helpers  (unchanged)
+# Internal helpers
 # ═══════════════════════════════════════════════════════════════
 
 def _resolve_agent_type(
@@ -307,7 +303,7 @@ def _parse_selection(text: str, candidates: List[dict]) -> Optional[int]:
 
 
 # ═══════════════════════════════════════════════════════════════
-# Reasoning chain helpers  (unchanged)
+# Reasoning chain helpers
 # ═══════════════════════════════════════════════════════════════
 
 def _extract_selected_chain(socrates_state: ChatState) -> Optional[dict]:
@@ -374,7 +370,7 @@ class SocratesChatBot:
         self._graph          = self._build_graph()
 
     # ------------------------------------------------------------------
-    # Public API  (unchanged)
+    # Public API
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -389,7 +385,7 @@ class SocratesChatBot:
             selected_index   = None,
             tools            = None,
             parameters       = None,
-            graph_data       = None,   # ← NEW
+            graph_data       = None,
         )
 
     def process_message(self, state: ChatState, user_input: str) -> ChatState:
@@ -414,7 +410,6 @@ class SocratesChatBot:
             "candidates": state.get("candidates") or [],
             "chains_raw": state.get("chains_raw") or [],
             "query":      state.get("query"),
-            "graph_data": state.get("graph_data"),   # ← pass through
         })
         new_agent_msgs: List[BaseMessage] = graph_result["messages"]
         state["agent_messages"] = new_agent_msgs
@@ -425,9 +420,6 @@ class SocratesChatBot:
             state["candidates"] = graph_result["candidates"]
         if graph_result.get("chains_raw"):
             state["reasoning_chains"] = graph_result["chains_raw"]
-        # ── NEW: persist graph_data onto state ──
-        if graph_result.get("graph_data"):
-            state["graph_data"] = graph_result["graph_data"]
 
         bot_resp = self._parse_bot_response(new_agent_msgs)
         ai_text  = bot_resp.get("ai_message", "")
@@ -481,9 +473,6 @@ class SocratesChatBot:
                     state_updates["candidates"] = data.get("candidates", [])
                     state_updates["chains_raw"] = data.get("chains_raw", [])
                     state_updates["query"]      = data.get("query", "")
-                    # ── NEW: capture graph_data ──────────────────────
-                    if data.get("graph_data"):
-                        state_updates["graph_data"] = data["graph_data"]
                     slim = data.get("display") or "（查無結果）"
                 else:
                     slim = data.get("message") or raw_result
@@ -511,7 +500,8 @@ class SocratesChatBot:
         return g.compile()
 
     # ------------------------------------------------------------------
-    # retrieve_concepts tool  — UPDATED
+    # retrieve_concepts tool — 只呼叫 retrieve()，不呼叫 retrieve_graph()
+    # retrieve_graph() 改由 entry.py 在 phase=resolved 後負責呼叫
     # ------------------------------------------------------------------
 
     def _make_retrieve_tool(self) -> StructuredTool:
@@ -521,16 +511,8 @@ class SocratesChatBot:
 
         def retrieve_concepts(query: str) -> str:
             """查詢知識圖譜，找出與使用者需求最相關的 Resulting Concept 清單。"""
-            # ── original: linear chains for candidate list ──
             chains: List[ReasoningChain] = retriever.retrieve(
                 query, top_k_entities=top_k)
-
-            # ── NEW: full branching graph for D3 visualisation ──
-            try:
-                graph_data = retriever.retrieve_graph(
-                    query, top_k_entities=top_k)
-            except Exception:
-                graph_data = None
 
             if not chains:
                 return json.dumps({
@@ -540,7 +522,6 @@ class SocratesChatBot:
                     "chains_raw": [],
                     "display":    "",
                     "query":      query,
-                    "graph_data": graph_data,
                 }, ensure_ascii=False)
 
             chains_raw = [_serialize_chain(c) for c in chains]
@@ -562,7 +543,6 @@ class SocratesChatBot:
                 "candidates": candidates,
                 "chains_raw": chains_raw,
                 "display":    "\n".join(lines),
-                "graph_data": graph_data,   # ← NEW
             }, ensure_ascii=False)
 
         return StructuredTool.from_function(
@@ -575,7 +555,7 @@ class SocratesChatBot:
         )
 
     # ------------------------------------------------------------------
-    # JSON parsing  (unchanged)
+    # JSON parsing
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -610,7 +590,7 @@ class SocratesChatBot:
         return {"action": "ask", "ai_message": raw, "selected_index": None}
 
     # ------------------------------------------------------------------
-    # Handle resolved  (unchanged)
+    # Handle resolved
     # ------------------------------------------------------------------
 
     def _handle_resolved(
@@ -645,7 +625,7 @@ class SocratesChatBot:
         state["phase"]          = ConversationPhase.RESOLVED.value
 
     # ------------------------------------------------------------------
-    # CLI interactive mode  (unchanged)
+    # CLI interactive mode
     # ------------------------------------------------------------------
 
     def run_interactive(self) -> ChatState:

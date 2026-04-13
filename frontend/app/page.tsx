@@ -4,7 +4,6 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import type { GraphData } from "./components/KnowledgeGraph";
 
-// D3 touches the DOM — load only on client
 const KnowledgeGraph = dynamic(
   () => import("./components/KnowledgeGraph"),
   { ssr: false }
@@ -113,14 +112,11 @@ export default function Page() {
     }
   }
 
-  // ── submit ────────────────────────────────────────────────
+  // ── 一般對話送出（socratic 階段）────────────────────────────
   async function submitMessage(e: FormEvent) {
     e.preventDefault();
     if (!canSend) return;
-    if (!API_BASE) {
-      setError("尚未設定 NEXT_PUBLIC_API_BASE_URL。");
-      return;
-    }
+    if (!API_BASE) { setError("尚未設定 NEXT_PUBLIC_API_BASE_URL。"); return; }
 
     const text = input.trim();
     setInput("");
@@ -136,7 +132,6 @@ export default function Page() {
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ session_id: sessionId, message: text, phase }),
       });
-
       if (!response.ok) throw new Error(`API error ${response.status}`);
 
       const data = (await response.json()) as ChatResponse;
@@ -144,11 +139,10 @@ export default function Page() {
       setPhase(nextPhase);
       localStorage.setItem(PHASE_KEY, nextPhase);
 
-      // ── graph data ──────────────────────────────────────
+      // graph_data 由後端在 resolved_node 第一段結束後回傳
       if (data.graph_data) {
         setGraphData(data.graph_data);
         setGraphVisible(true);
-        // if server already resolved a selected path, reflect it
         if (typeof data.graph_data.selected_path_id === "number") {
           const pid = data.graph_data.selected_path_id;
           setSelectedPathId(pid);
@@ -169,14 +163,58 @@ export default function Page() {
     }
   }
 
-  // ── when user manually selects a path in the graph ────────
+  // ── 確認路徑選擇 → resolved_node 第二段 → main_agent ────────
+  // phase 傳 "resolved"，selected_path_id 傳點選的 path id
+  // resolved_node 偵測到 selected_path_id 後建構 handoff_task，
+  // 再由 resolved_router 導向 main_agent_node
+  async function confirmPathSelection() {
+    if (selectedPathId === null || !sessionId || isLoading) return;
+    if (!API_BASE) { setError("尚未設定 NEXT_PUBLIC_API_BASE_URL。"); return; }
+
+    setError("");
+    setIsLoading(true);
+
+    const confirmMsg: ChatMessage = {
+      id:      createSessionId(),
+      role:    "user",
+      content: `確認選擇路徑：${selectedLabel || `路徑 ${selectedPathId + 1}`}`,
+    };
+    setMessages((prev) => [...prev, confirmMsg]);
+
+    try {
+      const response = await fetch(`${API_BASE.replace(/\/$/, "")}/chat`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({
+          session_id:       sessionId,
+          message:          `確認選擇路徑：${selectedLabel || selectedPathId}`,
+          phase:            "resolved",        // ← 進入 resolved_node 第二段
+          selected_path_id: selectedPathId,    // ← resolved_node 用此建構 handoff_task
+        }),
+      });
+      if (!response.ok) throw new Error(`API error ${response.status}`);
+
+      const data = (await response.json()) as ChatResponse;
+      const nextPhase = data.phase || "main_agent";
+      setPhase(nextPhase);
+      localStorage.setItem(PHASE_KEY, nextPhase);
+
+      await typewriterAppend(data.reply || "");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "請求失敗，請稍後重試");
+      setMessages((prev) => [
+        ...prev,
+        { id: createSessionId(), role: "ai", content: "抱歉，連線失敗，請稍後再試。" },
+      ]);
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  // ── 用戶在圖上點選節點 ────────────────────────────────────
   function handlePathSelect(pathId: number, finalLabel: string) {
     setSelectedPathId(pathId);
     setSelectedLabel(finalLabel);
-    // If still in socratic phase, auto-fill the input with the selection
-    if (phase === "socratic") {
-      setInput(`我選擇「${finalLabel}」`);
-    }
   }
 
   // ── persist messages ──────────────────────────────────────
@@ -206,7 +244,9 @@ export default function Page() {
   // Render
   // ─────────────────────────────────────────────────────────
 
-  const showGraph = graphVisible && graphData && graphData.nodes.length > 0;
+  const showGraph   = graphVisible && graphData && graphData.nodes.length > 0;
+  // confirm 按鈕：graph 顯示中 + phase 仍在 resolved（等待點選）+ 已有選擇
+  const showConfirm = showGraph && phase === "resolved" && selectedLabel !== null;
 
   return (
     <main className={showGraph ? "with-graph" : ""}>
@@ -233,7 +273,7 @@ export default function Page() {
         </div>
       </header>
 
-      {/* ── content area: chat + graph side by side ── */}
+      {/* ── content area ── */}
       <div className="content-area">
         {/* chat column */}
         <div className="chat-column">
@@ -269,12 +309,9 @@ export default function Page() {
           <div className="graph-panel">
             <div className="graph-header">
               <span className="graph-title">知識圖譜</span>
-              {selectedLabel && (
-                <span className="graph-selected">
-                  ◉ 已選：{selectedLabel}
-                </span>
-              )}
-              {!selectedLabel && (
+              {selectedLabel ? (
+                <span className="graph-selected">◉ 已選：{selectedLabel}</span>
+              ) : (
                 <span className="meta">點擊節點選取路徑</span>
               )}
             </div>
@@ -310,15 +347,16 @@ export default function Page() {
               height={400}
             />
 
-            {/* confirm selection button (socratic phase only) */}
-            {phase === "socratic" && selectedLabel && (
+            {/* 確認按鈕：直接進入 resolved_node 第二段，不填 input */}
+            {showConfirm && (
               <button
                 className="confirm-btn"
-                onClick={() => {
-                  setInput(`我選擇「${selectedLabel}」`);
-                }}
+                onClick={confirmPathSelection}
+                disabled={isLoading}
               >
-                確認選擇「{selectedLabel}」→
+                {isLoading
+                  ? "分析中…"
+                  : `確認選擇「${selectedLabel}」，開始分析 →`}
               </button>
             )}
           </div>
@@ -328,7 +366,6 @@ export default function Page() {
   );
 }
 
-// path colour palette (matches KnowledgeGraph.tsx TOKEN.path_colors)
 const PATH_COLORS = [
   "#4f8ef7", "#00d4aa", "#e8a030", "#e85d60",
   "#a060f0", "#3dd090", "#f07050", "#60b0f0",
