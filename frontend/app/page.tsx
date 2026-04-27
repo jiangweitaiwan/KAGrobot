@@ -65,10 +65,11 @@ export default function Page() {
   const [error,          setError]          = useState("");
 
   // ── graph state ───────────────────────────────────────────
-  const [graphData,      setGraphData]      = useState<GraphData | null>(null);
-  const [selectedPathId, setSelectedPathId] = useState<number | null>(null);
-  const [selectedLabel,  setSelectedLabel]  = useState<string | null>(null);
-  const [graphVisible,   setGraphVisible]   = useState(false);
+  const [graphData,        setGraphData]        = useState<GraphData | null>(null);
+  const [selectedPathId,   setSelectedPathId]   = useState<number | null>(null);
+  const [selectedLabel,    setSelectedLabel]    = useState<string | null>(null);
+  const [confirmedPathId,  setConfirmedPathId]  = useState<number | null>(null);
+  const [graphVisible,     setGraphVisible]     = useState(false);
 
   const boxRef = useRef<HTMLDivElement | null>(null);
 
@@ -163,23 +164,33 @@ export default function Page() {
     }
   }
 
-  // ── 確認路徑選擇 → resolved_node 第二段 → main_agent ────────
-  // phase 傳 "resolved"，selected_path_id 傳點選的 path id
-  // resolved_node 偵測到 selected_path_id 後建構 handoff_task，
-  // 再由 resolved_router 導向 main_agent_node
+  // ── 確認路徑選擇（首次或重選皆使用此函式）──────────────────
+  // phase="resolved" 時走 resolved_node 第二段 → main_agent_node
+  // phase="main_agent" 時直接走 main_agent_node，由後端判斷 is_reselect
   async function confirmPathSelection() {
     if (selectedPathId === null || !sessionId || isLoading) return;
     if (!API_BASE) { setError("尚未設定 NEXT_PUBLIC_API_BASE_URL。"); return; }
 
+    // 重選：若 selectedPathId 與已確認的相同，不送出
+    if (selectedPathId === confirmedPathId && phase === "main_agent") return;
+
     setError("");
     setIsLoading(true);
 
+    const isReselect = phase === "main_agent" && confirmedPathId !== null;
     const confirmMsg: ChatMessage = {
       id:      createSessionId(),
       role:    "user",
-      content: `確認選擇路徑：${selectedLabel || `路徑 ${selectedPathId + 1}`}`,
+      content: isReselect
+        ? `切換至路徑：${selectedLabel || `路徑 ${selectedPathId + 1}`}`
+        : `確認選擇路徑：${selectedLabel || `路徑 ${selectedPathId + 1}`}`,
     };
     setMessages((prev) => [...prev, confirmMsg]);
+
+    // 決定送出的 phase：
+    //   首次確認 → "resolved"（進 resolved_node 第二段）
+    //   重選     → "main_agent"（直接進 main_agent_node，由後端偵測 is_reselect）
+    const sendPhase = isReselect ? "main_agent" : "resolved";
 
     try {
       const response = await fetch(`${API_BASE.replace(/\/$/, "")}/chat`, {
@@ -187,9 +198,9 @@ export default function Page() {
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({
           session_id:       sessionId,
-          message:          `確認選擇路徑：${selectedLabel || selectedPathId}`,
-          phase:            "resolved",        // ← 進入 resolved_node 第二段
-          selected_path_id: selectedPathId,    // ← resolved_node 用此建構 handoff_task
+          message:          confirmMsg.content,
+          phase:            sendPhase,
+          selected_path_id: selectedPathId,
         }),
       });
       if (!response.ok) throw new Error(`API error ${response.status}`);
@@ -198,6 +209,9 @@ export default function Page() {
       const nextPhase = data.phase || "main_agent";
       setPhase(nextPhase);
       localStorage.setItem(PHASE_KEY, nextPhase);
+
+      // 更新前端的 confirmedPathId
+      setConfirmedPathId(selectedPathId);
 
       await typewriterAppend(data.reply || "");
     } catch (err) {
@@ -234,6 +248,7 @@ export default function Page() {
     setGraphData(null);
     setSelectedPathId(null);
     setSelectedLabel(null);
+    setConfirmedPathId(null);
     setGraphVisible(false);
     localStorage.setItem(SESSION_KEY, sid);
     localStorage.setItem(PHASE_KEY, "socratic");
@@ -241,12 +256,30 @@ export default function Page() {
   }
 
   // ─────────────────────────────────────────────────────────
-  // Render
+  // Derived display state
   // ─────────────────────────────────────────────────────────
 
-  const showGraph   = graphVisible && graphData && graphData.nodes.length > 0;
-  // confirm 按鈕：graph 顯示中 + phase 仍在 resolved（等待點選）+ 已有選擇
-  const showConfirm = showGraph && phase === "resolved" && selectedLabel !== null;
+  const showGraph = graphVisible && graphData && graphData.nodes.length > 0;
+
+  // 確認按鈕顯示條件：
+  //   - 首次確認：phase=resolved，已有選擇
+  //   - 重選：phase=main_agent，已有選擇，且與上次確認的不同
+  const isReselect      = phase === "main_agent" && confirmedPathId !== null;
+  const hasNewSelection = selectedPathId !== null && selectedPathId !== confirmedPathId;
+  const showConfirm     = showGraph && selectedLabel !== null && (
+    phase === "resolved" || (isReselect && hasNewSelection)
+  );
+
+  // 確認按鈕文字
+  const confirmBtnText = isLoading
+    ? "分析中…"
+    : isReselect
+      ? `切換至「${selectedLabel}」，重新分析 →`
+      : `確認選擇「${selectedLabel}」，開始分析 →`;
+
+  // ─────────────────────────────────────────────────────────
+  // Render
+  // ─────────────────────────────────────────────────────────
 
   return (
     <main className={showGraph ? "with-graph" : ""}>
@@ -310,7 +343,10 @@ export default function Page() {
             <div className="graph-header">
               <span className="graph-title">知識圖譜</span>
               {selectedLabel ? (
-                <span className="graph-selected">◉ 已選：{selectedLabel}</span>
+                <span className="graph-selected">
+                  {selectedPathId === confirmedPathId ? "✓ 已確認：" : "◉ 已選："}
+                  {selectedLabel}
+                </span>
               ) : (
                 <span className="meta">點擊節點選取路徑</span>
               )}
@@ -333,6 +369,8 @@ export default function Page() {
                         : undefined,
                     }}
                   >
+                    {/* 已確認的路徑加上勾號 */}
+                    {p.path_id === confirmedPathId ? "✓ " : ""}
                     {p.final_label || `路徑 ${p.path_id + 1}`}
                   </button>
                 ))}
@@ -347,16 +385,19 @@ export default function Page() {
               height={400}
             />
 
-            {/* 確認按鈕：直接進入 resolved_node 第二段，不填 input */}
+            {/* 確認/重選按鈕 */}
             {showConfirm && (
               <button
                 className="confirm-btn"
                 onClick={confirmPathSelection}
                 disabled={isLoading}
+                style={isReselect ? {
+                  background: "linear-gradient(135deg, #301060, #0a3a4a)",
+                  borderColor: "#a060f0",
+                  color: "#a060f0",
+                } : undefined}
               >
-                {isLoading
-                  ? "分析中…"
-                  : `確認選擇「${selectedLabel}」，開始分析 →`}
+                {confirmBtnText}
               </button>
             )}
           </div>

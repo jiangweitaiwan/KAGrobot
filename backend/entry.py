@@ -13,6 +13,15 @@ Workflow:
   main_agent_node → END
 
 entry_point router accepts phases: "socratic" | "resolved" | "main_agent"
+
+[修改說明]
+  - OrchestratorState 新增 confirmed_path_id 欄位，記錄上一次已確認的 path id
+  - _build_handoff_task() 從 resolved_node 移至 main_agent_node 內呼叫
+  - main_agent_node 比對 selected_path_id vs confirmed_path_id 判斷是否重選：
+      * 重選時：重建 handoff_task、清空 main_state
+      * 繼續對話時：沿用現有 main_state，以最後一則人類訊息繼續
+  - resolved_node 不再負責建構 handoff_task，只負責 retrieve_graph（第一段）
+  - entry_router 不需要修改
 """
 
 from __future__ import annotations
@@ -51,12 +60,13 @@ from MainAgent import MainAgent
 # ======================================================================
 
 class OrchestratorState(TypedDict, total=False):
-    messages:         Annotated[List[BaseMessage], add_messages]
-    phase:            str
-    socrates_state:   ChatState
-    main_state:       Annotated[List[BaseMessage], add_messages]
-    handoff_task:     Optional[str]
-    selected_path_id: Optional[int]   # 前端用戶在圖譜上點選並確認的 path id
+    messages:           Annotated[List[BaseMessage], add_messages]
+    phase:              str
+    socrates_state:     ChatState
+    main_state:         Annotated[List[BaseMessage], add_messages]
+    handoff_task:       Optional[str]
+    selected_path_id:   Optional[int]   # 前端用戶在圖譜上點選並確認的 path id
+    confirmed_path_id:  Optional[int]   # 上一次已確認並執行分析的 path id
 
 
 # ======================================================================
@@ -244,16 +254,15 @@ def socratic_node(state: OrchestratorState) -> OrchestratorState:
 
 
 def resolved_node(state: OrchestratorState) -> OrchestratorState:
-    """resolved 後的兩段式處理節點。
+    """resolved 後的處理節點（僅負責第一段：retrieve_graph）。
 
-    第一段（selected_path_id is None）：
+    selected_path_id 存在時，直接導向 main_agent_node（由 resolved_router 處理）。
+    selected_path_id 不存在時：
       - 呼叫 retrieve_graph()，寫入 socrates_state["graph_data"]
       - 回傳給前端，等待用戶點選路徑
 
-    第二段（selected_path_id is not None）：
-      - 從 graph_data 找到對應 path
-      - 建構 handoff_task
-      - 交由 resolved_router 導向 main_agent_node
+    [修改] _build_handoff_task() 已移至 main_agent_node，
+           resolved_node 不再負責建構 handoff_task。
     """
     socrates_state   = state.get("socrates_state")
     selected_path_id = state.get("selected_path_id")
@@ -264,7 +273,7 @@ def resolved_node(state: OrchestratorState) -> OrchestratorState:
             phase="socratic",
         )
 
-    # ── 第一段：尚無 path 選擇，執行 retrieve_graph ──────────────
+    # ── 尚無 path 選擇，執行 retrieve_graph ──────────────────────
     if selected_path_id is None:
         query = socrates_state.get("query") or ""
         try:
@@ -278,21 +287,21 @@ def resolved_node(state: OrchestratorState) -> OrchestratorState:
             socrates_state = socrates_state,
         )
 
-    # ── 第二段：有 path 選擇，建構 handoff_task ──────────────────
-    selected_path = _find_path_by_id(
-        socrates_state.get("graph_data"),
-        selected_path_id,
-    )
-    handoff_task = _build_handoff_task(socrates_state, selected_path)
-
+    # ── 有 path 選擇，直接導向 main_agent（handoff_task 由 main_agent_node 建構）──
     return OrchestratorState(
         phase          = "main_agent",
         socrates_state = socrates_state,
-        handoff_task   = handoff_task,
     )
 
 
 def main_agent_node(state: OrchestratorState) -> OrchestratorState:
+    """MainAgent 執行節點。
+
+    [修改] 支援在 main_agent 階段重選 path_id：
+      - 比對 selected_path_id vs confirmed_path_id 判斷是否為重選
+      - 重選時：重新呼叫 _build_handoff_task() 建構新任務、清空 main_state
+      - 繼續對話時：沿用現有 main_state，以最後一則人類訊息繼續
+    """
     socrates_state = state.get("socrates_state")
     if not socrates_state:
         return OrchestratorState(
@@ -300,24 +309,56 @@ def main_agent_node(state: OrchestratorState) -> OrchestratorState:
             phase="socratic",
         )
 
-    handoff_task = state.get("handoff_task")
-    user_msg     = handoff_task or _last_human_content(state.get("messages") or [])
+    selected_path_id  = state.get("selected_path_id")
+    confirmed_path_id = state.get("confirmed_path_id")
+
+    # ── 判斷是否為重選 ─────────────────────────────────────────────
+    is_reselect = (
+        selected_path_id is not None
+        and selected_path_id != confirmed_path_id
+    )
+
+    if is_reselect:
+        # 重選：重建 handoff_task，清空舊歷史
+        selected_path = _find_path_by_id(
+            socrates_state.get("graph_data"),
+            selected_path_id,
+        )
+        user_msg  = _build_handoff_task(socrates_state, selected_path)
+        history: List[BaseMessage] = []
+
+        path_label = (selected_path or {}).get("final_label") or f"路徑 {selected_path_id}"
+        reselect_notice = AIMessage(
+            content=f"已切換至新路徑「{path_label}」，重新開始分析。"
+        )
+    else:
+        # 繼續對話：使用最後一則人類訊息
+        user_msg = _last_human_content(state.get("messages") or [])
+        history  = list(state.get("main_state") or [])
+        reselect_notice = None
+
     if not user_msg:
         return {}
 
-    history: List[BaseMessage] = state.get("main_state") or []
     result = shared_main_agent.chat(
         user_input=user_msg,
         socrates_state=socrates_state,
         history=history,
     )
 
+    output_messages: List[BaseMessage] = []
+    if reselect_notice:
+        output_messages.append(reselect_notice)
+    output_messages.append(AIMessage(content=result["content"]))
+
     return OrchestratorState(
-        messages       = [AIMessage(content=result["content"])],
-        phase          = "main_agent",
-        socrates_state = socrates_state,
-        handoff_task   = None,
-        main_state     = result.get("messages") or [],
+        messages          = output_messages,
+        phase             = "main_agent",
+        socrates_state    = socrates_state,
+        handoff_task      = None,
+        main_state        = result.get("messages") or [],
+        # 更新 confirmed_path_id：重選時更新為新 id，否則保持不變
+        confirmed_path_id = selected_path_id if is_reselect else confirmed_path_id,
     )
 
 
