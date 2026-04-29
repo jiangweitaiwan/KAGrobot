@@ -25,7 +25,8 @@ type ChatResponse = {
   reply:          string;
   phase:          string;
   socrates_phase?: string | null;
-  graph_data?:    GraphData | null;
+  // all_graphs: candidateIndex(1-based, as string key) → GraphData | null
+  all_graphs?:    Record<string, GraphData | null> | null;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -57,19 +58,22 @@ function wait(ms: number): Promise<void> {
 // ─────────────────────────────────────────────────────────────
 
 export default function Page() {
-  const [sessionId,      setSessionId]      = useState("");
-  const [phase,          setPhase]          = useState("socratic");
-  const [messages,       setMessages]       = useState<ChatMessage[]>([]);
-  const [input,          setInput]          = useState("");
-  const [isLoading,      setIsLoading]      = useState(false);
-  const [error,          setError]          = useState("");
+  const [sessionId, setSessionId] = useState("");
+  const [phase,     setPhase]     = useState("socratic");
+  const [messages,  setMessages]  = useState<ChatMessage[]>([]);
+  const [input,     setInput]     = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [error,     setError]     = useState("");
 
   // ── graph state ───────────────────────────────────────────
-  const [graphData,        setGraphData]        = useState<GraphData | null>(null);
-  const [selectedPathId,   setSelectedPathId]   = useState<number | null>(null);
-  const [selectedLabel,    setSelectedLabel]    = useState<string | null>(null);
-  const [confirmedPathId,  setConfirmedPathId]  = useState<number | null>(null);
-  const [graphVisible,     setGraphVisible]     = useState(false);
+  // allGraphs: candidateIndex(number) → GraphData | null
+  const [allGraphs,       setAllGraphs]       = useState<Record<number, GraphData | null>>({});
+  const [activeChipIndex, setActiveChipIndex] = useState<number | null>(null);
+  const [graphData,       setGraphData]       = useState<GraphData | null>(null);
+  const [selectedPathId,  setSelectedPathId]  = useState<number | null>(null);
+  const [selectedLabel,   setSelectedLabel]   = useState<string | null>(null);
+  const [confirmedPathId, setConfirmedPathId] = useState<number | null>(null);
+  const [graphVisible,    setGraphVisible]    = useState(false);
 
   const boxRef = useRef<HTMLDivElement | null>(null);
 
@@ -113,6 +117,31 @@ export default function Page() {
     }
   }
 
+  // ── chip 切換（純前端，零後端請求）───────────────────────
+  function handleChipClick(index: number) {
+    if (isLoading) return;
+    const g = allGraphs[index] ?? null;
+    setActiveChipIndex(index);
+    setGraphData(g);
+    // 重置路徑選擇，使用各圖自帶的預設 selected_path_id
+    if (g) {
+      const defaultPathId = typeof g.selected_path_id === "number"
+        ? g.selected_path_id : null;
+      setSelectedPathId(defaultPathId);
+      const defaultPath = g.paths?.find((p) => p.path_id === defaultPathId);
+      setSelectedLabel(defaultPath?.final_label ?? null);
+    } else {
+      setSelectedPathId(null);
+      setSelectedLabel(null);
+    }
+  }
+
+  // ── 使用者在圖上點選路徑 ─────────────────────────────────
+  function handlePathSelect(pathId: number, finalLabel: string) {
+    setSelectedPathId(pathId);
+    setSelectedLabel(finalLabel);
+  }
+
   // ── 一般對話送出（socratic 階段）────────────────────────────
   async function submitMessage(e: FormEvent) {
     e.preventDefault();
@@ -140,15 +169,30 @@ export default function Page() {
       setPhase(nextPhase);
       localStorage.setItem(PHASE_KEY, nextPhase);
 
-      // graph_data 由後端在 resolved_node 第一段結束後回傳
-      if (data.graph_data) {
-        setGraphData(data.graph_data);
-        setGraphVisible(true);
-        if (typeof data.graph_data.selected_path_id === "number") {
-          const pid = data.graph_data.selected_path_id;
-          setSelectedPathId(pid);
-          const p = data.graph_data.paths.find((x) => x.path_id === pid);
-          if (p) setSelectedLabel(p.final_label);
+      // all_graphs 回傳時，初始化 chip 狀態並顯示第一張圖
+      if (data.all_graphs) {
+        // JSON key 為字串，轉換回 number key
+        const parsed: Record<number, GraphData | null> = {};
+        for (const [k, v] of Object.entries(data.all_graphs)) {
+          parsed[Number(k)] = v;
+        }
+        setAllGraphs(parsed);
+
+        // 預設顯示第一個有資料的 chip
+        const firstIdx = Math.min(...Object.keys(parsed).map(Number).filter((k) => parsed[k]));
+        if (isFinite(firstIdx)) {
+          setActiveChipIndex(firstIdx);
+          const firstGraph = parsed[firstIdx];
+          setGraphData(firstGraph ?? null);
+          setGraphVisible(true);
+
+          if (firstGraph) {
+            const defaultPathId = typeof firstGraph.selected_path_id === "number"
+              ? firstGraph.selected_path_id : null;
+            setSelectedPathId(defaultPathId);
+            const defaultPath = firstGraph.paths?.find((p) => p.path_id === defaultPathId);
+            setSelectedLabel(defaultPath?.final_label ?? null);
+          }
         }
       }
 
@@ -164,14 +208,10 @@ export default function Page() {
     }
   }
 
-  // ── 確認路徑選擇（首次或重選皆使用此函式）──────────────────
-  // phase="resolved" 時走 resolved_node 第二段 → main_agent_node
-  // phase="main_agent" 時直接走 main_agent_node，由後端判斷 is_reselect
+  // ── 確認路徑（首次或重選皆使用此函式）──────────────────────
   async function confirmPathSelection() {
     if (selectedPathId === null || !sessionId || isLoading) return;
     if (!API_BASE) { setError("尚未設定 NEXT_PUBLIC_API_BASE_URL。"); return; }
-
-    // 重選：若 selectedPathId 與已確認的相同，不送出
     if (selectedPathId === confirmedPathId && phase === "main_agent") return;
 
     setError("");
@@ -187,9 +227,6 @@ export default function Page() {
     };
     setMessages((prev) => [...prev, confirmMsg]);
 
-    // 決定送出的 phase：
-    //   首次確認 → "resolved"（進 resolved_node 第二段）
-    //   重選     → "main_agent"（直接進 main_agent_node，由後端偵測 is_reselect）
     const sendPhase = isReselect ? "main_agent" : "resolved";
 
     try {
@@ -209,8 +246,6 @@ export default function Page() {
       const nextPhase = data.phase || "main_agent";
       setPhase(nextPhase);
       localStorage.setItem(PHASE_KEY, nextPhase);
-
-      // 更新前端的 confirmedPathId
       setConfirmedPathId(selectedPathId);
 
       await typewriterAppend(data.reply || "");
@@ -223,12 +258,6 @@ export default function Page() {
     } finally {
       setIsLoading(false);
     }
-  }
-
-  // ── 用戶在圖上點選節點 ────────────────────────────────────
-  function handlePathSelect(pathId: number, finalLabel: string) {
-    setSelectedPathId(pathId);
-    setSelectedLabel(finalLabel);
   }
 
   // ── persist messages ──────────────────────────────────────
@@ -245,6 +274,8 @@ export default function Page() {
     setPhase("socratic");
     setMessages([]);
     setError("");
+    setAllGraphs({});
+    setActiveChipIndex(null);
     setGraphData(null);
     setSelectedPathId(null);
     setSelectedLabel(null);
@@ -261,16 +292,21 @@ export default function Page() {
 
   const showGraph = graphVisible && graphData && graphData.nodes.length > 0;
 
-  // 確認按鈕顯示條件：
-  //   - 首次確認：phase=resolved，已有選擇
-  //   - 重選：phase=main_agent，已有選擇，且與上次確認的不同
+  // chip 清單：從 allGraphs 的 key 推導
+  const chipList = Object.entries(allGraphs)
+    .map(([k, g]) => ({
+      index:   Number(k),
+      label:   g?.query_concepts?.[0]?.name ?? `選項 ${k}`,
+      hasData: !!g,
+    }))
+    .sort((a, b) => a.index - b.index);
+
   const isReselect      = phase === "main_agent" && confirmedPathId !== null;
   const hasNewSelection = selectedPathId !== null && selectedPathId !== confirmedPathId;
   const showConfirm     = showGraph && selectedLabel !== null && (
     phase === "resolved" || (isReselect && hasNewSelection)
   );
 
-  // 確認按鈕文字
   const confirmBtnText = isLoading
     ? "分析中…"
     : isReselect
@@ -352,8 +388,32 @@ export default function Page() {
               )}
             </div>
 
-            {/* path legend */}
-            {graphData.paths.length > 0 && (
+            {/* concept chips（切換 candidate，純前端）*/}
+            {chipList.length > 1 && (
+              <div className="chip-legend">
+                {chipList.map((chip) => (
+                  <button
+                    key={chip.index}
+                    className={`concept-chip ${activeChipIndex === chip.index ? "active" : ""}`}
+                    onClick={() => handleChipClick(chip.index)}
+                    disabled={!chip.hasData || isLoading}
+                    style={{
+                      borderColor: activeChipIndex === chip.index
+                        ? CHIP_COLORS[chip.index % CHIP_COLORS.length]
+                        : undefined,
+                      color: activeChipIndex === chip.index
+                        ? CHIP_COLORS[chip.index % CHIP_COLORS.length]
+                        : undefined,
+                    }}
+                  >
+                    {chip.label}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* path legend（當前圖的路徑列表）*/}
+            {graphData && graphData.paths.length > 0 && (
               <div className="path-legend">
                 {graphData.paths.map((p) => (
                   <button
@@ -369,7 +429,6 @@ export default function Page() {
                         : undefined,
                     }}
                   >
-                    {/* 已確認的路徑加上勾號 */}
                     {p.path_id === confirmedPathId ? "✓ " : ""}
                     {p.final_label || `路徑 ${p.path_id + 1}`}
                   </button>
@@ -392,9 +451,9 @@ export default function Page() {
                 onClick={confirmPathSelection}
                 disabled={isLoading}
                 style={isReselect ? {
-                  background: "linear-gradient(135deg, #301060, #0a3a4a)",
+                  background:  "linear-gradient(135deg, #301060, #0a3a4a)",
                   borderColor: "#a060f0",
-                  color: "#a060f0",
+                  color:       "#a060f0",
                 } : undefined}
               >
                 {confirmBtnText}
@@ -406,6 +465,10 @@ export default function Page() {
     </main>
   );
 }
+
+const CHIP_COLORS = [
+  "#4f8ef7", "#00d4aa", "#e8a030",
+];
 
 const PATH_COLORS = [
   "#4f8ef7", "#00d4aa", "#e8a030", "#e85d60",

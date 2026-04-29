@@ -1,12 +1,14 @@
 """
 core/socrates_bot.py
 ─────────────────────────────────────────────────────────────
-SocratesChatBot：需求釐清 + 模型選擇的對話機器人。
+SocratesChatBot：需求釐清 + concept 候選選擇。
 
-Changes:
-  • retrieve_concepts tool 只呼叫 retrieve()，不再呼叫 retrieve_graph()。
-  • graph_data 改由 entry.py 在 phase=resolved 後填入 socrates_state。
-  • ChatState.graph_data 欄位保留，供 entry.py 寫入。
+改動摘要：
+  • ChatState 移除 graph_data / all_graphs（改由 OrchestratorState 管理）
+  • retrieve_concepts tool 改呼叫 retrieve_candidates()，不再走 Neo4j chain
+  • 移除 _serialize_chain / _build_candidates_from_chains / ReasoningChain 相關邏輯
+  • candidates 結構改為 {index, eid, rc_name, type, score}
+  • _resolve_tools_from_candidate 改用 rc_name 比對
 """
 
 from __future__ import annotations
@@ -32,9 +34,6 @@ from core.llm_retry import call_with_retry
 from settings import get_settings
 
 Neo4jReasoningRetriever = nrr.Neo4jReasoningRetriever
-ReasoningChain          = nrr.ReasoningChain
-ConceptNode             = nrr.ConceptNode
-PaperNode               = nrr.PaperNode
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -47,17 +46,16 @@ class ConversationPhase(Enum):
 
 
 class ChatState(TypedDict, total=False):
-    messages:         List[BaseMessage]
-    agent_messages:   List[BaseMessage]
-    phase:            str
-    query:            Optional[str]
-    reasoning_chains: Optional[List[dict]]
-    candidates:       Optional[List[dict]]
-    selected_index:   Optional[int]
-    tools:            Optional[List[dict]]
-    parameters:       Optional[List[dict]]
-    # graph_data 由 entry.py 在 phase=resolved 後填入
-    graph_data:       Optional[Dict[str, Any]]
+    messages:       List[BaseMessage]
+    agent_messages: List[BaseMessage]
+    phase:          str
+    query:          Optional[str]
+    # candidates: [{index, eid, rc_name, type, score}]
+    candidates:     Optional[List[dict]]
+    selected_index: Optional[int]
+    tools:          Optional[List[dict]]
+    parameters:     Optional[List[dict]]
+    # graph_data / all_graphs は OrchestratorState で管理するため削除
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -65,7 +63,7 @@ class ChatState(TypedDict, total=False):
 # ═══════════════════════════════════════════════════════════════
 
 def collect_tools_with_deps(tool_names: List[str]) -> List[str]:
-    visited: set  = set()
+    visited: set       = set()
     ordered: List[str] = []
 
     def _walk(name: str) -> None:
@@ -88,7 +86,6 @@ def collect_tools_with_deps(tool_names: List[str]) -> List[str]:
 class _InternalState(TypedDict):
     messages:   Annotated[List[BaseMessage], add_messages]
     candidates: Optional[List[dict]]
-    chains_raw: Optional[List[dict]]
     query:      Optional[str]
 
 
@@ -103,7 +100,7 @@ Resulting Concept 中，選出最符合其實際需求的模型或分析方法�
 ## 工作流程
 
 ### 階段 1：需求釐清
-- 了解使用者需求
+- 了解使用者需求（1-2 輪即可，避免過度追問）
 
 ### 階段 2：查詢知識圖譜
 - 呼叫 `retrieve_concepts` tool，傳入精確的**英文**查詢語句。
@@ -111,12 +108,12 @@ Resulting Concept 中，選出最符合其實際需求的模型或分析方法�
 
 ### 階段 3：展示候選，等待使用者選擇
 - 將 `retrieve_concepts` 回傳的 `display` 欄位內容展示給使用者。
-- 請使用者輸入選項編號（如 "1"）或模型名稱。
+- 請使用者輸入選項編號（如 "1"）或概念名稱。
 - 此時 action = "ask"。
 
 ### 階段 4：確認選擇
 - 使用者明確給出編號或可辨識的名稱後：
-  * 在 ai_message 中說明已選擇的項目與摘要。
+  * 在 ai_message 中說明已選擇的項目。
   * 將 action 設為 "resolved"。
 - 若使用者的輸入模糊或無法對應到任何候選，繼續追問，action 仍為 "ask"。
 
@@ -124,11 +121,9 @@ Resulting Concept 中，選出最符合其實際需求的模型或分析方法�
 每輪必須輸出合法 JSON，不得有任何前綴文字或 markdown code block：
 {"action": "ask"|"resolved", "ai_message": "<繁體中文回覆>", "selected_index": null}
 
-**selected_index 規則（非常重要）：**
+**selected_index 規則：**
 - action="ask" 時：selected_index 必須為 null。
-- action="resolved" 時：selected_index 必須填入使用者所選項目的**編號**（整數，與展示的 [1][2]... 一致）。
-  例如：使用者選了 [2]，則 selected_index=2。
-  你必須在此時確保 selected_index 不為 null，這是系統路由的關鍵依據。
+- action="resolved" 時：selected_index 必須填入使用者所選項目的編號（整數，與展示的 [1][2]... 一致）。
 
 - 對話以繁體中文；retrieve_concepts 的查詢語句用英文。
 - 未完成選擇前，action 絕對不能為 "resolved"。
@@ -150,55 +145,14 @@ class OutputSchema(BaseModel):
 
 
 # ═══════════════════════════════════════════════════════════════
-# Serialization helpers
-# ═══════════════════════════════════════════════════════════════
-
-def _concept_to_dict(c: ConceptNode) -> dict:
-    return {
-        "element_id":          c.element_id,
-        "name":                c.name,
-        "type":                c.type,
-        "matched_name":        getattr(c, "matched_name", None),
-        "matched_description": getattr(c, "matched_description", None),
-    }
-
-
-def _paper_to_dict(p: Optional[PaperNode]) -> Optional[dict]:
-    if p is None:
-        return None
-    return {
-        "element_id":                   p.element_id,
-        "title":                        p.title,
-        "conceptual_premises":          p.conceptual_premises,
-        "contextual_model_constraints": p.contextual_model_constraints,
-    }
-
-
-def _serialize_chain(chain: ReasoningChain) -> dict:
-    return {
-        "start_concept": _concept_to_dict(chain.start_concept),
-        "steps": [
-            {
-                "from_concept": _concept_to_dict(s.from_concept),
-                "via_paper":    _paper_to_dict(s.via_paper),
-                "to_concept":   _concept_to_dict(s.to_concept),
-            }
-            for s in chain.steps
-        ],
-        "final_resulting_concept": _concept_to_dict(chain.final_resulting_concept),
-        "final_paper":             _paper_to_dict(chain.final_paper),
-    }
-
-
-# ═══════════════════════════════════════════════════════════════
 # Internal helpers
 # ═══════════════════════════════════════════════════════════════
 
 def _resolve_agent_type(
-    concept: ConceptNode,
+    rc_name: str,
     concept_to_agent: Dict[str, AgentType],
 ) -> Optional[AgentType]:
-    name = (concept.name or "").lower().strip()
+    name = rc_name.lower().strip()
     if name in concept_to_agent:
         return concept_to_agent[name]
     for key, agent in concept_to_agent.items():
@@ -207,85 +161,52 @@ def _resolve_agent_type(
     return None
 
 
-def _build_candidates_from_chains(
-    chains: List[ReasoningChain],
-    concept_to_agent: Dict[str, AgentType],
-) -> List[dict]:
-    candidates: List[dict] = []
-    for idx, chain in enumerate(chains, 1):
-        rc         = chain.final_resulting_concept
-        paper      = chain.final_paper
-        agent_type = _resolve_agent_type(rc, concept_to_agent)
-        primary_tool = None
-        if agent_type:
-            tools_list   = AGENTS_REGISTRY.get(agent_type, {}).get("tools", [])
-            primary_tool = tools_list[0] if tools_list else None
-        candidates.append({
-            "index":        idx,
-            "rc_name":      rc.name,
-            "agent_type":   agent_type.value if agent_type else None,
-            "primary_tool": primary_tool,
-            "paper_title":  paper.title if paper else None,
-            "conceptual_premises":          paper.conceptual_premises if paper else None,
-            "contextual_model_constraints": paper.contextual_model_constraints if paper else None,
-        })
-    return candidates
-
-
 def _resolve_tools_from_candidate(
     chosen_candidate: dict,
-    chains_raw: List[dict],
     concept_to_agent: Dict[str, AgentType],
 ) -> tuple:
-    rc_name = (chosen_candidate.get("rc_name") or "").lower()
-    seen_tools:      set = set()
+    """從選定的 candidate 解析工具清單與參數。
+
+    Parameters
+    ----------
+    chosen_candidate : {index, eid, rc_name, type, score}
+    """
+    rc_name = chosen_candidate.get("rc_name") or ""
+    agent_t = _resolve_agent_type(rc_name, concept_to_agent)
+
+    if agent_t is None:
+        return [], []
+
+    base_tools = AGENTS_REGISTRY.get(agent_t, {}).get("tools", [])
+    all_tools  = collect_tools_with_deps(base_tools)
+
     resolved_tools:  List[dict] = []
     resolved_params: List[dict] = []
 
-    for chain_dict in chains_raw:
-        fc      = chain_dict.get("final_resulting_concept") or {}
-        fc_name = (fc.get("name") or "").lower()
-        if not fc_name:
+    for tname in all_tools:
+        entry = TOOLS_REGISTRY.get(tname)
+        if entry is None:
             continue
-        if not (fc_name == rc_name or rc_name in fc_name or fc_name in rc_name):
-            continue
-
-        dummy   = ConceptNode(element_id=fc.get("element_id", ""),
-                              name=fc.get("name", ""), type=fc.get("type"))
-        agent_t = _resolve_agent_type(dummy, concept_to_agent)
-        if agent_t is None:
-            continue
-
-        base_tools = AGENTS_REGISTRY.get(agent_t, {}).get("tools", [])
-        all_tools  = collect_tools_with_deps(base_tools)
-
-        for tname in all_tools:
-            if tname in seen_tools:
-                continue
-            seen_tools.add(tname)
-            entry = TOOLS_REGISTRY.get(tname)
-            if entry is None:
-                continue
-            is_dep = tname not in base_tools
-            resolved_tools.append({
-                "tool_name":       tname,
-                "description":     entry["description"],
-                "skills":          entry["skills"],
-                "from_agent":      agent_t.value,
-                "matched_concept": fc.get("name"),
-                "is_dependency":   is_dep,
+        is_dep = tname not in base_tools
+        resolved_tools.append({
+            "tool_name":       tname,
+            "description":     entry["description"],
+            "skills":          entry["skills"],
+            "from_agent":      agent_t.value,
+            "matched_concept": rc_name,
+            "is_dependency":   is_dep,
+        })
+        if entry.get("parameters"):
+            resolved_params.append({
+                "tool_name":  tname,
+                "parameters": entry["parameters"],
             })
-            if entry.get("parameters"):
-                resolved_params.append({
-                    "tool_name":  tname,
-                    "parameters": entry["parameters"],
-                })
-        break
 
     return resolved_tools, resolved_params
 
 
 def _parse_selection(text: str, candidates: List[dict]) -> Optional[int]:
+    """從使用者輸入解析選擇，回傳 0-based index。"""
     clean = text.strip()
     for token in clean.replace("、", " ").replace("，", " ").split():
         if token.isdigit():
@@ -294,49 +215,35 @@ def _parse_selection(text: str, candidates: List[dict]) -> Optional[int]:
                 return num - 1
     lower = clean.lower()
     for i, cand in enumerate(candidates):
-        rc_name   = (cand.get("rc_name")      or "").lower()
-        tool_name = (cand.get("primary_tool") or "").lower()
-        if (rc_name   and (rc_name   in lower or lower in rc_name)) or \
-           (tool_name and (tool_name in lower or lower in tool_name)):
+        rc_name = (cand.get("rc_name") or "").lower()
+        if rc_name and (rc_name in lower or lower in rc_name):
             return i
     return None
 
 
 # ═══════════════════════════════════════════════════════════════
-# Reasoning chain helpers
+# Reasoning chain display helpers（供 main_agent 使用）
 # ═══════════════════════════════════════════════════════════════
 
 def _extract_selected_chain(socrates_state: ChatState) -> Optional[dict]:
-    chains: List[dict] = socrates_state.get("reasoning_chains") or []
-    idx: Optional[int] = socrates_state.get("selected_index")
-    if idx is None or not chains:
+    """從 socrates_state 取出選定 candidate 的摘要資訊。"""
+    candidates: List[dict] = socrates_state.get("candidates") or []
+    idx: Optional[int]     = socrates_state.get("selected_index")
+    if idx is None or not candidates:
         return None
-    if idx < 0 or idx >= len(chains):
+    if idx < 0 or idx >= len(candidates):
         return None
-    return chains[idx]
+    return candidates[idx]
 
 
-def _format_selected_chain(chain: Optional[dict]) -> str:
-    if chain is None:
-        return "（未選定推理鏈）"
-    rc_names: List[str] = []
-    start_name = (chain.get("start_concept") or {}).get("name") or ""
-    if start_name:
-        rc_names.append(start_name)
-    for step in chain.get("steps") or []:
-        to_name = (step.get("to_concept") or {}).get("name") or ""
-        if to_name and to_name not in rc_names:
-            rc_names.append(to_name)
-    final_name = (chain.get("final_resulting_concept") or {}).get("name") or ""
-    if final_name and final_name not in rc_names:
-        rc_names.append(final_name)
-    if not rc_names:
-        return "（推理鏈無節點資訊）"
-    nodes_display = [
-        f"{name}（最終目標）" if i == len(rc_names) - 1 else name
-        for i, name in enumerate(rc_names)
-    ]
-    return "選定分析路徑：\n  " + "  →  ".join(nodes_display)
+def _format_selected_chain(candidate: Optional[dict]) -> str:
+    """將選定 candidate 格式化為 system prompt 用的文字。"""
+    if candidate is None:
+        return "（未選定）"
+    rc_name = candidate.get("rc_name") or "（未命名）"
+    score   = candidate.get("score", "")
+    score_s = f"（相似度 {score}）" if score else ""
+    return f"選定分析概念：{rc_name}{score_s}"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -344,7 +251,7 @@ def _format_selected_chain(chain: Optional[dict]) -> str:
 # ═══════════════════════════════════════════════════════════════
 
 class SocratesChatBot:
-    """需求釐清 + 模型選擇的蘇格拉底對話 Agent。"""
+    """需求釐清 + concept 候選選擇的蘇格拉底對話 Agent。"""
 
     def __init__(
         self,
@@ -376,16 +283,14 @@ class SocratesChatBot:
     @staticmethod
     def init_state() -> ChatState:
         return ChatState(
-            messages         = [],
-            agent_messages   = [],
-            phase            = ConversationPhase.RUNNING.value,
-            query            = None,
-            reasoning_chains = None,
-            candidates       = None,
-            selected_index   = None,
-            tools            = None,
-            parameters       = None,
-            graph_data       = None,
+            messages       = [],
+            agent_messages = [],
+            phase          = ConversationPhase.RUNNING.value,
+            query          = None,
+            candidates     = None,
+            selected_index = None,
+            tools          = None,
+            parameters     = None,
         )
 
     def process_message(self, state: ChatState, user_input: str) -> ChatState:
@@ -404,11 +309,10 @@ class SocratesChatBot:
                 continue
             normalized_prior.append(m)
 
-        system_msg = first_system or SystemMessage(content=_SYSTEM_PROMPT)
+        system_msg   = first_system or SystemMessage(content=_SYSTEM_PROMPT)
         graph_result = self._graph.invoke({
             "messages":   [system_msg] + normalized_prior + [HumanMessage(content=user_input)],
             "candidates": state.get("candidates") or [],
-            "chains_raw": state.get("chains_raw") or [],
             "query":      state.get("query"),
         })
         new_agent_msgs: List[BaseMessage] = graph_result["messages"]
@@ -418,8 +322,6 @@ class SocratesChatBot:
             state["query"] = graph_result["query"]
         if graph_result.get("candidates"):
             state["candidates"] = graph_result["candidates"]
-        if graph_result.get("chains_raw"):
-            state["reasoning_chains"] = graph_result["chains_raw"]
 
         bot_resp = self._parse_bot_response(new_agent_msgs)
         ai_text  = bot_resp.get("ai_message", "")
@@ -471,7 +373,6 @@ class SocratesChatBot:
 
                 if data.get("found"):
                     state_updates["candidates"] = data.get("candidates", [])
-                    state_updates["chains_raw"] = data.get("chains_raw", [])
                     state_updates["query"]      = data.get("query", "")
                     slim = data.get("display") or "（查無結果）"
                 else:
@@ -500,48 +401,38 @@ class SocratesChatBot:
         return g.compile()
 
     # ------------------------------------------------------------------
-    # retrieve_concepts tool — 只呼叫 retrieve()，不呼叫 retrieve_graph()
-    # retrieve_graph() 改由 entry.py 在 phase=resolved 後負責呼叫
+    # retrieve_concepts tool
+    # 改呼叫 retrieve_candidates()，不再走 Neo4j chain
     # ------------------------------------------------------------------
 
     def _make_retrieve_tool(self) -> StructuredTool:
-        retriever        = self._retriever
-        top_k            = self._top_k
-        concept_to_agent = self._concept_to_agent
+        retriever = self._retriever
+        top_k     = self._top_k
 
         def retrieve_concepts(query: str) -> str:
-            """查詢知識圖譜，找出與使用者需求最相關的 Resulting Concept 清單。"""
-            chains: List[ReasoningChain] = retriever.retrieve(
-                query, top_k_entities=top_k)
+            """查詢知識圖譜，找出與使用者需求最相關的 concept 候選清單。"""
+            candidates = retriever.retrieve_candidates(query, top_k=top_k)
 
-            if not chains:
+            if not candidates:
                 return json.dumps({
                     "found":      False,
                     "message":    "No relevant concepts found in the knowledge graph.",
                     "candidates": [],
-                    "chains_raw": [],
                     "display":    "",
                     "query":      query,
                 }, ensure_ascii=False)
 
-            chains_raw = [_serialize_chain(c) for c in chains]
-            candidates = _build_candidates_from_chains(chains, concept_to_agent)
-
             lines: List[str] = []
             for c in candidates:
-                tool_name = c.get("primary_tool") or "（尚未對應）"
-                tool_desc = TOOLS_REGISTRY.get(tool_name, {}).get("description", "")
-                desc_part = f" — {tool_desc}" if tool_desc else ""
                 lines.append(
                     f"[{c['index']}] {c['rc_name'] or '（未命名）'}"
-                    f"｜工具：{tool_name}{desc_part}"
+                    f"  （相似度 {c['score']}）"
                 )
 
             return json.dumps({
                 "found":      True,
                 "query":      query,
                 "candidates": candidates,
-                "chains_raw": chains_raw,
                 "display":    "\n".join(lines),
             }, ensure_ascii=False)
 
@@ -549,7 +440,7 @@ class SocratesChatBot:
             func=retrieve_concepts,
             name="retrieve_concepts",
             description=(
-                "查詢知識圖譜，找出與使用者需求最相關的 Resulting Concept 清單。"
+                "查詢知識圖譜，找出與使用者需求最相關的 concept 候選清單。"
                 "需求釐清完成後呼叫此 tool，傳入精確的英文查詢語句。"
             ),
         )
@@ -600,7 +491,6 @@ class SocratesChatBot:
         bot_resp:   dict,
     ) -> None:
         candidates = state.get("candidates") or []
-        chains_raw = state.get("reasoning_chains") or []
         if not candidates:
             return
 
@@ -617,7 +507,7 @@ class SocratesChatBot:
 
         chosen        = candidates[chosen_idx]
         tools, params = _resolve_tools_from_candidate(
-            chosen, chains_raw, self._concept_to_agent)
+            chosen, self._concept_to_agent)
 
         state["selected_index"] = chosen_idx
         state["tools"]          = tools
@@ -645,10 +535,10 @@ class SocratesChatBot:
             print(f"Bot: {self.get_last_reply(state)}\n")
         print("=== 最終結果 ===")
         print(json.dumps({
-            "query":            state.get("query"),
-            "selected_index":   state.get("selected_index"),
-            "tools":            state.get("tools"),
-            "parameters":       state.get("parameters"),
-            "reasoning_chains": state.get("reasoning_chains"),
+            "query":          state.get("query"),
+            "selected_index": state.get("selected_index"),
+            "candidates":     state.get("candidates"),
+            "tools":          state.get("tools"),
+            "parameters":     state.get("parameters"),
         }, ensure_ascii=False, indent=2))
         return state
