@@ -2,13 +2,15 @@
 """entry.py  — FastAPI + LangGraph orchestrator.
 
 改動摘要：
-  • OrchestratorState 新增 all_graphs 欄位（取代 socrates_state 內的 graph_data）
-  • resolved_node 對所有 candidates[:3] 一次呼叫 retrieve_graph()，
-    結果存入 OrchestratorState.all_graphs
-  • chip 切換完全在前端處理，不碰後端
-  • 使用者點「確認路徑」→ selected_path_id 進 resolved_node 第二段 → main_agent_node
-  • _build_resolved_graph_data / _build_resolved_graph_data_for 重構
-  • ChatResponse 新增 all_graphs 欄位
+  • OrchestratorState 新增 graph_context 欄位
+  • 新增 _build_graph_context helper，將 all_graphs 路徑摘要序列化
+  • resolved_node 展開圖後回到 socratic（不再直接等待前端 confirm）
+  • socratic_node 感知 concept_resolved 階段：
+      - selected_path_id 進來 → confirm_path → PATH_CONFIRMED → main_agent
+      - 一般對話 → 注入 graph_context，繼續釐清或解釋路徑
+      - retrieve 到新 candidates → 觸發 resolved_node 覆蓋舊圖
+  • entry_router / socratic_router / resolved_router 全面更新
+  • ChatResponse phase 語意：concept_resolved 取代 resolved
 """
 
 from __future__ import annotations
@@ -56,8 +58,8 @@ class OrchestratorState(TypedDict, total=False):
     handoff_task:      Optional[str]
     selected_path_id:  Optional[int]
     confirmed_path_id: Optional[int]
-    # all_graphs: candidateIndex(1-based) → graph_data with selected_path_id annotation
     all_graphs:        Optional[Dict[int, Any]]
+    graph_context:     Optional[str]   # 路徑摘要文字，供 socratic concept_resolved 階段使用
 
 
 # ======================================================================
@@ -118,11 +120,7 @@ def _annotate_graph_with_default_path(
     graph_data: Dict[str, Any],
     rc_name:    str,
 ) -> Dict[str, Any]:
-    """在 graph_data 中找出與 rc_name 對應的路徑，附加 selected_path_id 預標記。
-
-    selected_path_id 讓前端在圖初次顯示時就 highlight 對應路徑。
-    若找不到完全相符的路徑，selected_path_id = None。
-    """
+    """在 graph_data 中找出與 rc_name 對應的路徑，附加 selected_path_id 預標記。"""
     rc_lower = rc_name.lower()
     selected_path_id: Optional[int] = None
     for path in graph_data.get("paths", []):
@@ -130,6 +128,52 @@ def _annotate_graph_with_default_path(
             selected_path_id = path["path_id"]
             break
     return {**graph_data, "selected_path_id": selected_path_id}
+
+
+def _build_graph_context(all_graphs: Dict[int, Any]) -> str:
+    """將 all_graphs 的路徑摘要序列化為 Socrates system prompt 用的文字。
+
+    格式：
+        【候選 1】概念名稱
+          路徑 0：final_label | 論文A（前提：…）→ 論文B（約束：…）
+          路徑 1：final_label | …
+        【候選 2】…
+    """
+    lines: List[str] = []
+    for idx, g in sorted(all_graphs.items()):
+        if not g:
+            lines.append(f"【候選 {idx}】（圖譜展開失敗）")
+            continue
+
+        concept_name = (g.get("query_concepts") or [{}])[0].get("name", f"選項 {idx}")
+        lines.append(f"【候選 {idx}】{concept_name}")
+
+        nodes_by_id: Dict[str, Any] = {n["id"]: n for n in g.get("nodes", [])}
+
+        for path in g.get("paths", []):
+            path_id     = path.get("path_id", "?")
+            final_label = path.get("final_label", "")
+            node_ids    = path.get("node_ids", [])
+
+            paper_hints: List[str] = []
+            for nid in node_ids:
+                node = nodes_by_id.get(nid)
+                if not node or node.get("node_type") != "paper":
+                    continue
+                meta        = node.get("meta") or {}
+                hint        = node.get("label", "（未命名論文）")
+                premises    = (meta.get("conceptual_premises") or "").strip()
+                constraints = (meta.get("contextual_model_constraints") or "").strip()
+                if premises:
+                    hint += f"（前提：{premises[:60]}{'…' if len(premises) > 60 else ''}）"
+                if constraints:
+                    hint += f"（約束：{constraints[:60]}{'…' if len(constraints) > 60 else ''}）"
+                paper_hints.append(hint)
+
+            path_desc = " → ".join(paper_hints) if paper_hints else "（無論文節點）"
+            lines.append(f"  路徑 {path_id}：{final_label} | {path_desc}")
+
+    return "\n".join(lines)
 
 
 def _build_handoff_task(
@@ -143,14 +187,12 @@ def _build_handoff_task(
     if selected_path and all_graphs:
         model_name  = selected_path.get("final_label") or "（未指定）"
 
-        # 從 all_graphs 中找到含有此 path 的 graph_data 取 nodes
         nodes_by_id: Dict[str, Any] = {}
         for g in all_graphs.values():
             if g:
                 for n in g.get("nodes", []):
                     nodes_by_id[n["id"]] = n
 
-        # concept 節點序列
         path_labels: List[str] = []
         for nid in (selected_path.get("node_ids") or []):
             node = nodes_by_id.get(nid)
@@ -158,7 +200,6 @@ def _build_handoff_task(
                 path_labels.append(node.get("label", nid))
         path_description = " → ".join(path_labels) if path_labels else model_name
 
-        # paper 節點資訊
         paper_info_lines: List[str] = []
         for nid in (selected_path.get("node_ids") or []):
             node = nodes_by_id.get(nid)
@@ -217,51 +258,92 @@ def _find_graph_by_path_id(
 # ======================================================================
 
 def socratic_node(state: OrchestratorState) -> OrchestratorState:
-    messages = state.get("messages") or []
-    user_msg = _last_human_content(messages)
+    """需求釐清節點。
+
+    處理三種情況：
+    1. concept_resolved 階段且帶有 selected_path_id
+       → 呼叫 confirm_path，phase 推進為 path_confirmed。
+    2. concept_resolved 階段一般對話
+       → 注入 graph_context，讓 Socrates 解釋路徑或 re-retrieve。
+       → 若 Socrates 呼叫 retrieve_concepts 得到新 candidates
+         → phase 設為 concept_resolved，觸發 resolved_node 覆蓋圖。
+    3. socratic 階段（初始需求釐清）
+       → 正常處理，concept 選定後 phase 變 concept_resolved。
+    """
+    messages         = state.get("messages") or []
+    user_msg         = _last_human_content(messages)
+    selected_path_id = state.get("selected_path_id")
+    current_phase    = state.get("phase") or "socratic"
+
     if not user_msg:
         return {}
 
     old_socrates_state = state.get("socrates_state") or SocratesChatBot.init_state()
-    new_socrates_state = shared_socrates_bot.process_message(old_socrates_state, user_msg)
 
-    is_resolved = new_socrates_state.get("phase") == ConversationPhase.RESOLVED.value
+    # ── 情況 1：使用者已在前端點選並確認 path ────────────────────
+    if selected_path_id is not None and current_phase == "concept_resolved":
+        new_socrates_state = shared_socrates_bot.confirm_path(old_socrates_state)
+        return OrchestratorState(
+            messages       = [AIMessage(content="路徑已確認，開始執行分析…")],
+            phase          = "path_confirmed",
+            socrates_state = new_socrates_state,
+        )
 
-    if is_resolved:
+    # ── 情況 2 & 3：一般 Socrates 對話 ───────────────────────────
+    graph_context = (
+        state.get("graph_context")
+        if current_phase == "concept_resolved"
+        else None
+    )
+
+    new_socrates_state = shared_socrates_bot.process_message(
+        old_socrates_state,
+        user_msg,
+        graph_context=graph_context,
+    )
+
+    inner_phase = new_socrates_state.get("phase")
+
+    # Socrates 選出（新）candidates，需展開圖
+    if inner_phase == ConversationPhase.CONCEPT_RESOLVED.value:
         candidates   = new_socrates_state.get("candidates") or []
         selected_idx = new_socrates_state.get("selected_index")
         model_name   = "（未指定）"
         if selected_idx is not None and candidates:
-            chosen = candidates[selected_idx] if selected_idx < len(candidates) else None
-            if chosen:
-                model_name = chosen.get("rc_name") or model_name
+            chosen     = candidates[selected_idx] if selected_idx < len(candidates) else None
+            model_name = (chosen.get("rc_name") or model_name) if chosen else model_name
+
         reply_text = (
             f"好的，已確認您選擇「{model_name}」。\n"
             f"知識圖譜載入中，請在右側圖譜中點選您想分析的路徑，"
             f"確認後系統將開始執行分析。"
         )
-        next_phase = "resolved"
-    else:
-        reply_text = shared_socrates_bot.get_last_reply(new_socrates_state)
-        next_phase = "socratic"
+        return OrchestratorState(
+            messages       = [AIMessage(content=reply_text)],
+            phase          = "concept_resolved",   # → resolved_node 展開圖
+            socrates_state = new_socrates_state,
+        )
 
+    # 仍在對話中（running 或維持 concept_resolved）
+    reply_text = shared_socrates_bot.get_last_reply(new_socrates_state)
+    # 維持目前 phase（socratic 或 concept_resolved）
     return OrchestratorState(
         messages       = [AIMessage(content=reply_text)],
-        phase          = next_phase,
+        phase          = current_phase,
         socrates_state = new_socrates_state,
     )
 
 
 def resolved_node(state: OrchestratorState) -> OrchestratorState:
-    """resolved 後的處理節點。
+    """圖譜展開節點。
 
-    第一次進入（selected_path_id = None）：
-      對所有 candidates[:3] 呼叫 retrieve_graph()，
-      結果存入 OrchestratorState.all_graphs，回傳給前端。
-      chip 切換完全在前端處理，不再打 API。
+    職責：依據 socrates_state 的 candidates 展開 all_graphs，
+    組裝 graph_context，然後回到 socratic_node 讓使用者繼續對話。
 
-    第二次進入（selected_path_id 存在）：
-      直接路由到 main_agent_node。
+    採用覆蓋設計：每次進入都重新展開，舊的 all_graphs 直接替換。
+
+    selected_path_id 存在時（使用者已確認路徑）直接路由至 main_agent，
+    不重新展開圖。
     """
     socrates_state   = state.get("socrates_state")
     selected_path_id = state.get("selected_path_id")
@@ -272,19 +354,19 @@ def resolved_node(state: OrchestratorState) -> OrchestratorState:
             phase="socratic",
         )
 
-    # ── 第二次進入：有 path 選擇，直接導向 main_agent ──────────
+    # selected_path_id 存在 → 路徑已確認，直接導向 main_agent
     if selected_path_id is not None:
         return OrchestratorState(
             phase          = "main_agent",
             socrates_state = socrates_state,
         )
 
-    # ── 第一次進入：對所有 candidates 展開圖 ────────────────────
+    # 展開 candidates 的圖（覆蓋舊 all_graphs）
     candidates = socrates_state.get("candidates") or []
     all_graphs: Dict[int, Any] = {}
 
-    for cand in candidates[:3]:           # top-k 硬上限 = 3
-        idx     = cand["index"]           # 1-based
+    for cand in candidates[:3]:
+        idx     = cand["index"]
         eid     = cand.get("eid") or ""
         rc_name = cand.get("rc_name") or ""
 
@@ -293,7 +375,7 @@ def resolved_node(state: OrchestratorState) -> OrchestratorState:
             continue
 
         try:
-            raw_graph = shared_retriever.retrieve_graph(
+            raw_graph       = shared_retriever.retrieve_graph(
                 start_eid=eid,
                 rc_name=rc_name,
             )
@@ -302,10 +384,14 @@ def resolved_node(state: OrchestratorState) -> OrchestratorState:
             print(f"[resolved_node] retrieve_graph failed for {rc_name}: {exc}")
             all_graphs[idx] = None
 
+    graph_context = _build_graph_context(all_graphs)
+
+    # 回到 socratic 讓使用者繼續對話（解釋路徑或確認）
     return OrchestratorState(
-        phase          = "resolved",
+        phase          = "concept_resolved",
         socrates_state = socrates_state,
         all_graphs     = all_graphs,
+        graph_context  = graph_context,
     )
 
 
@@ -333,7 +419,6 @@ def main_agent_node(state: OrchestratorState) -> OrchestratorState:
     )
 
     if is_reselect:
-        # 從 all_graphs 找到含此 path_id 的 graph，再取 path 詳情
         target_graph  = _find_graph_by_path_id(all_graphs or {}, selected_path_id)
         selected_path = _find_path_by_id(target_graph, selected_path_id)
         user_msg      = _build_handoff_task(socrates_state, selected_path, all_graphs)
@@ -377,17 +462,32 @@ def main_agent_node(state: OrchestratorState) -> OrchestratorState:
 
 def entry_router(state: OrchestratorState) -> str:
     phase = state.get("phase") or "socratic"
-    if phase in ("socratic", "resolved", "main_agent"):
-        return phase
+    if phase in ("socratic", "concept_resolved"):
+        return "socratic"
+    if phase == "concept_resolved_expand":   # 內部觸發展開，不對外暴露
+        return "resolved"
+    if phase in ("path_confirmed", "main_agent"):
+        return "main_agent"
+    # 向下相容：舊的 resolved phase
+    if phase == "resolved":
+        return "resolved"
     return "socratic"
 
 
 def socratic_router(state: OrchestratorState) -> str:
-    return "resolved" if state.get("phase") == "resolved" else "end"
+    phase = state.get("phase") or "socratic"
+    if phase == "concept_resolved":
+        return "resolved"     # 有新 candidates → 展開圖（覆蓋）
+    if phase == "path_confirmed":
+        return "main_agent"   # 確認 path → 移交
+    return "end"              # 仍在對話 → 結束本輪等前端
 
 
 def resolved_router(state: OrchestratorState) -> str:
-    return "main_agent" if state.get("phase") == "main_agent" else "end"
+    phase = state.get("phase") or "concept_resolved"
+    if phase == "main_agent":
+        return "main_agent"   # selected_path_id 存在時直接到 main_agent
+    return "socratic"         # 展完圖回到 socratic 繼續對話
 
 
 # ======================================================================
@@ -409,11 +509,18 @@ workflow.set_conditional_entry_point(
 )
 workflow.add_conditional_edges(
     "socratic", socratic_router,
-    {"resolved": "resolved", "end": END},
+    {
+        "resolved":   "resolved",
+        "main_agent": "main_agent",
+        "end":        END,
+    },
 )
 workflow.add_conditional_edges(
     "resolved", resolved_router,
-    {"main_agent": "main_agent", "end": END},
+    {
+        "socratic":   "socratic",
+        "main_agent": "main_agent",
+    },
 )
 workflow.add_edge("main_agent", END)
 
@@ -436,7 +543,7 @@ class ChatResponse(BaseModel):
     reply:          str
     phase:          str
     socrates_phase: Optional[str]            = None
-    all_graphs:     Optional[Dict[int, Any]] = None   # chip 切換用，一次全給前端
+    all_graphs:     Optional[Dict[int, Any]] = None
 
 
 api = FastAPI()
@@ -477,10 +584,11 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
         else None
     )
 
-    # all_graphs：僅在 resolved_node 第一段結束（等待前端 chip 選擇）時回傳
+    # all_graphs：在 concept_resolved 且無 selected_path_id 時回傳給前端
+    # （包含首次展開與重新 retrieve 後的覆蓋結果）
     all_graphs_out: Optional[Dict[int, Any]] = None
     if (
-        result.get("phase") == "resolved"
+        result.get("phase") == "concept_resolved"
         and request.selected_path_id is None
     ):
         all_graphs_out = result.get("all_graphs")

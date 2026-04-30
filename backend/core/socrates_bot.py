@@ -4,11 +4,12 @@ core/socrates_bot.py
 SocratesChatBot：需求釐清 + concept 候選選擇。
 
 改動摘要：
-  • ChatState 移除 graph_data / all_graphs（改由 OrchestratorState 管理）
-  • retrieve_concepts tool 改呼叫 retrieve_candidates()，不再走 Neo4j chain
-  • 移除 _serialize_chain / _build_candidates_from_chains / ReasoningChain 相關邏輯
-  • candidates 結構改為 {index, eid, rc_name, type, score}
-  • _resolve_tools_from_candidate 改用 rc_name 比對
+  • ConversationPhase 新增 CONCEPT_RESOLVED / PATH_CONFIRMED
+    （原 RESOLVED 保留為向下相容別名）
+  • process_message 新增 graph_context 參數，動態注入路徑摘要
+    至 system prompt，不污染 agent_messages 歷史
+  • _handle_resolved 改設 CONCEPT_RESOLVED（不再直接 RESOLVED）
+  • 新增 confirm_path() 供外部將 phase 推進至 PATH_CONFIRMED
 """
 
 from __future__ import annotations
@@ -41,8 +42,11 @@ Neo4jReasoningRetriever = nrr.Neo4jReasoningRetriever
 # ═══════════════════════════════════════════════════════════════
 
 class ConversationPhase(Enum):
-    RUNNING  = "running"
-    RESOLVED = "resolved"
+    RUNNING          = "running"
+    CONCEPT_RESOLVED = "concept_resolved"   # 已選 concept，圖已展開，繼續對話
+    PATH_CONFIRMED   = "path_confirmed"     # 使用者確認 path，移交 main_agent
+    # 向下相容別名
+    RESOLVED         = "concept_resolved"
 
 
 class ChatState(TypedDict, total=False):
@@ -55,7 +59,6 @@ class ChatState(TypedDict, total=False):
     selected_index: Optional[int]
     tools:          Optional[List[dict]]
     parameters:     Optional[List[dict]]
-    # graph_data / all_graphs は OrchestratorState で管理するため削除
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -117,6 +120,12 @@ Resulting Concept 中，選出最符合其實際需求的模型或分析方法�
   * 將 action 設為 "resolved"。
 - 若使用者的輸入模糊或無法對應到任何候選，繼續追問，action 仍為 "ask"。
 
+### 階段 5：圖譜路徑說明（若已提供路徑資訊）
+- 若 system prompt 中包含「目前已展開的知識圖譜路徑」區塊，代表圖譜已展開。
+- 使用者可能詢問路徑的含義、論文背景、適用情境等，請根據路徑資訊回答。
+- 若使用者希望換一個分析方向，重新呼叫 `retrieve_concepts` 取得新的候選。
+- 此階段 action 維持 "ask"（路徑確認由前端按鈕完成，不在此處處理）。
+
 ## 輸出格式（強制）
 每輪必須輸出合法 JSON，不得有任何前綴文字或 markdown code block：
 {"action": "ask"|"resolved", "ai_message": "<繁體中文回覆>", "selected_index": null}
@@ -127,6 +136,7 @@ Resulting Concept 中，選出最符合其實際需求的模型或分析方法�
 
 - 對話以繁體中文；retrieve_concepts 的查詢語句用英文。
 - 未完成選擇前，action 絕對不能為 "resolved"。
+- 圖譜已展開後，不再需要 resolved，路徑確認由使用者在前端操作。
 """
 
 
@@ -293,8 +303,23 @@ class SocratesChatBot:
             parameters     = None,
         )
 
-    def process_message(self, state: ChatState, user_input: str) -> ChatState:
-        if state.get("phase") == ConversationPhase.RESOLVED.value:
+    def process_message(
+        self,
+        state:         ChatState,
+        user_input:    str,
+        graph_context: Optional[str] = None,
+    ) -> ChatState:
+        """處理單輪對話。
+
+        Parameters
+        ----------
+        state       : 目前的 ChatState。
+        user_input  : 使用者輸入文字。
+        graph_context : 已展開圖譜的路徑摘要文字（concept_resolved 階段傳入）。
+                        動態附加至 system prompt，不寫進 agent_messages 歷史。
+        """
+        # PATH_CONFIRMED 後不再處理
+        if state.get("phase") == ConversationPhase.PATH_CONFIRMED.value:
             return state
 
         state["messages"].append(HumanMessage(content=user_input))
@@ -309,7 +334,28 @@ class SocratesChatBot:
                 continue
             normalized_prior.append(m)
 
-        system_msg   = first_system or SystemMessage(content=_SYSTEM_PROMPT)
+        # ── 動態組裝 system prompt ──────────────────────────────
+        base_prompt = (
+            first_system.content
+            if first_system
+            else _SYSTEM_PROMPT
+        )
+        if graph_context:
+            effective_prompt = (
+                base_prompt
+                + "\n\n══════════════════════════════\n"
+                + "目前已展開的知識圖譜路徑\n"
+                + "══════════════════════════════\n"
+                + graph_context
+                + "\n\n使用者可能詢問路徑內容，請根據上方資訊協助解釋各路徑的意涵、"
+                + "論文背景與適用情境。\n"
+                + "若使用者希望換一個分析方向，可重新呼叫 retrieve_concepts 取得新候選。\n"
+                + "路徑的最終確認由使用者在前端按鈕完成，此處不需輸出 resolved。"
+            )
+        else:
+            effective_prompt = base_prompt
+
+        system_msg   = SystemMessage(content=effective_prompt)
         graph_result = self._graph.invoke({
             "messages":   [system_msg] + normalized_prior + [HumanMessage(content=user_input)],
             "candidates": state.get("candidates") or [],
@@ -329,8 +375,19 @@ class SocratesChatBot:
 
         state["messages"].append(AIMessage(content=ai_text))
 
-        if action == "resolved":
+        # concept_resolved 階段不允許再次觸發 _handle_resolved
+        if action == "resolved" and state.get("phase") != ConversationPhase.CONCEPT_RESOLVED.value:
             self._handle_resolved(state, user_input, bot_resp)
+
+        return state
+
+    def confirm_path(self, state: ChatState) -> ChatState:
+        """外部確認 path 後呼叫，將 phase 推進到 PATH_CONFIRMED。
+
+        由 socratic_node 在收到 selected_path_id 時呼叫。
+        不改動 messages / agent_messages，僅更新 phase。
+        """
+        state["phase"] = ConversationPhase.PATH_CONFIRMED.value
         return state
 
     def get_last_reply(self, state: ChatState) -> str:
@@ -402,7 +459,6 @@ class SocratesChatBot:
 
     # ------------------------------------------------------------------
     # retrieve_concepts tool
-    # 改呼叫 retrieve_candidates()，不再走 Neo4j chain
     # ------------------------------------------------------------------
 
     def _make_retrieve_tool(self) -> StructuredTool:
@@ -442,6 +498,7 @@ class SocratesChatBot:
             description=(
                 "查詢知識圖譜，找出與使用者需求最相關的 concept 候選清單。"
                 "需求釐清完成後呼叫此 tool，傳入精確的英文查詢語句。"
+                "圖譜已展開後，若使用者希望換方向，亦可再次呼叫。"
             ),
         )
 
@@ -481,7 +538,7 @@ class SocratesChatBot:
         return {"action": "ask", "ai_message": raw, "selected_index": None}
 
     # ------------------------------------------------------------------
-    # Handle resolved
+    # Handle resolved（concept 選定，phase → CONCEPT_RESOLVED）
     # ------------------------------------------------------------------
 
     def _handle_resolved(
@@ -512,7 +569,7 @@ class SocratesChatBot:
         state["selected_index"] = chosen_idx
         state["tools"]          = tools
         state["parameters"]     = params
-        state["phase"]          = ConversationPhase.RESOLVED.value
+        state["phase"]          = ConversationPhase.CONCEPT_RESOLVED.value  # ← 改為 CONCEPT_RESOLVED
 
     # ------------------------------------------------------------------
     # CLI interactive mode
@@ -523,7 +580,10 @@ class SocratesChatBot:
         print("=== SocratesChatBot ===\n")
         state = self.process_message(state, "你好，請開始引導我。")
         print(f"Bot: {self.get_last_reply(state)}\n")
-        while state.get("phase") != ConversationPhase.RESOLVED.value:
+        while state.get("phase") not in (
+            ConversationPhase.CONCEPT_RESOLVED.value,
+            ConversationPhase.PATH_CONFIRMED.value,
+        ):
             try:
                 user_input = input("You: ").strip()
             except (EOFError, KeyboardInterrupt):
@@ -536,6 +596,7 @@ class SocratesChatBot:
         print("=== 最終結果 ===")
         print(json.dumps({
             "query":          state.get("query"),
+            "phase":          state.get("phase"),
             "selected_index": state.get("selected_index"),
             "candidates":     state.get("candidates"),
             "tools":          state.get("tools"),

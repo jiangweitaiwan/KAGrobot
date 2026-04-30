@@ -66,7 +66,6 @@ export default function Page() {
   const [error,     setError]     = useState("");
 
   // ── graph state ───────────────────────────────────────────
-  // allGraphs: candidateIndex(number) → GraphData | null
   const [allGraphs,       setAllGraphs]       = useState<Record<number, GraphData | null>>({});
   const [activeChipIndex, setActiveChipIndex] = useState<number | null>(null);
   const [graphData,       setGraphData]       = useState<GraphData | null>(null);
@@ -123,7 +122,6 @@ export default function Page() {
     const g = allGraphs[index] ?? null;
     setActiveChipIndex(index);
     setGraphData(g);
-    // 重置路徑選擇，使用各圖自帶的預設 selected_path_id
     if (g) {
       const defaultPathId = typeof g.selected_path_id === "number"
         ? g.selected_path_id : null;
@@ -136,13 +134,35 @@ export default function Page() {
     }
   }
 
-  // ── 使用者在圖上點選路徑 ─────────────────────────────────
+  // ── 使用者在圖上或 legend 點選路徑 ───────────────────────
   function handlePathSelect(pathId: number, finalLabel: string) {
     setSelectedPathId(pathId);
     setSelectedLabel(finalLabel);
   }
 
-  // ── 一般對話送出（socratic 階段）────────────────────────────
+  // ── 初始化圖面板（收到 all_graphs 時呼叫）────────────────
+  function initGraphPanel(parsed: Record<number, GraphData | null>) {
+    setAllGraphs(parsed);
+    const keys      = Object.keys(parsed).map(Number).filter((k) => parsed[k]);
+    const firstIdx  = keys.length ? Math.min(...keys) : null;
+
+    if (firstIdx !== null) {
+      setActiveChipIndex(firstIdx);
+      const firstGraph = parsed[firstIdx];
+      setGraphData(firstGraph ?? null);
+      setGraphVisible(true);
+
+      if (firstGraph) {
+        const defaultPathId = typeof firstGraph.selected_path_id === "number"
+          ? firstGraph.selected_path_id : null;
+        setSelectedPathId(defaultPathId);
+        const defaultPath = firstGraph.paths?.find((p) => p.path_id === defaultPathId);
+        setSelectedLabel(defaultPath?.final_label ?? null);
+      }
+    }
+  }
+
+  // ── 一般對話送出（socratic / concept_resolved 階段）──────
   async function submitMessage(e: FormEvent) {
     e.preventDefault();
     if (!canSend) return;
@@ -160,40 +180,27 @@ export default function Page() {
       const response = await fetch(`${API_BASE.replace(/\/$/, "")}/chat`, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ session_id: sessionId, message: text, phase }),
+        // concept_resolved 階段繼續走 socratic，不帶 selected_path_id
+        body: JSON.stringify({
+          session_id: sessionId,
+          message:    text,
+          phase:      phase === "concept_resolved" ? "concept_resolved" : "socratic",
+        }),
       });
       if (!response.ok) throw new Error(`API error ${response.status}`);
 
-      const data = (await response.json()) as ChatResponse;
+      const data      = (await response.json()) as ChatResponse;
       const nextPhase = data.phase || "socratic";
       setPhase(nextPhase);
       localStorage.setItem(PHASE_KEY, nextPhase);
 
-      // all_graphs 回傳時，初始化 chip 狀態並顯示第一張圖
+      // all_graphs 回傳：概念選定後首次展開，或重新 retrieve 後的覆蓋結果
       if (data.all_graphs) {
-        // JSON key 為字串，轉換回 number key
         const parsed: Record<number, GraphData | null> = {};
         for (const [k, v] of Object.entries(data.all_graphs)) {
           parsed[Number(k)] = v;
         }
-        setAllGraphs(parsed);
-
-        // 預設顯示第一個有資料的 chip
-        const firstIdx = Math.min(...Object.keys(parsed).map(Number).filter((k) => parsed[k]));
-        if (isFinite(firstIdx)) {
-          setActiveChipIndex(firstIdx);
-          const firstGraph = parsed[firstIdx];
-          setGraphData(firstGraph ?? null);
-          setGraphVisible(true);
-
-          if (firstGraph) {
-            const defaultPathId = typeof firstGraph.selected_path_id === "number"
-              ? firstGraph.selected_path_id : null;
-            setSelectedPathId(defaultPathId);
-            const defaultPath = firstGraph.paths?.find((p) => p.path_id === defaultPathId);
-            setSelectedLabel(defaultPath?.final_label ?? null);
-          }
-        }
+        initGraphPanel(parsed);
       }
 
       await typewriterAppend(data.reply || "");
@@ -208,10 +215,11 @@ export default function Page() {
     }
   }
 
-  // ── 確認路徑（首次或重選皆使用此函式）──────────────────────
+  // ── 確認路徑（首次確認或重選皆使用此函式）───────────────
   async function confirmPathSelection() {
     if (selectedPathId === null || !sessionId || isLoading) return;
     if (!API_BASE) { setError("尚未設定 NEXT_PUBLIC_API_BASE_URL。"); return; }
+    // main_agent 階段且路徑未變更，不重複送出
     if (selectedPathId === confirmedPathId && phase === "main_agent") return;
 
     setError("");
@@ -227,13 +235,15 @@ export default function Page() {
     };
     setMessages((prev) => [...prev, confirmMsg]);
 
-    const sendPhase = isReselect ? "main_agent" : "resolved";
+    // concept_resolved 首次確認 → 送 concept_resolved + selected_path_id
+    // main_agent 重選 → 送 main_agent + selected_path_id
+    const sendPhase = isReselect ? "main_agent" : "concept_resolved";
 
     try {
       const response = await fetch(`${API_BASE.replace(/\/$/, "")}/chat`, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({
+        body: JSON.stringify({
           session_id:       sessionId,
           message:          confirmMsg.content,
           phase:            sendPhase,
@@ -242,7 +252,7 @@ export default function Page() {
       });
       if (!response.ok) throw new Error(`API error ${response.status}`);
 
-      const data = (await response.json()) as ChatResponse;
+      const data      = (await response.json()) as ChatResponse;
       const nextPhase = data.phase || "main_agent";
       setPhase(nextPhase);
       localStorage.setItem(PHASE_KEY, nextPhase);
@@ -292,7 +302,6 @@ export default function Page() {
 
   const showGraph = graphVisible && graphData && graphData.nodes.length > 0;
 
-  // chip 清單：從 allGraphs 的 key 推導
   const chipList = Object.entries(allGraphs)
     .map(([k, g]) => ({
       index:   Number(k),
@@ -303,8 +312,12 @@ export default function Page() {
 
   const isReselect      = phase === "main_agent" && confirmedPathId !== null;
   const hasNewSelection = selectedPathId !== null && selectedPathId !== confirmedPathId;
-  const showConfirm     = showGraph && selectedLabel !== null && (
-    phase === "resolved" || (isReselect && hasNewSelection)
+
+  // 確認按鈕顯示條件：
+  //   - concept_resolved 且已選路徑（首次確認）
+  //   - main_agent 且選了不同路徑（重選）
+  const showConfirm = showGraph && selectedLabel !== null && (
+    phase === "concept_resolved" || (isReselect && hasNewSelection)
   );
 
   const confirmBtnText = isLoading
@@ -312,6 +325,13 @@ export default function Page() {
     : isReselect
       ? `切換至「${selectedLabel}」，重新分析 →`
       : `確認選擇「${selectedLabel}」，開始分析 →`;
+
+  // concept_resolved 階段仍可繼續輸入訊息（向 Socrates 詢問路徑）
+  const inputPlaceholder = phase === "concept_resolved"
+    ? "可詢問路徑含義，或直接在右側圖譜選擇路徑後按確認…"
+    : phase === "main_agent"
+      ? "繼續詢問分析細節，或在右側切換路徑…"
+      : "輸入你的問題…";
 
   // ─────────────────────────────────────────────────────────
   // Render
@@ -362,7 +382,7 @@ export default function Page() {
           <div>
             <form onSubmit={submitMessage}>
               <textarea
-                placeholder="輸入你的問題…"
+                placeholder={inputPlaceholder}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 disabled={isLoading}
@@ -412,7 +432,7 @@ export default function Page() {
               </div>
             )}
 
-            {/* path legend（當前圖的路徑列表）*/}
+            {/* path legend */}
             {graphData && graphData.paths.length > 0 && (
               <div className="path-legend">
                 {graphData.paths.map((p) => (
