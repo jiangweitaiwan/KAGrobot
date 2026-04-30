@@ -1,15 +1,15 @@
 """
 core/socrates_bot.py
 ─────────────────────────────────────────────────────────────
-SocratesChatBot：需求釐清 + concept 候選選擇。
+SocratesChatBot：需求釐清 + 協助使用者選擇推理路徑。
 
-改動摘要：
-  • ConversationPhase 新增 CONCEPT_RESOLVED / PATH_CONFIRMED
-    （原 RESOLVED 保留為向下相容別名）
-  • process_message 新增 graph_context 參數，動態注入路徑摘要
-    至 system prompt，不污染 agent_messages 歷史
-  • _handle_resolved 改設 CONCEPT_RESOLVED（不再直接 RESOLVED）
-  • 新增 confirm_path() 供外部將 phase 推進至 PATH_CONFIRMED
+改動摘要（v3）：
+  • 移除 candidate 選擇步驟（不再需要使用者選 candidate）
+  • retrieve_tool 呼叫後，外部（entry.py）在背景並行展開 all_graphs
+  • 新增 concept_tool：輸入 rc_name，查詢 description + paper premises/constraints
+  • graph_context 在 all_graphs 展開後注入 system prompt，提供路徑輪廓
+  • phase 流程：RUNNING → CONCEPT_RESOLVED（retrieve 完成）→ PATH_CONFIRMED
+  • _handle_resolved / _parse_selection 廢棄
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ Neo4jReasoningRetriever = nrr.Neo4jReasoningRetriever
 
 class ConversationPhase(Enum):
     RUNNING          = "running"
-    CONCEPT_RESOLVED = "concept_resolved"   # 已選 concept，圖已展開，繼續對話
+    CONCEPT_RESOLVED = "concept_resolved"   # retrieve 完成，圖已展開
     PATH_CONFIRMED   = "path_confirmed"     # 使用者確認 path，移交 main_agent
     # 向下相容別名
     RESOLVED         = "concept_resolved"
@@ -97,61 +97,42 @@ class _InternalState(TypedDict):
 # ═══════════════════════════════════════════════════════════════
 
 _SYSTEM_PROMPT = """\
-你是一位專業經濟學顧問，目標是協助使用者從知識圖譜的
-Resulting Concept 中，選出最符合其實際需求的模型或分析方法。
+你是一位專業經濟學顧問，協助使用者從知識圖譜的推理路徑中，
+選出最符合其分析需求的模型或方法。
 
 ## 工作流程
 
 ### 階段 1：需求釐清
-- 了解使用者需求（1-2 輪即可，避免過度追問）
+- 了解使用者的分析目標（1-2 輪即可，避免過度追問）。
 
-### 階段 2：查詢知識圖譜
-- 呼叫 `retrieve_concepts` tool，傳入精確的**英文**查詢語句。
+### 階段 2：查詢知識圖譜（retrieve_concepts）
+- 釐清需求後，主動呼叫 `retrieve_concepts`，傳入精確的**英文**查詢語句。
 - 若結果為空（found=false），告知使用者並請重新描述需求後再試。
-
-### 階段 3：展示候選，等待使用者選擇
-- 將 `retrieve_concepts` 回傳的 `display` 欄位內容展示給使用者。
-- 請使用者輸入選項編號（如 "1"）或概念名稱。
+- retrieve 完成後，向使用者說明找到的候選概念，並告知圖譜正在載入至右側面板。
 - 此時 action = "ask"。
 
-### 階段 4：確認選擇
-- 使用者明確給出編號或可辨識的名稱後：
-  * 在 ai_message 中說明已選擇的項目。
-  * 將 action 設為 "resolved"。
-- 若使用者的輸入模糊或無法對應到任何候選，繼續追問，action 仍為 "ask"。
-
-### 階段 5：圖譜路徑說明（若已提供路徑資訊）
-- 若 system prompt 中包含「目前已展開的知識圖譜路徑」區塊，代表圖譜已展開。
-- 使用者可能詢問路徑的含義、論文背景、適用情境等，請根據路徑資訊回答。
-- 若使用者希望換一個分析方向，重新呼叫 `retrieve_concepts` 取得新的候選。
-- 此階段 action 維持 "ask"（路徑確認由前端按鈕完成，不在此處處理）。
+### 階段 3：路徑說明與引導（圖譜已展開後）
+- 若 system prompt 包含「目前已展開的知識圖譜路徑」區塊，代表圖譜已展開。
+- 根據路徑輪廓（c1 → c2 → c3）向使用者說明各路徑的分析方向。
+- 若使用者想了解某個概念的理論細節，主動呼叫 `retrieve_concept_detail`。
+- 若使用者希望換一個分析方向，重新呼叫 `retrieve_concepts`。
+- 引導使用者在右側圖譜點選路徑後按確認按鈕，路徑確認由前端完成。
+- 此階段 action 維持 "ask"。
 
 ## 輸出格式（強制）
 每輪必須輸出合法 JSON，不得有任何前綴文字或 markdown code block：
-{"action": "ask"|"resolved", "ai_message": "<繁體中文回覆>", "selected_index": null}
-
-**selected_index 規則：**
-- action="ask" 時：selected_index 必須為 null。
-- action="resolved" 時：selected_index 必須填入使用者所選項目的編號（整數，與展示的 [1][2]... 一致）。
+{"action": "ask", "ai_message": "<繁體中文回覆>"}
 
 - 對話以繁體中文；retrieve_concepts 的查詢語句用英文。
-- 未完成選擇前，action 絕對不能為 "resolved"。
-- 圖譜已展開後，不再需要 resolved，路徑確認由使用者在前端操作。
+- action 永遠為 "ask"，路徑確認由使用者在前端操作，不在此處處理。
 """
 
 
 class OutputSchema(BaseModel):
-    action: Literal["ask", "resolved"] = Field(
-        description="本輪狀態：ask=需要追問/等待使用者選擇；resolved=已明確完成選擇。"
+    action: Literal["ask"] = Field(
+        description="本輪狀態，固定為 ask。路徑確認由前端按鈕完成。"
     )
     ai_message: str = Field(description="繁體中文回覆內容。")
-    selected_index: Optional[int] = Field(
-        default=None,
-        description=(
-            "action='resolved' 時必填。使用者所選候選項目的 1-based 編號。"
-            "action='ask' 時設為 null。"
-        ),
-    )
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -171,64 +152,52 @@ def _resolve_agent_type(
     return None
 
 
-def _resolve_tools_from_candidate(
-    chosen_candidate: dict,
+def _resolve_tools_from_candidates(
+    candidates: List[dict],
     concept_to_agent: Dict[str, AgentType],
 ) -> tuple:
-    """從選定的 candidate 解析工具清單與參數。
+    """從所有 candidates 解析工具聯集。
 
-    Parameters
-    ----------
-    chosen_candidate : {index, eid, rc_name, type, score}
+    在取消 candidate 選擇後，tools 改為所有 candidates 的聯集，
+    待 path 確認後由 main_agent 自行判斷使用哪些工具。
     """
-    rc_name = chosen_candidate.get("rc_name") or ""
-    agent_t = _resolve_agent_type(rc_name, concept_to_agent)
-
-    if agent_t is None:
-        return [], []
-
-    base_tools = AGENTS_REGISTRY.get(agent_t, {}).get("tools", [])
-    all_tools  = collect_tools_with_deps(base_tools)
-
+    seen_tools: set        = set()
     resolved_tools:  List[dict] = []
     resolved_params: List[dict] = []
 
-    for tname in all_tools:
-        entry = TOOLS_REGISTRY.get(tname)
-        if entry is None:
+    for cand in candidates:
+        rc_name = cand.get("rc_name") or ""
+        agent_t = _resolve_agent_type(rc_name, concept_to_agent)
+        if agent_t is None:
             continue
-        is_dep = tname not in base_tools
-        resolved_tools.append({
-            "tool_name":       tname,
-            "description":     entry["description"],
-            "skills":          entry["skills"],
-            "from_agent":      agent_t.value,
-            "matched_concept": rc_name,
-            "is_dependency":   is_dep,
-        })
-        if entry.get("parameters"):
-            resolved_params.append({
-                "tool_name":  tname,
-                "parameters": entry["parameters"],
+
+        base_tools = AGENTS_REGISTRY.get(agent_t, {}).get("tools", [])
+        all_tools  = collect_tools_with_deps(base_tools)
+
+        for tname in all_tools:
+            if tname in seen_tools:
+                continue
+            seen_tools.add(tname)
+
+            entry = TOOLS_REGISTRY.get(tname)
+            if entry is None:
+                continue
+            is_dep = tname not in base_tools
+            resolved_tools.append({
+                "tool_name":       tname,
+                "description":     entry["description"],
+                "skills":          entry["skills"],
+                "from_agent":      agent_t.value,
+                "matched_concept": rc_name,
+                "is_dependency":   is_dep,
             })
+            if entry.get("parameters"):
+                resolved_params.append({
+                    "tool_name":  tname,
+                    "parameters": entry["parameters"],
+                })
 
     return resolved_tools, resolved_params
-
-
-def _parse_selection(text: str, candidates: List[dict]) -> Optional[int]:
-    """從使用者輸入解析選擇，回傳 0-based index。"""
-    clean = text.strip()
-    for token in clean.replace("、", " ").replace("，", " ").split():
-        if token.isdigit():
-            num = int(token)
-            if 1 <= num <= len(candidates):
-                return num - 1
-    lower = clean.lower()
-    for i, cand in enumerate(candidates):
-        rc_name = (cand.get("rc_name") or "").lower()
-        if rc_name and (rc_name in lower or lower in rc_name):
-            return i
-    return None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -261,7 +230,12 @@ def _format_selected_chain(candidate: Optional[dict]) -> str:
 # ═══════════════════════════════════════════════════════════════
 
 class SocratesChatBot:
-    """需求釐清 + concept 候選選擇的蘇格拉底對話 Agent。"""
+    """需求釐清 + 路徑選擇引導的蘇格拉底對話 Agent。
+
+    tools：
+      retrieve_concepts      — 語意搜尋 candidates
+      retrieve_concept_detail — 查詢指定 concept 的理論細節
+    """
 
     def __init__(
         self,
@@ -282,9 +256,13 @@ class SocratesChatBot:
         base_llm = ChatGoogleGenerativeAI(
             model=model, google_api_key=api_key, temperature=0.1)
 
-        self._retrieve_tool  = self._make_retrieve_tool()
-        self._llm_with_tools = base_llm.bind_tools([self._retrieve_tool])
-        self._graph          = self._build_graph()
+        self._retrieve_tool      = self._make_retrieve_tool()
+        self._concept_detail_tool = self._make_concept_detail_tool()
+        self._llm_with_tools     = base_llm.bind_tools([
+            self._retrieve_tool,
+            self._concept_detail_tool,
+        ])
+        self._graph = self._build_graph()
 
     # ------------------------------------------------------------------
     # Public API
@@ -315,10 +293,10 @@ class SocratesChatBot:
         ----------
         state       : 目前的 ChatState。
         user_input  : 使用者輸入文字。
-        graph_context : 已展開圖譜的路徑摘要文字（concept_resolved 階段傳入）。
+        graph_context : 已展開圖譜的路徑摘要文字。
                         動態附加至 system prompt，不寫進 agent_messages 歷史。
+                        all_graphs 展開完成後由 entry.py 傳入。
         """
-        # PATH_CONFIRMED 後不再處理
         if state.get("phase") == ConversationPhase.PATH_CONFIRMED.value:
             return state
 
@@ -347,10 +325,9 @@ class SocratesChatBot:
                 + "目前已展開的知識圖譜路徑\n"
                 + "══════════════════════════════\n"
                 + graph_context
-                + "\n\n使用者可能詢問路徑內容，請根據上方資訊協助解釋各路徑的意涵、"
-                + "論文背景與適用情境。\n"
-                + "若使用者希望換一個分析方向，可重新呼叫 retrieve_concepts 取得新候選。\n"
-                + "路徑的最終確認由使用者在前端按鈕完成，此處不需輸出 resolved。"
+                + "\n\n請根據上方路徑輪廓向使用者說明各路徑的分析方向。"
+                + "若使用者追問特定概念的理論細節，呼叫 retrieve_concept_detail。\n"
+                + "引導使用者在右側圖譜點選路徑後按確認按鈕。"
             )
         else:
             effective_prompt = base_prompt
@@ -366,27 +343,27 @@ class SocratesChatBot:
 
         if graph_result.get("query"):
             state["query"] = graph_result["query"]
-        if graph_result.get("candidates"):
-            state["candidates"] = graph_result["candidates"]
+
+        # candidates 更新：retrieve_tool 呼叫後觸發
+        new_candidates = graph_result.get("candidates")
+        if new_candidates:
+            state["candidates"] = new_candidates
+            # 解析所有 candidates 的工具聯集，供 main_agent 使用
+            tools, params = _resolve_tools_from_candidates(
+                new_candidates, self._concept_to_agent)
+            state["tools"]      = tools
+            state["parameters"] = params
+            # phase 推進到 concept_resolved，通知 entry.py 展開圖
+            state["phase"] = ConversationPhase.CONCEPT_RESOLVED.value
 
         bot_resp = self._parse_bot_response(new_agent_msgs)
         ai_text  = bot_resp.get("ai_message", "")
-        action   = bot_resp.get("action", "ask")
-
         state["messages"].append(AIMessage(content=ai_text))
-
-        # concept_resolved 階段不允許再次觸發 _handle_resolved
-        if action == "resolved" and state.get("phase") != ConversationPhase.CONCEPT_RESOLVED.value:
-            self._handle_resolved(state, user_input, bot_resp)
 
         return state
 
     def confirm_path(self, state: ChatState) -> ChatState:
-        """外部確認 path 後呼叫，將 phase 推進到 PATH_CONFIRMED。
-
-        由 socratic_node 在收到 selected_path_id 時呼叫。
-        不改動 messages / agent_messages，僅更新 phase。
-        """
+        """外部確認 path 後呼叫，將 phase 推進到 PATH_CONFIRMED。"""
         state["phase"] = ConversationPhase.PATH_CONFIRMED.value
         return state
 
@@ -402,7 +379,10 @@ class SocratesChatBot:
 
     def _build_graph(self):
         llm      = self._llm_with_tools
-        tool_map = {self._retrieve_tool.name: self._retrieve_tool}
+        tool_map = {
+            self._retrieve_tool.name:       self._retrieve_tool,
+            self._concept_detail_tool.name: self._concept_detail_tool,
+        }
 
         def agent_node(state: _InternalState) -> dict:
             response = call_with_retry(lambda: llm.invoke(state["messages"]))
@@ -428,12 +408,24 @@ class SocratesChatBot:
                 except (json.JSONDecodeError, TypeError):
                     data = {}
 
-                if data.get("found"):
-                    state_updates["candidates"] = data.get("candidates", [])
-                    state_updates["query"]      = data.get("query", "")
-                    slim = data.get("display") or "（查無結果）"
+                # retrieve_concepts 回傳處理
+                if tc["name"] == self._retrieve_tool.name:
+                    if data.get("found"):
+                        state_updates["candidates"] = data.get("candidates", [])
+                        state_updates["query"]      = data.get("query", "")
+                        slim = data.get("display") or "（查無結果）"
+                    else:
+                        slim = data.get("message") or raw_result
+
+                # retrieve_concept_detail 回傳處理
+                elif tc["name"] == self._concept_detail_tool.name:
+                    if data.get("found"):
+                        slim = _format_concept_detail(data)
+                    else:
+                        slim = data.get("message") or raw_result
+
                 else:
-                    slim = data.get("message") or raw_result
+                    slim = raw_result
 
                 tool_messages.append(ToolMessage(
                     content=slim, tool_call_id=tc["id"], name=tc["name"],
@@ -498,7 +490,33 @@ class SocratesChatBot:
             description=(
                 "查詢知識圖譜，找出與使用者需求最相關的 concept 候選清單。"
                 "需求釐清完成後呼叫此 tool，傳入精確的英文查詢語句。"
-                "圖譜已展開後，若使用者希望換方向，亦可再次呼叫。"
+                "若使用者希望換分析方向，亦可再次呼叫。"
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # retrieve_concept_detail tool
+    # ------------------------------------------------------------------
+
+    def _make_concept_detail_tool(self) -> StructuredTool:
+        retriever = self._retriever
+
+        def retrieve_concept_detail(rc_name: str) -> str:
+            """查詢指定 concept 的描述與所屬論文的理論前提及模型約束。"""
+            result = retriever.retrieve_concept_detail(rc_name)
+            return json.dumps(result, ensure_ascii=False)
+
+        return StructuredTool.from_function(
+            func=retrieve_concept_detail,
+            name="retrieve_concept_detail",
+            description=(
+                "查詢指定 Resulting Concept 的詳細資訊，包含：\n"
+                "  - concept 的 description（概念說明）\n"
+                "  - 產生此 concept 的 paper 標題\n"
+                "  - paper 的 conceptual_premises（理論前提假設）\n"
+                "  - paper 的 contextual_model_constraints（模型情境約束）\n"
+                "當使用者詢問某個概念或路徑的理論背景、適用條件時呼叫。\n"
+                "輸入 rc_name 為 Resulting Concept 的名稱（允許部分匹配）。"
             ),
         )
 
@@ -531,45 +549,11 @@ class SocratesChatBot:
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
         try:
             data = json.loads(raw)
-            if "action" in data and "ai_message" in data:
+            if "ai_message" in data:
                 return data
         except (json.JSONDecodeError, TypeError):
             pass
-        return {"action": "ask", "ai_message": raw, "selected_index": None}
-
-    # ------------------------------------------------------------------
-    # Handle resolved（concept 選定，phase → CONCEPT_RESOLVED）
-    # ------------------------------------------------------------------
-
-    def _handle_resolved(
-        self,
-        state:      ChatState,
-        user_input: str,
-        bot_resp:   dict,
-    ) -> None:
-        candidates = state.get("candidates") or []
-        if not candidates:
-            return
-
-        chosen_idx: Optional[int] = None
-        llm_index = bot_resp.get("selected_index")
-        if isinstance(llm_index, (int, float)) and llm_index is not None:
-            llm_index = int(llm_index)
-            if 1 <= llm_index <= len(candidates):
-                chosen_idx = llm_index - 1
-        if chosen_idx is None:
-            chosen_idx = _parse_selection(user_input, candidates)
-        if chosen_idx is None:
-            return
-
-        chosen        = candidates[chosen_idx]
-        tools, params = _resolve_tools_from_candidate(
-            chosen, self._concept_to_agent)
-
-        state["selected_index"] = chosen_idx
-        state["tools"]          = tools
-        state["parameters"]     = params
-        state["phase"]          = ConversationPhase.CONCEPT_RESOLVED.value  # ← 改為 CONCEPT_RESOLVED
+        return {"action": "ask", "ai_message": raw}
 
     # ------------------------------------------------------------------
     # CLI interactive mode
@@ -594,12 +578,33 @@ class SocratesChatBot:
             state = self.process_message(state, user_input)
             print(f"Bot: {self.get_last_reply(state)}\n")
         print("=== 最終結果 ===")
-        print(json.dumps({
-            "query":          state.get("query"),
-            "phase":          state.get("phase"),
-            "selected_index": state.get("selected_index"),
-            "candidates":     state.get("candidates"),
-            "tools":          state.get("tools"),
-            "parameters":     state.get("parameters"),
+        import json as _json
+        print(_json.dumps({
+            "query":      state.get("query"),
+            "phase":      state.get("phase"),
+            "candidates": state.get("candidates"),
+            "tools":      state.get("tools"),
         }, ensure_ascii=False, indent=2))
         return state
+
+
+# ═══════════════════════════════════════════════════════════════
+# Formatting helper
+# ═══════════════════════════════════════════════════════════════
+
+def _format_concept_detail(data: dict) -> str:
+    """將 retrieve_concept_detail 回傳結果格式化為 LLM 可讀文字。"""
+    lines: List[str] = []
+    lines.append(f"概念：{data.get('rc_name', '')}")
+    if data.get("description"):
+        lines.append(f"說明：{data['description']}")
+    papers = data.get("papers") or []
+    if papers:
+        lines.append("相關論文：")
+        for p in papers:
+            lines.append(f"  ▸ {p.get('title', '（未命名）')}")
+            if p.get("premises"):
+                lines.append(f"    前提假設：{p['premises']}")
+            if p.get("constraints"):
+                lines.append(f"    模型約束：{p['constraints']}")
+    return "\n".join(lines)

@@ -10,6 +10,11 @@ retrieve_candidates(query, top_k)
 retrieve_graph(start_eid, rc_name, max_depth)
     以已知 element_id 直接展開 BFS，回傳 {nodes, edges, paths}。
     不呼叫 SBERT，由 resolved_node 使用。
+
+retrieve_concept_detail(rc_name)
+    查詢指定 concept 的 description 以及所屬 paper 的
+    conceptual_premises / contextual_model_constraints。
+    供 SocratesChatBot concept_tool 使用。
 """
 
 import numpy as np
@@ -203,8 +208,6 @@ class Neo4jReasoningRetriever:
 
     # ----------------------------------------------------------
     # Public: retrieve_candidates()
-    # 只做 SBERT 搜尋，不走 Neo4j chain。
-    # 回傳供 socratic 階段展示的 candidate 清單。
     # ----------------------------------------------------------
 
     def retrieve_candidates(
@@ -240,8 +243,89 @@ class Neo4jReasoningRetriever:
         ]
 
     # ----------------------------------------------------------
+    # Public: retrieve_concept_detail()
+    # 供 SocratesChatBot concept_tool 使用。
+    # ----------------------------------------------------------
+
+    def retrieve_concept_detail(
+        self,
+        rc_name: str,
+    ) -> Dict[str, Any]:
+        """查詢指定 concept 的描述與所屬論文的理論背景。
+
+        以 concept name 模糊匹配（CONTAINS，不區分大小寫），
+        回傳第一筆匹配結果。
+
+        Parameters
+        ----------
+        rc_name : Resulting Concept 名稱（允許部分匹配）。
+
+        Returns
+        -------
+        {
+          "found":        bool,
+          "rc_name":      str,
+          "description":  str | None,
+          "papers": [
+            {
+              "title":       str,
+              "premises":    str | None,
+              "constraints": str | None,
+            },
+            ...
+          ],
+          "message": str   # found=False 時的說明
+        }
+        """
+        with self.driver.session() as session:
+            rows = session.run(
+                """
+                MATCH (c:Concept)
+                WHERE toLower(c.name) CONTAINS toLower($name)
+                OPTIONAL MATCH (p:Paper)-[:PRODUCES]->(c)
+                RETURN
+                    c.name                          AS name,
+                    c.description                   AS description,
+                    collect({
+                        title:       p.title,
+                        premises:    p.conceptual_premises,
+                        constraints: p.contextual_model_constraints
+                    }) AS papers
+                LIMIT 1
+                """,
+                name=rc_name,
+            ).data()
+
+        if not rows:
+            return {
+                "found":   False,
+                "rc_name": rc_name,
+                "message": f"找不到與「{rc_name}」相符的 concept。",
+                "papers":  [],
+            }
+
+        row = rows[0]
+
+        # 過濾掉 title 為 None 的空 paper 項目（OPTIONAL MATCH 無結果時產生）
+        papers = [
+            {
+                "title":       p["title"],
+                "premises":    p["premises"],
+                "constraints": p["constraints"],
+            }
+            for p in (row["papers"] or [])
+            if p.get("title")
+        ]
+
+        return {
+            "found":       True,
+            "rc_name":     row["name"],
+            "description": row["description"],
+            "papers":      papers,
+        }
+
+    # ----------------------------------------------------------
     # Public: retrieve_graph()
-    # 以已知 element_id 直接展開 BFS，不呼叫 SBERT。
     # ----------------------------------------------------------
 
     def retrieve_graph(
@@ -271,7 +355,6 @@ class Neo4jReasoningRetriever:
         edges_map: Dict[str, dict] = {}
         all_paths: List[dict]      = []
 
-        # 起始節點直接 upsert，matched=True
         self._upsert_concept_node(
             nodes_map, start_eid, rc_name, "Resulting_Concept", matched=True
         )
@@ -308,7 +391,6 @@ class Neo4jReasoningRetriever:
             for raw in raw_paths:
                 self._integrate_path(raw, nodes_map, edges_map, all_paths)
 
-        # 路徑去重（以 node_id 序列為 signature）
         seen_sigs: set = set()
         unique_paths: List[dict] = []
         for p in all_paths:
@@ -495,7 +577,7 @@ class Neo4jReasoningRetriever:
         return rec["kind"] if rec else "other"
 
     # ----------------------------------------------------------
-    # BFS: _walk_all_paths（RC 起點，展開所有分支）
+    # BFS: _walk_all_paths
     # ----------------------------------------------------------
 
     @staticmethod
@@ -576,7 +658,7 @@ class Neo4jReasoningRetriever:
         return completed
 
     # ----------------------------------------------------------
-    # BFS: _walk_all_paths_from_other（非 RC 起點）
+    # BFS: _walk_all_paths_from_other
     # ----------------------------------------------------------
 
     @staticmethod
