@@ -4,7 +4,7 @@
   
   # 請將這裡的路徑換成你實際的 GCS 路徑
   # 建議使用 gs://your-bucket-name/sbert_onnx.tar.gz
-  ARG GCS_MODEL_URL="gs://kagrobot-models/sbert_onnx.tar.gz"
+  ARG GCS_MODEL_URL="gs://kagrobot-sbert-models/sbert_onnx.tar.gz"
   
   # 從 GCS 下載並解壓縮
   # 注意：假設你的 tar.gz 裡面直接就是模型檔案，或是帶有 backend/sbert_onnx 路徑
