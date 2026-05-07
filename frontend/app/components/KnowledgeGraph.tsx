@@ -39,6 +39,7 @@ export type GraphPath = {
   edge_ids: string[];
   final_concept: string;
   final_label: string;
+  direction?: "upstream" | "downstream";
 };
 
 export type GraphData = {
@@ -162,7 +163,6 @@ export default function KnowledgeGraph({
           .distance((e) => {
             const s = e.source as GraphNode;
             const t = e.target as GraphNode;
-            // paper→concept edges shorter; concept→concept longer
             if (s.node_type === "paper" || t.node_type === "paper") return 70;
             return 120;
           })
@@ -264,7 +264,6 @@ export default function KnowledgeGraph({
       );
 
     // ── path interaction ──────────────────────────────────────
-    // build lookup maps
     const pathByNodeId  = new Map<string, number[]>();
     const pathByEdgeId  = new Map<string, number[]>();
     data.paths.forEach((p) => {
@@ -333,14 +332,11 @@ export default function KnowledgeGraph({
         });
     }
 
-    // initial highlight if server already resolved a path
     applyHighlight(data.selected_path_id ?? null);
 
-    // node click → pick a path
     node.on("click", (_event, d) => {
       const paths = pathByNodeId.get(d.id) ?? [];
       if (paths.length === 0) return;
-      // cycle through paths that share this node
       const nextId = paths[(paths.indexOf(selectedPathId ?? -1) + 1) % paths.length];
       const p      = data.paths.find((x) => x.path_id === nextId);
       if (p) {
@@ -349,7 +345,6 @@ export default function KnowledgeGraph({
       }
     });
 
-    // hover tooltip
     node.on("mouseenter", (event, d) => {
       if (!tooltipRef.current) return;
       const tip = tooltipRef.current;
