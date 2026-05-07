@@ -32,8 +32,10 @@ jobs:
         run: |
           IMAGE_URL="asia-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/my-repo/kagrobot:${{ github.sha }}"
           
+
           gcloud builds submit \
             --tag $IMAGE_URL \
+            --quiet \
             ./backend
 
       - name: Deploy to Cloud Run
