@@ -2,34 +2,36 @@ name: Auto Deploy Backend
 
 on:
   push:
-    branches: [ "main" ,"KAGrobot/v2"]
+    branches: [ "main", "KAGrobot/v2" ]
     paths:
-      - 'backend/**' # 只有 backend 有變動時才跑
+      - 'backend/**'
   workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write   # ⭐ 必須！讓 GitHub 發 OIDC token
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-        # 這裡不需要 lfs: true 了，省下 GitHub 流量！
 
-      - name: Auth Google Cloud
-        uses: 'google-github-actions/auth@v2'
+      - name: Auth Google Cloud (OIDC)
+        uses: google-github-actions/auth@v2
         with:
-          credentials_json: '${{ secrets.GCP_SA_KEY }}'
+          workload_identity_provider: projects/322382343314/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-deployer@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      # 直接將構建任務交給 Google Cloud Build 處理
       - name: Build and Push (via Cloud Build)
-        continue-on-error: true
         run: |
           IMAGE_URL="asia-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/my-repo/kagrobot:${{ github.sha }}"
           
-          # 我們在根目錄執行，告訴 Google 去 backend 資料夾找 Dockerfile 並構建
           gcloud builds submit \
             --tag $IMAGE_URL \
             ./backend
@@ -43,4 +45,5 @@ jobs:
             --region asia-east1 \
             --platform managed \
             --memory 4Gi \
-            --timeout 600
+            --timeout 600 \
+            --allow-unauthenticated

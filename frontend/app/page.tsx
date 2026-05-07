@@ -25,7 +25,6 @@ type ChatResponse = {
   reply:          string;
   phase:          string;
   socrates_phase?: string | null;
-  // all_graphs: candidateIndex(1-based, as string key) → GraphData | null
   all_graphs?:    Record<string, GraphData | null> | null;
 };
 
@@ -51,6 +50,11 @@ function createSessionId(): string {
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** path 的方向標記前綴 */
+function directionPrefix(direction?: string): string {
+  return direction === "upstream" ? "↑ " : "↓ ";
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -162,7 +166,7 @@ export default function Page() {
     }
   }
 
-  // ── 一般對話送出（socratic / concept_resolved 階段）──────
+  // ── 一般對話送出 ──────────────────────────────────────────
   async function submitMessage(e: FormEvent) {
     e.preventDefault();
     if (!canSend) return;
@@ -180,7 +184,6 @@ export default function Page() {
       const response = await fetch(`${API_BASE.replace(/\/$/, "")}/chat`, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
-        // concept_resolved 階段繼續走 socratic，不帶 selected_path_id
         body: JSON.stringify({
           session_id: sessionId,
           message:    text,
@@ -194,7 +197,6 @@ export default function Page() {
       setPhase(nextPhase);
       localStorage.setItem(PHASE_KEY, nextPhase);
 
-      // all_graphs 回傳：概念選定後首次展開，或重新 retrieve 後的覆蓋結果
       if (data.all_graphs) {
         const parsed: Record<number, GraphData | null> = {};
         for (const [k, v] of Object.entries(data.all_graphs)) {
@@ -215,11 +217,10 @@ export default function Page() {
     }
   }
 
-  // ── 確認路徑（首次確認或重選皆使用此函式）───────────────
+  // ── 確認路徑 ─────────────────────────────────────────────
   async function confirmPathSelection() {
     if (selectedPathId === null || !sessionId || isLoading) return;
     if (!API_BASE) { setError("尚未設定 NEXT_PUBLIC_API_BASE_URL。"); return; }
-    // main_agent 階段且路徑未變更，不重複送出
     if (selectedPathId === confirmedPathId && phase === "main_agent") return;
 
     setError("");
@@ -235,8 +236,6 @@ export default function Page() {
     };
     setMessages((prev) => [...prev, confirmMsg]);
 
-    // concept_resolved 首次確認 → 送 concept_resolved + selected_path_id
-    // main_agent 重選 → 送 main_agent + selected_path_id
     const sendPhase = isReselect ? "main_agent" : "concept_resolved";
 
     try {
@@ -313,9 +312,6 @@ export default function Page() {
   const isReselect      = phase === "main_agent" && confirmedPathId !== null;
   const hasNewSelection = selectedPathId !== null && selectedPathId !== confirmedPathId;
 
-  // 確認按鈕顯示條件：
-  //   - concept_resolved 且已選路徑（首次確認）
-  //   - main_agent 且選了不同路徑（重選）
   const showConfirm = showGraph && selectedLabel !== null && (
     phase === "concept_resolved" || (isReselect && hasNewSelection)
   );
@@ -326,12 +322,22 @@ export default function Page() {
       ? `切換至「${selectedLabel}」，重新分析 →`
       : `確認選擇「${selectedLabel}」，開始分析 →`;
 
-  // concept_resolved 階段仍可繼續輸入訊息（向 Socrates 詢問路徑）
   const inputPlaceholder = phase === "concept_resolved"
     ? "可詢問路徑含義，或直接在右側圖譜選擇路徑後按確認…"
     : phase === "main_agent"
       ? "繼續詢問分析細節，或在右側切換路徑…"
       : "輸入你的問題…";
+
+  // path legend：上游排前，下游排後，同方向內保持 path_id 順序
+  const sortedPaths = useMemo(() => {
+    if (!graphData?.paths) return [];
+    return [...graphData.paths].sort((a, b) => {
+      const da = a.direction === "upstream" ? 0 : 1;
+      const db = b.direction === "upstream" ? 0 : 1;
+      if (da !== db) return da - db;
+      return a.path_id - b.path_id;
+    });
+  }, [graphData]);
 
   // ─────────────────────────────────────────────────────────
   // Render
@@ -408,7 +414,7 @@ export default function Page() {
               )}
             </div>
 
-            {/* concept chips（切換 candidate，純前端）*/}
+            {/* concept chips */}
             {chipList.length > 1 && (
               <div className="chip-legend">
                 {chipList.map((chip) => (
@@ -432,27 +438,32 @@ export default function Page() {
               </div>
             )}
 
-            {/* path legend */}
-            {graphData && graphData.paths.length > 0 && (
+            {/* path legend：上游在前，下游在後，各自顯示方向前綴 */}
+            {sortedPaths.length > 0 && (
               <div className="path-legend">
-                {graphData.paths.map((p) => (
-                  <button
-                    key={p.path_id}
-                    className={`path-chip ${selectedPathId === p.path_id ? "active" : ""}`}
-                    onClick={() => handlePathSelect(p.path_id, p.final_label)}
-                    style={{
-                      borderColor: selectedPathId === p.path_id
-                        ? PATH_COLORS[p.path_id % PATH_COLORS.length]
-                        : undefined,
-                      color: selectedPathId === p.path_id
-                        ? PATH_COLORS[p.path_id % PATH_COLORS.length]
-                        : undefined,
-                    }}
-                  >
-                    {p.path_id === confirmedPathId ? "✓ " : ""}
-                    {p.final_label || `路徑 ${p.path_id + 1}`}
-                  </button>
-                ))}
+                {sortedPaths.map((p) => {
+                  const prefix    = directionPrefix(p.direction);
+                  const color     = p.direction === "upstream"
+                    ? UPSTREAM_COLORS[p.path_id % UPSTREAM_COLORS.length]
+                    : PATH_COLORS[p.path_id % PATH_COLORS.length];
+                  const isActive  = selectedPathId === p.path_id;
+                  const isConfirmed = p.path_id === confirmedPathId;
+
+                  return (
+                    <button
+                      key={p.path_id}
+                      className={`path-chip ${isActive ? "active" : ""}`}
+                      onClick={() => handlePathSelect(p.path_id, p.final_label)}
+                      style={{
+                        borderColor: isActive ? color : undefined,
+                        color:       isActive ? color : undefined,
+                      }}
+                    >
+                      {isConfirmed ? "✓ " : ""}{prefix}
+                      {p.final_label || `路徑 ${p.path_id + 1}`}
+                    </button>
+                  );
+                })}
               </div>
             )}
 
@@ -490,7 +501,14 @@ const CHIP_COLORS = [
   "#4f8ef7", "#00d4aa", "#e8a030",
 ];
 
+// 下游路徑色系（暖色）
 const PATH_COLORS = [
   "#4f8ef7", "#00d4aa", "#e8a030", "#e85d60",
   "#a060f0", "#3dd090", "#f07050", "#60b0f0",
+];
+
+// 上游路徑色系（冷色，與下游區隔）
+const UPSTREAM_COLORS = [
+  "#94a3b8", "#7dd3fc", "#a5b4fc", "#86efac",
+  "#c4b5fd", "#93c5fd", "#6ee7b7", "#bfdbfe",
 ];
