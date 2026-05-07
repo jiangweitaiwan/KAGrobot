@@ -255,9 +255,9 @@ class MainAgent:
                 "messages":        List[BaseMessage], # 更新後的完整歷史
             }
         """
-        if socrates_state.get("phase") != ConversationPhase.RESOLVED.value:
+        if socrates_state.get("phase") != ConversationPhase.PATH_CONFIRMED.value:
             raise ValueError(
-                f"MainAgent 需要 phase='resolved'。目前為 {socrates_state.get('phase')}"
+                f"MainAgent 需要 phase='path_confirmed'。目前為 {socrates_state.get('phase')}"
             )
 
         system_prompt = build_system_prompt(socrates_state)

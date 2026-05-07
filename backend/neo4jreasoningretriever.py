@@ -8,13 +8,20 @@ retrieve_candidates(query, top_k)
     僅在 socratic 階段使用；不走 Neo4j chain。
 
 retrieve_graph(start_eid, rc_name, max_depth)
-    以已知 element_id 直接展開 BFS，回傳 {nodes, edges, paths}。
-    不呼叫 SBERT，由 resolved_node 使用。
+    以已知 element_id 展開雙向 BFS，回傳 {nodes, edges, paths}。
+    同時支援：
+      A 類圖：(s)-[:REASONING]->(t)  直接 concept→concept
+      B 類圖：s -[:INSPIRES|INDIRECT_INSPIRES|REASONING]-> Paper -[:PRODUCES]-> t
+    paths 含 direction="upstream" | "downstream"。
 
 retrieve_concept_detail(rc_name)
     查詢指定 concept 的 description 以及所屬 paper 的
     conceptual_premises / contextual_model_constraints。
-    供 SocratesChatBot concept_tool 使用。
+    供 SocratesChatBot concept_tool 使用（fallback，優先從 all_graphs lookup）。
+
+project_concepts_only(graph_data)
+    靜態方法。將完整 graph_data 投影為只含 concept 節點與
+    concept-to-concept 邊的精簡結構，供前端與 graph_context 使用。
 """
 
 import numpy as np
@@ -197,7 +204,6 @@ class Neo4jReasoningRetriever:
             })
         scored.sort(key=lambda x: x["score"], reverse=True)
 
-        # 每個 element_id 只保留最高分的 variant
         seen: Dict[str, Dict[str, Any]] = {}
         for s in scored:
             eid = s["element_id"]
@@ -215,21 +221,7 @@ class Neo4jReasoningRetriever:
         query: str,
         top_k: int = 3,
     ) -> List[Dict[str, Any]]:
-        """語意搜尋，回傳 top-k concept 摘要。
-
-        Returns
-        -------
-        [
-          {
-            "index":   int,   # 1-based
-            "eid":     str,   # Neo4j elementId，供 retrieve_graph 直接使用
-            "rc_name": str,
-            "type":    str | None,
-            "score":   float,
-          },
-          ...
-        ]
-        """
+        """語意搜尋，回傳 top-k concept 摘要。"""
         matches = self._match_entities(query, top_k=top_k)
         return [
             {
@@ -244,7 +236,6 @@ class Neo4jReasoningRetriever:
 
     # ----------------------------------------------------------
     # Public: retrieve_concept_detail()
-    # 供 SocratesChatBot concept_tool 使用。
     # ----------------------------------------------------------
 
     def retrieve_concept_detail(
@@ -253,29 +244,8 @@ class Neo4jReasoningRetriever:
     ) -> Dict[str, Any]:
         """查詢指定 concept 的描述與所屬論文的理論背景。
 
-        以 concept name 模糊匹配（CONTAINS，不區分大小寫），
-        回傳第一筆匹配結果。
-
-        Parameters
-        ----------
-        rc_name : Resulting Concept 名稱（允許部分匹配）。
-
-        Returns
-        -------
-        {
-          "found":        bool,
-          "rc_name":      str,
-          "description":  str | None,
-          "papers": [
-            {
-              "title":       str,
-              "premises":    str | None,
-              "constraints": str | None,
-            },
-            ...
-          ],
-          "message": str   # found=False 時的說明
-        }
+        優先由 SocratesChatBot 從 all_graphs 直接 lookup；
+        此方法作為 fallback（all_graphs 尚未展開時）。
         """
         with self.driver.session() as session:
             rows = session.run(
@@ -305,8 +275,6 @@ class Neo4jReasoningRetriever:
             }
 
         row = rows[0]
-
-        # 過濾掉 title 為 None 的空 paper 項目（OPTIONAL MATCH 無結果時產生）
         papers = [
             {
                 "title":       p["title"],
@@ -330,25 +298,31 @@ class Neo4jReasoningRetriever:
 
     def retrieve_graph(
         self,
-        start_eid: str,
-        rc_name:   str = "",
-        max_depth: int = 8,
+        start_eid:          str,
+        rc_name:            str = "",
+        max_depth_down:     int = 8,
+        max_depth_up:       int = 3,
     ) -> Dict[str, Any]:
-        """以 element_id 直接展開圖，回傳 D3 渲染用結構。
+        """以 element_id 展開雙向 BFS，回傳 D3 渲染用結構。
+
+        同時支援：
+          A 類圖：(s)-[:REASONING]->(t)
+          B 類圖：s -[:INSPIRES|INDIRECT_INSPIRES|REASONING]-> Paper -[:PRODUCES]-> t
 
         Parameters
         ----------
-        start_eid : Neo4j elementId，由 retrieve_candidates 取得。
-        rc_name   : 僅作 label 用，不影響搜尋。
-        max_depth : BFS 最大深度。
+        start_eid       : Neo4j elementId，由 retrieve_candidates 取得。
+        rc_name         : 僅作 label 用。
+        max_depth_down  : 下游 BFS 最大深度（預設 8）。
+        max_depth_up    : 上游 BFS 最大深度（預設 3）。
 
         Returns
         -------
         {
           "query_concepts": [{"id", "name", "type", "score"}],
-          "nodes":  [...],
+          "nodes":  [...],   # 完整，含 paper meta
           "edges":  [...],
-          "paths":  [...],
+          "paths":  [...],   # 每條 path 含 direction="upstream"|"downstream"
         }
         """
         nodes_map: Dict[str, dict] = {}
@@ -360,41 +334,53 @@ class Neo4jReasoningRetriever:
         )
 
         with self.driver.session() as session:
-            kind = session.execute_read(
-                self._detect_concept_kind, start_eid
-            )
+            kind = session.execute_read(self._detect_concept_kind, start_eid)
 
             if kind == "resulting_concept":
-                raw_paths = session.execute_read(
-                    self._walk_all_paths, start_eid, max_depth
-                )
-
+                effective_eid = start_eid
             elif kind == "sub_concept":
                 parent_rc = session.execute_read(
                     self._find_parent_resulting_concept, start_eid
                 )
-                raw_paths = []
                 if parent_rc:
                     self._upsert_concept_node(
                         nodes_map, parent_rc.element_id,
                         parent_rc.name, parent_rc.type
                     )
-                    raw_paths = session.execute_read(
-                        self._walk_all_paths, parent_rc.element_id, max_depth
-                    )
+                    effective_eid = parent_rc.element_id
+                else:
+                    effective_eid = start_eid
+            else:
+                # other：先找能到達的 RC，再以各 RC 為起點展開
+                effective_eid = None
 
-            else:  # "other"
-                raw_paths = session.execute_read(
-                    self._walk_all_paths_from_other, start_eid, max_depth
+            # ── 下游 BFS ──────────────────────────────────────
+            if effective_eid:
+                raw_down = session.execute_read(
+                    self._walk_downstream, effective_eid, max_depth_down
+                )
+            else:
+                raw_down = session.execute_read(
+                    self._walk_downstream_from_other, start_eid, max_depth_down
                 )
 
-            for raw in raw_paths:
-                self._integrate_path(raw, nodes_map, edges_map, all_paths)
+            for raw in raw_down:
+                self._integrate_path(raw, nodes_map, edges_map, all_paths,
+                                     direction="downstream")
 
+            # ── 上游 BFS ──────────────────────────────────────
+            raw_up = session.execute_read(
+                self._walk_upstream, start_eid, max_depth_up
+            )
+            for raw in raw_up:
+                self._integrate_path(raw, nodes_map, edges_map, all_paths,
+                                     direction="upstream")
+
+        # 去重（相同 node_ids 序列視為同一條路徑）
         seen_sigs: set = set()
         unique_paths: List[dict] = []
         for p in all_paths:
-            sig = tuple(p["node_ids"])
+            sig = (p["direction"], tuple(p["node_ids"]))
             if sig not in seen_sigs:
                 seen_sigs.add(sig)
                 p["path_id"] = len(unique_paths)
@@ -410,6 +396,100 @@ class Neo4jReasoningRetriever:
             "nodes": list(nodes_map.values()),
             "edges": list(edges_map.values()),
             "paths": unique_paths,
+        }
+
+    # ----------------------------------------------------------
+    # Public: project_concepts_only()
+    # ----------------------------------------------------------
+
+    @staticmethod
+    def project_concepts_only(graph_data: Dict[str, Any]) -> Dict[str, Any]:
+        """將完整 graph_data 投影為只含 concept 節點與 concept-to-concept 邊。
+
+        - paper 節點與 paper meta 全部移除
+        - A 類邊（concept 直連）直接保留
+        - B 類邊（concept-paper-concept）折疊為 concept-to-concept 直連邊，
+          paper_title 保留於邊的 via_paper_title 欄位
+        - path.node_ids 只保留 concept eid
+        - path.direction 保留
+        - selected_path_id 保留
+        """
+        nodes_map  = {n["id"]: n for n in graph_data.get("nodes", [])}
+        concept_ids = {
+            nid for nid, n in nodes_map.items()
+            if n.get("node_type") == "concept"
+        }
+
+        # 投影後的節點
+        proj_nodes = [
+            n for n in graph_data.get("nodes", [])
+            if n.get("node_type") == "concept"
+        ]
+
+        # 投影邊：折疊 B 類 concept→paper→concept 為直連
+        proj_edges: Dict[str, dict] = {}
+
+        edges_by_source: Dict[str, List[dict]] = {}
+        edges_by_target: Dict[str, List[dict]] = {}
+        for e in graph_data.get("edges", []):
+            edges_by_source.setdefault(e["source"], []).append(e)
+            edges_by_target.setdefault(e["target"], []).append(e)
+
+        for e in graph_data.get("edges", []):
+            src, tgt = e["source"], e["target"]
+
+            # A 類：concept → concept 直連
+            if src in concept_ids and tgt in concept_ids:
+                key = f"{src}__{tgt}"
+                if key not in proj_edges:
+                    proj_edges[key] = {
+                        "id":              key,
+                        "source":          src,
+                        "target":          tgt,
+                        "via_paper_title": None,
+                    }
+
+            # B 類前半段：concept → paper
+            elif src in concept_ids and tgt not in concept_ids:
+                paper_eid = tgt
+                # 找 paper → concept 的後半段
+                for e2 in edges_by_source.get(paper_eid, []):
+                    next_eid = e2["target"]
+                    if next_eid in concept_ids:
+                        key = f"{src}__{next_eid}"
+                        if key not in proj_edges:
+                            proj_edges[key] = {
+                                "id":              key,
+                                "source":          src,
+                                "target":          next_eid,
+                                "via_paper_title": (
+                                    nodes_map.get(paper_eid, {}).get("label")
+                                ),
+                            }
+
+        # 投影 paths：node_ids 只保留 concept eid
+        proj_paths: List[dict] = []
+        for p in graph_data.get("paths", []):
+            concept_node_ids = [
+                nid for nid in p.get("node_ids", [])
+                if nid in concept_ids
+            ]
+            if not concept_node_ids:
+                continue
+            proj_paths.append({
+                "path_id":       p["path_id"],
+                "direction":     p.get("direction", "downstream"),
+                "node_ids":      concept_node_ids,
+                "final_concept": p.get("final_concept"),
+                "final_label":   p.get("final_label", ""),
+            })
+
+        return {
+            "query_concepts":   graph_data.get("query_concepts", []),
+            "nodes":            proj_nodes,
+            "edges":            list(proj_edges.values()),
+            "paths":            proj_paths,
+            "selected_path_id": graph_data.get("selected_path_id"),
         }
 
     # ----------------------------------------------------------
@@ -476,7 +556,24 @@ class Neo4jReasoningRetriever:
         nodes_map: Dict[str, dict],
         edges_map: Dict[str, dict],
         all_paths: List[dict],
+        direction: str = "downstream",
     ) -> None:
+        """將單條 BFS raw path 整合進 nodes_map / edges_map / all_paths。
+
+        raw 結構：
+          {
+            "steps": [
+              {
+                "from_concept": {"element_id", "name", "type"},
+                "via_paper":    {"element_id", "title", ...} | None,  # A類為None
+                "to_concept":   {"element_id", "name", "type"},
+              },
+              ...
+            ],
+            "final_concept": {"element_id", "name", "type"},
+            "final_paper":   {...} | None,
+          }
+        """
         steps   = raw.get("steps") or []
         final_c = raw.get("final_concept")
         final_p = raw.get("final_paper")
@@ -495,33 +592,48 @@ class Neo4jReasoningRetriever:
             node_ids.append(first_c["element_id"])
 
             for step in steps:
-                paper = step["via_paper"]
+                paper = step.get("via_paper")
                 to_c  = step["to_concept"]
 
-                self._upsert_paper_node(
-                    nodes_map,
-                    paper["element_id"], paper["title"],
-                    paper.get("conceptual_premises"),
-                    paper.get("contextual_model_constraints"),
-                )
-                self._upsert_concept_node(
-                    nodes_map,
-                    to_c["element_id"], to_c["name"], to_c.get("type"))
+                if paper:
+                    # B 類：concept → paper → concept
+                    self._upsert_paper_node(
+                        nodes_map,
+                        paper["element_id"], paper["title"],
+                        paper.get("conceptual_premises"),
+                        paper.get("contextual_model_constraints"),
+                    )
+                    self._upsert_concept_node(
+                        nodes_map,
+                        to_c["element_id"], to_c["name"], to_c.get("type"))
 
-                e1 = self._upsert_edge(
-                    edges_map,
-                    step["from_concept"]["element_id"],
-                    paper["element_id"],
-                    paper["title"],
-                )
-                e2 = self._upsert_edge(
-                    edges_map,
-                    paper["element_id"],
-                    to_c["element_id"],
-                    paper["title"],
-                )
-                node_ids += [paper["element_id"], to_c["element_id"]]
-                edge_ids += [e1, e2]
+                    e1 = self._upsert_edge(
+                        edges_map,
+                        step["from_concept"]["element_id"],
+                        paper["element_id"],
+                        paper["title"],
+                    )
+                    e2 = self._upsert_edge(
+                        edges_map,
+                        paper["element_id"],
+                        to_c["element_id"],
+                        paper["title"],
+                    )
+                    node_ids += [paper["element_id"], to_c["element_id"]]
+                    edge_ids += [e1, e2]
+                else:
+                    # A 類：concept → concept 直連（via_paper=None）
+                    self._upsert_concept_node(
+                        nodes_map,
+                        to_c["element_id"], to_c["name"], to_c.get("type"))
+                    e1 = self._upsert_edge(
+                        edges_map,
+                        step["from_concept"]["element_id"],
+                        to_c["element_id"],
+                        "",
+                    )
+                    node_ids.append(to_c["element_id"])
+                    edge_ids.append(e1)
         else:
             self._upsert_concept_node(
                 nodes_map,
@@ -529,8 +641,12 @@ class Neo4jReasoningRetriever:
             node_ids.append(final_c["element_id"])
 
         if final_p:
-            last_paper_eid = (steps[-1]["via_paper"]["element_id"]
-                              if steps else None)
+            last_paper_eid = None
+            if steps:
+                last_via = steps[-1].get("via_paper")
+                if last_via:
+                    last_paper_eid = last_via["element_id"]
+
             if final_p["element_id"] != last_paper_eid:
                 self._upsert_paper_node(
                     nodes_map,
@@ -549,6 +665,7 @@ class Neo4jReasoningRetriever:
 
         all_paths.append({
             "path_id":       len(all_paths),
+            "direction":     direction,
             "node_ids":      node_ids,
             "edge_ids":      edge_ids,
             "final_concept": final_c["element_id"],
@@ -577,12 +694,14 @@ class Neo4jReasoningRetriever:
         return rec["kind"] if rec else "other"
 
     # ----------------------------------------------------------
-    # BFS: _walk_all_paths
+    # BFS: _walk_downstream（取代原 _walk_all_paths）
+    # 同時支援 A 類（REASONING 直連）和 B 類（透過 Paper）
     # ----------------------------------------------------------
 
     @staticmethod
-    def _walk_all_paths(tx, start_eid: str,
-                        max_depth: int = 8) -> List[Dict[str, Any]]:
+    def _walk_downstream(tx, start_eid: str,
+                         max_depth: int = 8) -> List[Dict[str, Any]]:
+        """從 start_eid 向下游 BFS，同時嘗試 A 類與 B 類兩種走法。"""
         rec0 = tx.run(
             """
             MATCH (c:Concept) WHERE elementId(c) = $eid
@@ -620,11 +739,22 @@ class Neo4jReasoningRetriever:
                     {"steps": steps, "final_concept": cur_c, "final_paper": fp})
                 continue
 
-            branches = tx.run(
+            # ── A 類：concept -[:REASONING]-> concept ──────────
+            a_branches = tx.run(
+                """
+                MATCH (c:Concept) WHERE elementId(c) = $eid
+                MATCH (c)-[:REASONING]->(next:Concept)
+                WHERE elementId(next) <> $eid
+                RETURN next, elementId(next) AS next_eid
+                """, eid=cur_eid,
+            ).data()
+
+            # ── B 類：concept -[:INSPIRES|...]-> paper -[:PRODUCES]-> concept ─
+            b_branches = tx.run(
                 """
                 MATCH (c:Concept) WHERE elementId(c) = $eid
                                     AND c.type = 'Resulting_Concept'
-                MATCH (c)-[:INSPIRES]->(p:Paper)
+                MATCH (c)-[:INSPIRES|INDIRECT_INSPIRES|REASONING]->(p:Paper)
                 MATCH (p)-[:PRODUCES]->(next:Concept {type:'Resulting_Concept'})
                 WHERE elementId(next) <> $eid
                 RETURN p, next,
@@ -633,15 +763,29 @@ class Neo4jReasoningRetriever:
                 """, eid=cur_eid,
             ).data()
 
-            new_branches = [b for b in branches if b["next_eid"] not in visited]
+            new_a = [b for b in a_branches if b["next_eid"] not in visited]
+            new_b = [b for b in b_branches if b["next_eid"] not in visited]
 
-            if not new_branches:
+            if not new_a and not new_b:
                 fp = _fallback_paper(tx, cur_eid)
                 completed.append(
                     {"steps": steps, "final_concept": cur_c, "final_paper": fp})
                 continue
 
-            for branch in new_branches:
+            for branch in new_a:
+                next_c   = _c(branch["next_eid"], branch["next"])
+                new_step = {
+                    "from_concept": cur_c,
+                    "via_paper":    None,       # A 類無 paper
+                    "to_concept":   next_c,
+                }
+                queue.append((
+                    next_c,
+                    steps + [new_step],
+                    visited | {branch["next_eid"]},
+                ))
+
+            for branch in new_b:
                 paper    = _p(branch["p_eid"], branch["p"])
                 next_c   = _c(branch["next_eid"], branch["next"])
                 new_step = {
@@ -658,23 +802,136 @@ class Neo4jReasoningRetriever:
         return completed
 
     # ----------------------------------------------------------
-    # BFS: _walk_all_paths_from_other
+    # BFS: _walk_upstream
+    # 反向 BFS，同時支援 A 類與 B 類，max_depth 建議 3
     # ----------------------------------------------------------
 
     @staticmethod
-    def _walk_all_paths_from_other(tx, eid: str,
-                                   max_depth: int = 8) -> List[Dict[str, Any]]:
+    def _walk_upstream(tx, start_eid: str,
+                       max_depth: int = 3) -> List[Dict[str, Any]]:
+        """從 start_eid 向上游 BFS（反向），同時嘗試 A 類與 B 類走法。
+
+        A 類反向：(prev)-[:REASONING]->(cur)
+        B 類反向：(prev)-[:INSPIRES|INDIRECT_INSPIRES|REASONING]->(p)-[:PRODUCES]->(cur)
+        """
+        rec0 = tx.run(
+            """
+            MATCH (c:Concept) WHERE elementId(c) = $eid
+            RETURN c, elementId(c) AS eid
+            """, eid=start_eid,
+        ).single()
+        if not rec0:
+            return []
+
+        def _c(eid, node):
+            return {"element_id": eid,
+                    "name": node.get("name"), "type": node.get("type")}
+
+        def _p(eid, node):
+            return {
+                "element_id":                   eid,
+                "title":                        node.get("title"),
+                "conceptual_premises":          node.get("conceptual_premises"),
+                "contextual_model_constraints": node.get("contextual_model_constraints"),
+            }
+
+        start_concept = _c(rec0["eid"], rec0["c"])
+        # 上游 BFS：steps 從 upstream 走向 candidate
+        # 最終 final_concept 是路徑最遠的上游 RC
+        queue = deque([(start_concept, [], frozenset([start_eid]))])
+        completed: List[Dict[str, Any]] = []
+
+        while queue:
+            cur_c, steps, visited = queue.popleft()
+            cur_eid = cur_c["element_id"]
+            depth   = len(steps)
+
+            if depth >= max_depth:
+                completed.append(
+                    {"steps": steps, "final_concept": cur_c, "final_paper": None})
+                continue
+
+            # ── A 類反向：(prev)-[:REASONING]->(cur) ──────────
+            a_branches = tx.run(
+                """
+                MATCH (c:Concept) WHERE elementId(c) = $eid
+                MATCH (prev:Concept)-[:REASONING]->(c)
+                WHERE elementId(prev) <> $eid
+                RETURN prev, elementId(prev) AS prev_eid
+                """, eid=cur_eid,
+            ).data()
+
+            # ── B 類反向：(prev)-[:INSPIRES|...]->(p)-[:PRODUCES]->(cur) ──
+            b_branches = tx.run(
+                """
+                MATCH (c:Concept) WHERE elementId(c) = $eid
+                MATCH (p:Paper)-[:PRODUCES]->(c)
+                MATCH (prev:Concept)-[:INSPIRES|INDIRECT_INSPIRES|REASONING]->(p)
+                WHERE elementId(prev) <> $eid
+                RETURN prev, p,
+                       elementId(prev) AS prev_eid,
+                       elementId(p)    AS p_eid
+                """, eid=cur_eid,
+            ).data()
+
+            new_a = [b for b in a_branches if b["prev_eid"] not in visited]
+            new_b = [b for b in b_branches if b["prev_eid"] not in visited]
+
+            if not new_a and not new_b:
+                # 已到最遠上游，收集這條路徑
+                completed.append(
+                    {"steps": steps, "final_concept": cur_c, "final_paper": None})
+                continue
+
+            for branch in new_a:
+                prev_c   = _c(branch["prev_eid"], branch["prev"])
+                # 上游方向：step 表示 prev → cur
+                new_step = {
+                    "from_concept": prev_c,
+                    "via_paper":    None,
+                    "to_concept":   cur_c,
+                }
+                queue.append((
+                    prev_c,
+                    [new_step] + steps,   # 上游步驟前插，保持時序
+                    visited | {branch["prev_eid"]},
+                ))
+
+            for branch in new_b:
+                prev_c   = _c(branch["prev_eid"], branch["prev"])
+                paper    = _p(branch["p_eid"], branch["p"])
+                new_step = {
+                    "from_concept": prev_c,
+                    "via_paper":    paper,
+                    "to_concept":   cur_c,
+                }
+                queue.append((
+                    prev_c,
+                    [new_step] + steps,   # 上游步驟前插
+                    visited | {branch["prev_eid"]},
+                ))
+
+        # 只保留實際有上游步驟的路徑（排除 start 本身無上游的空路徑）
+        return [r for r in completed if r["steps"]]
+
+    # ----------------------------------------------------------
+    # BFS: _walk_downstream_from_other（kind=other 的入口）
+    # ----------------------------------------------------------
+
+    @staticmethod
+    def _walk_downstream_from_other(tx, eid: str,
+                                    max_depth: int = 8) -> List[Dict[str, Any]]:
         rows = tx.run(
             """
             MATCH (c:Concept) WHERE elementId(c) = $eid
-            MATCH (c)-[:INSPIRES|INDIRECT_INSPIRES|APPLY_TO]->(p:Paper)
+            MATCH (c)-[:INSPIRES|INDIRECT_INSPIRES|APPLY_TO|REASONING]->(p:Paper)
             MATCH (p)-[:PRODUCES]->(rc:Concept {type:'Resulting_Concept'})
             RETURN DISTINCT elementId(rc) AS rc_eid
             """, eid=eid,
         ).data()
         all_paths: List[Dict[str, Any]] = []
         for row in rows:
-            sub = Neo4jReasoningRetriever._walk_all_paths(
+            sub = Neo4jReasoningRetriever._walk_downstream(
                 tx, row["rc_eid"], max_depth)
             all_paths.extend(sub)
         return all_paths

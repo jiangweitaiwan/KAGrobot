@@ -3,13 +3,11 @@ core/socrates_bot.py
 ─────────────────────────────────────────────────────────────
 SocratesChatBot：需求釐清 + 協助使用者選擇推理路徑。
 
-改動摘要（v3）：
-  • 移除 candidate 選擇步驟（不再需要使用者選 candidate）
-  • retrieve_tool 呼叫後，外部（entry.py）在背景並行展開 all_graphs
-  • 新增 concept_tool：輸入 rc_name，查詢 description + paper premises/constraints
-  • graph_context 在 all_graphs 展開後注入 system prompt，提供路徑輪廓
-  • phase 流程：RUNNING → CONCEPT_RESOLVED（retrieve 完成）→ PATH_CONFIRMED
-  • _handle_resolved / _parse_selection 廢棄
+改動摘要（v4）：
+  • process_message 加入 all_graphs 參數
+  • retrieve_concept_detail tool 優先從 all_graphs dict lookup paper meta，
+    不走 Neo4j；all_graphs 為 None 時 fallback 到 retriever.retrieve_concept_detail
+  • _make_concept_detail_tool 改為接收 all_graphs 參數，每次 process_message 重建
 """
 
 from __future__ import annotations
@@ -43,10 +41,9 @@ Neo4jReasoningRetriever = nrr.Neo4jReasoningRetriever
 
 class ConversationPhase(Enum):
     RUNNING          = "running"
-    CONCEPT_RESOLVED = "concept_resolved"   # retrieve 完成，圖已展開
-    PATH_CONFIRMED   = "path_confirmed"     # 使用者確認 path，移交 main_agent
-    # 向下相容別名
-    RESOLVED         = "concept_resolved"
+    CONCEPT_RESOLVED = "concept_resolved"
+    PATH_CONFIRMED   = "path_confirmed"
+    RESOLVED         = "concept_resolved"   # 向下相容別名
 
 
 class ChatState(TypedDict, total=False):
@@ -54,7 +51,6 @@ class ChatState(TypedDict, total=False):
     agent_messages: List[BaseMessage]
     phase:          str
     query:          Optional[str]
-    # candidates: [{index, eid, rc_name, type, score}]
     candidates:     Optional[List[dict]]
     selected_index: Optional[int]
     tools:          Optional[List[dict]]
@@ -156,11 +152,6 @@ def _resolve_tools_from_candidates(
     candidates: List[dict],
     concept_to_agent: Dict[str, AgentType],
 ) -> tuple:
-    """從所有 candidates 解析工具聯集。
-
-    在取消 candidate 選擇後，tools 改為所有 candidates 的聯集，
-    待 path 確認後由 main_agent 自行判斷使用哪些工具。
-    """
     seen_tools: set        = set()
     resolved_tools:  List[dict] = []
     resolved_params: List[dict] = []
@@ -205,7 +196,6 @@ def _resolve_tools_from_candidates(
 # ═══════════════════════════════════════════════════════════════
 
 def _extract_selected_chain(socrates_state: ChatState) -> Optional[dict]:
-    """從 socrates_state 取出選定 candidate 的摘要資訊。"""
     candidates: List[dict] = socrates_state.get("candidates") or []
     idx: Optional[int]     = socrates_state.get("selected_index")
     if idx is None or not candidates:
@@ -216,13 +206,71 @@ def _extract_selected_chain(socrates_state: ChatState) -> Optional[dict]:
 
 
 def _format_selected_chain(candidate: Optional[dict]) -> str:
-    """將選定 candidate 格式化為 system prompt 用的文字。"""
     if candidate is None:
         return "（未選定）"
     rc_name = candidate.get("rc_name") or "（未命名）"
     score   = candidate.get("score", "")
     score_s = f"（相似度 {score}）" if score else ""
     return f"選定分析概念：{rc_name}{score_s}"
+
+
+# ═══════════════════════════════════════════════════════════════
+# all_graphs concept detail lookup helper
+# ═══════════════════════════════════════════════════════════════
+
+def _lookup_concept_detail_from_graphs(
+    rc_name:    str,
+    all_graphs: Dict[int, Any],
+) -> Optional[Dict[str, Any]]:
+    """從 all_graphs 的完整節點資料中找出指定 rc_name 的 concept 與相關 paper meta。
+
+    比對邏輯：concept 節點的 label 包含 rc_name（不區分大小寫）。
+    找到後，收集所有指向該 concept 節點的 paper 節點的 meta。
+    """
+    rc_lower = rc_name.lower().strip()
+
+    for g in all_graphs.values():
+        if not g:
+            continue
+
+        nodes_map: Dict[str, Any] = {n["id"]: n for n in g.get("nodes", [])}
+
+        # 找到目標 concept 節點
+        target_concept: Optional[Dict[str, Any]] = None
+        for node in g.get("nodes", []):
+            if node.get("node_type") != "concept":
+                continue
+            if rc_lower in (node.get("label") or "").lower():
+                target_concept = node
+                break
+
+        if target_concept is None:
+            continue
+
+        target_eid = target_concept["id"]
+
+        # 找所有 paper → target_concept 的邊，收集 paper meta
+        papers: List[Dict[str, Any]] = []
+        for edge in g.get("edges", []):
+            if edge.get("target") != target_eid:
+                continue
+            src_node = nodes_map.get(edge["source"])
+            if src_node and src_node.get("node_type") == "paper":
+                meta = src_node.get("meta") or {}
+                papers.append({
+                    "title":       src_node.get("label", ""),
+                    "premises":    meta.get("conceptual_premises"),
+                    "constraints": meta.get("contextual_model_constraints"),
+                })
+
+        return {
+            "found":       True,
+            "rc_name":     target_concept.get("label", rc_name),
+            "description": None,   # 完整 all_graphs 不含 description，需 Neo4j
+            "papers":      papers,
+        }
+
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -233,8 +281,9 @@ class SocratesChatBot:
     """需求釐清 + 路徑選擇引導的蘇格拉底對話 Agent。
 
     tools：
-      retrieve_concepts      — 語意搜尋 candidates
+      retrieve_concepts       — 語意搜尋 candidates
       retrieve_concept_detail — 查詢指定 concept 的理論細節
+                                優先從 all_graphs dict lookup，fallback 到 Neo4j
     """
 
     def __init__(
@@ -253,16 +302,12 @@ class SocratesChatBot:
         if not api_key:
             api_key = get_settings().google_api_key
 
-        base_llm = ChatGoogleGenerativeAI(
+        self._base_llm = ChatGoogleGenerativeAI(
             model=model, google_api_key=api_key, temperature=0.1)
 
-        self._retrieve_tool      = self._make_retrieve_tool()
-        self._concept_detail_tool = self._make_concept_detail_tool()
-        self._llm_with_tools     = base_llm.bind_tools([
-            self._retrieve_tool,
-            self._concept_detail_tool,
-        ])
-        self._graph = self._build_graph()
+        self._retrieve_tool = self._make_retrieve_tool()
+        # retrieve_concept_detail tool 在每次 process_message 時依 all_graphs 重建
+        self._graph = None   # 延遲建立，見 _build_graph()
 
     # ------------------------------------------------------------------
     # Public API
@@ -285,17 +330,19 @@ class SocratesChatBot:
         self,
         state:         ChatState,
         user_input:    str,
-        graph_context: Optional[str] = None,
+        graph_context: Optional[str]           = None,
+        all_graphs:    Optional[Dict[int, Any]] = None,
     ) -> ChatState:
         """處理單輪對話。
 
         Parameters
         ----------
-        state       : 目前的 ChatState。
-        user_input  : 使用者輸入文字。
-        graph_context : 已展開圖譜的路徑摘要文字。
+        state         : 目前的 ChatState。
+        user_input    : 使用者輸入文字。
+        graph_context : 已展開圖譜的路徑摘要（concept 鏈，箭頭格式）。
                         動態附加至 system prompt，不寫進 agent_messages 歷史。
-                        all_graphs 展開完成後由 entry.py 傳入。
+        all_graphs    : 完整 graph_data dict（含 paper meta）。
+                        retrieve_concept_detail tool 優先從此 lookup。
         """
         if state.get("phase") == ConversationPhase.PATH_CONFIRMED.value:
             return state
@@ -332,8 +379,15 @@ class SocratesChatBot:
         else:
             effective_prompt = base_prompt
 
+        # ── 依 all_graphs 重建 concept_detail tool ──────────────
+        concept_detail_tool = self._make_concept_detail_tool(all_graphs)
+        llm_with_tools = self._base_llm.bind_tools([
+            self._retrieve_tool,
+            concept_detail_tool,
+        ])
+
         system_msg   = SystemMessage(content=effective_prompt)
-        graph_result = self._graph.invoke({
+        graph_result = self._build_graph(llm_with_tools, concept_detail_tool).invoke({
             "messages":   [system_msg] + normalized_prior + [HumanMessage(content=user_input)],
             "candidates": state.get("candidates") or [],
             "query":      state.get("query"),
@@ -344,16 +398,13 @@ class SocratesChatBot:
         if graph_result.get("query"):
             state["query"] = graph_result["query"]
 
-        # candidates 更新：retrieve_tool 呼叫後觸發
         new_candidates = graph_result.get("candidates")
         if new_candidates:
             state["candidates"] = new_candidates
-            # 解析所有 candidates 的工具聯集，供 main_agent 使用
             tools, params = _resolve_tools_from_candidates(
                 new_candidates, self._concept_to_agent)
             state["tools"]      = tools
             state["parameters"] = params
-            # phase 推進到 concept_resolved，通知 entry.py 展開圖
             state["phase"] = ConversationPhase.CONCEPT_RESOLVED.value
 
         bot_resp = self._parse_bot_response(new_agent_msgs)
@@ -374,18 +425,18 @@ class SocratesChatBot:
         return ""
 
     # ------------------------------------------------------------------
-    # LangGraph graph
+    # LangGraph graph（每次依 tool 實例重建）
     # ------------------------------------------------------------------
 
-    def _build_graph(self):
-        llm      = self._llm_with_tools
+    def _build_graph(self, llm_with_tools, concept_detail_tool):
+        retrieve_tool = self._retrieve_tool
         tool_map = {
-            self._retrieve_tool.name:       self._retrieve_tool,
-            self._concept_detail_tool.name: self._concept_detail_tool,
+            retrieve_tool.name:       retrieve_tool,
+            concept_detail_tool.name: concept_detail_tool,
         }
 
         def agent_node(state: _InternalState) -> dict:
-            response = call_with_retry(lambda: llm.invoke(state["messages"]))
+            response = call_with_retry(lambda: llm_with_tools.invoke(state["messages"]))
             return {"messages": [response]}
 
         def tool_executor_node(state: _InternalState) -> dict:
@@ -408,8 +459,7 @@ class SocratesChatBot:
                 except (json.JSONDecodeError, TypeError):
                     data = {}
 
-                # retrieve_concepts 回傳處理
-                if tc["name"] == self._retrieve_tool.name:
+                if tc["name"] == retrieve_tool.name:
                     if data.get("found"):
                         state_updates["candidates"] = data.get("candidates", [])
                         state_updates["query"]      = data.get("query", "")
@@ -417,8 +467,7 @@ class SocratesChatBot:
                     else:
                         slim = data.get("message") or raw_result
 
-                # retrieve_concept_detail 回傳處理
-                elif tc["name"] == self._concept_detail_tool.name:
+                elif tc["name"] == concept_detail_tool.name:
                     if data.get("found"):
                         slim = _format_concept_detail(data)
                     else:
@@ -495,14 +544,30 @@ class SocratesChatBot:
         )
 
     # ------------------------------------------------------------------
-    # retrieve_concept_detail tool
+    # retrieve_concept_detail tool（依 all_graphs 重建）
     # ------------------------------------------------------------------
 
-    def _make_concept_detail_tool(self) -> StructuredTool:
-        retriever = self._retriever
+    def _make_concept_detail_tool(
+        self,
+        all_graphs: Optional[Dict[int, Any]],
+    ) -> StructuredTool:
+        """建立 retrieve_concept_detail tool。
+
+        all_graphs 不為 None 時：優先從 dict lookup paper meta，不走 Neo4j。
+        all_graphs 為 None 時：fallback 到 retriever.retrieve_concept_detail。
+        """
+        retriever  = self._retriever
+        _graphs    = all_graphs   # 閉包捕捉當次 all_graphs
 
         def retrieve_concept_detail(rc_name: str) -> str:
             """查詢指定 concept 的描述與所屬論文的理論前提及模型約束。"""
+            # 優先從 all_graphs lookup
+            if _graphs:
+                result = _lookup_concept_detail_from_graphs(rc_name, _graphs)
+                if result:
+                    return json.dumps(result, ensure_ascii=False)
+
+            # fallback：Neo4j 查詢
             result = retriever.retrieve_concept_detail(rc_name)
             return json.dumps(result, ensure_ascii=False)
 

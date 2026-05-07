@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
 """entry.py  — FastAPI + LangGraph orchestrator.
 
-改動摘要（v3）：
-  • resolved_node 廢棄，圖譜展開移入 socratic_node
-  • socratic_node 收到 concept_resolved phase 時，以 asyncio.gather 並行
-    呼叫 retrieve_graph × N，完成後存入 all_graphs 並建立 graph_context
-  • 取消 candidate 選擇步驟；使用者直接在前端選 path
-  • orchestrator 流程：socratic → (path_confirmed) → main_agent
-  • entry_router / socratic_router 全面精簡
+改動摘要（v4）：
+  • _annotate_graph_with_default_path：預設標記改為第一條 downstream path
+  • _build_graph_context：箭頭格式，上下游分區，只用 concept 鏈
+  • all_graphs_out：用 Neo4jReasoningRetriever.project_concepts_only 投影後回傳
+  • socratic_node：process_message 傳入完整 all_graphs（方向 B，tool lookup dict）
 """
 
 from __future__ import annotations
@@ -56,7 +54,7 @@ class OrchestratorState(TypedDict, total=False):
     handoff_task:      Optional[str]
     selected_path_id:  Optional[int]
     confirmed_path_id: Optional[int]
-    all_graphs:        Optional[Dict[int, Any]]
+    all_graphs:        Optional[Dict[int, Any]]   # 完整資料（含 paper meta）
     graph_context:     Optional[str]
 
 
@@ -118,26 +116,57 @@ def _annotate_graph_with_default_path(
     graph_data: Dict[str, Any],
     rc_name:    str,
 ) -> Dict[str, Any]:
-    """在 graph_data 中找出與 rc_name 對應的路徑，附加 selected_path_id 預標記。"""
-    rc_lower = rc_name.lower()
+    """在 graph_data 中找出第一條 downstream path 作為預設標記。
+
+    優先找 final_label 與 rc_name 完全匹配的 downstream path；
+    若無則取第一條 downstream path；若無 downstream 則取第一條 path。
+    """
+    downstream_paths = [
+        p for p in graph_data.get("paths", [])
+        if p.get("direction", "downstream") == "downstream"
+    ]
+
     selected_path_id: Optional[int] = None
-    for path in graph_data.get("paths", []):
+
+    # 1. 嘗試 final_label 完全匹配（downstream）
+    rc_lower = rc_name.lower()
+    for path in downstream_paths:
         if (path.get("final_label") or "").lower() == rc_lower:
             selected_path_id = path["path_id"]
             break
+
+    # 2. 取第一條 downstream path
+    if selected_path_id is None and downstream_paths:
+        selected_path_id = downstream_paths[0]["path_id"]
+
+    # 3. fallback：取任意第一條 path
+    if selected_path_id is None:
+        all_paths = graph_data.get("paths", [])
+        if all_paths:
+            selected_path_id = all_paths[0]["path_id"]
+
     return {**graph_data, "selected_path_id": selected_path_id}
 
 
 def _build_graph_context(all_graphs: Dict[int, Any]) -> str:
-    """將 all_graphs 的路徑摘要序列化為 Socrates system prompt 用的文字。
+    """將 all_graphs 序列化為 Socrates system prompt 用的文字。
+
+    只使用 concept 鏈（project_concepts_only 後的資料），
+    上下游分區，以箭頭表示方向。
 
     格式：
-        【候選 1】概念名稱
-          路徑 0：final_label | 概念鏈：c1 → c2 → c3
-          路徑 1：final_label | …
+        【候選 1】Exchange Rate Volatility
+          ↑ 上游
+            Interest Rate Dynamics → Exchange Rate Volatility
+            Monetary Policy → Exchange Rate Volatility
+          ↓ 下游
+            Exchange Rate Volatility → Conditional Variance → GARCH Model
+            Exchange Rate Volatility → Latent Process → Stochastic Volatility Model
+
         【候選 2】…
     """
     lines: List[str] = []
+
     for idx, g in sorted(all_graphs.items()):
         if not g:
             lines.append(f"【候選 {idx}】（圖譜展開失敗）")
@@ -146,41 +175,46 @@ def _build_graph_context(all_graphs: Dict[int, Any]) -> str:
         concept_name = (g.get("query_concepts") or [{}])[0].get("name", f"選項 {idx}")
         lines.append(f"【候選 {idx}】{concept_name}")
 
-        nodes_by_id: Dict[str, Any] = {n["id"]: n for n in g.get("nodes", [])}
+        # 用 project_concepts_only 取得 concept-only 結構
+        proj = Neo4jReasoningRetriever.project_concepts_only(g)
+        nodes_by_id: Dict[str, Any] = {n["id"]: n for n in proj.get("nodes", [])}
 
-        for path in g.get("paths", []):
-            path_id     = path.get("path_id", "?")
-            final_label = path.get("final_label", "")
+        upstream_lines:   List[str] = []
+        downstream_lines: List[str] = []
+
+        for path in proj.get("paths", []):
+            direction   = path.get("direction", "downstream")
             node_ids    = path.get("node_ids", [])
 
-            # 概念鏈（concept 節點序列）
-            concept_chain: List[str] = []
-            paper_hints:   List[str] = []
+            # 概念名稱序列
+            concept_names = [
+                nodes_by_id.get(nid, {}).get("label", nid)
+                for nid in node_ids
+            ]
+            if not concept_names:
+                continue
 
-            for nid in node_ids:
-                node = nodes_by_id.get(nid)
-                if not node:
-                    continue
-                if node.get("node_type") == "concept":
-                    concept_chain.append(node.get("label", nid))
-                elif node.get("node_type") == "paper":
-                    meta        = node.get("meta") or {}
-                    hint        = node.get("label", "（未命名論文）")
-                    # premises    = (meta.get("conceptual_premises") or "").strip()
-                    # constraints = (meta.get("contextual_model_constraints") or "").strip()
-                    # if premises:
-                    #     hint += f"（前提：{premises[:60]}{'…' if len(premises) > 60 else ''}）"
-                    # if constraints:
-                    #     hint += f"（約束：{constraints[:60]}{'…' if len(constraints) > 60 else ''}）"
-                    paper_hints.append(hint)
+            chain_str = " → ".join(concept_names)
 
-            chain_str = " → ".join(concept_chain) if concept_chain else "（無概念節點）"
-            paper_str = " → ".join(paper_hints)   if paper_hints   else "（無論文節點）"
-            lines.append(f"  路徑 {path_id}：{final_label}")
-            lines.append(f"    概念鏈：{chain_str}")
-            lines.append(f"    論文鏈：{paper_str}")
+            if direction == "upstream":
+                upstream_lines.append(f"    {chain_str}")
+            else:
+                downstream_lines.append(f"    {chain_str}")
 
-    return "\n".join(lines)
+        if upstream_lines:
+            lines.append("  ↑ 上游")
+            lines.extend(upstream_lines)
+
+        if downstream_lines:
+            lines.append("  ↓ 下游")
+            lines.extend(downstream_lines)
+
+        if not upstream_lines and not downstream_lines:
+            lines.append("  （無可用路徑）")
+
+        lines.append("")  # 候選間空行
+
+    return "\n".join(lines).rstrip()
 
 
 def _build_handoff_task(
@@ -263,10 +297,7 @@ def _find_graph_by_path_id(
 async def _expand_all_graphs(
     candidates: List[dict],
 ) -> Dict[int, Any]:
-    """以 asyncio.gather 並行展開所有 candidate 的圖譜。
-
-    retrieve_graph 是同步 IO，用 asyncio.to_thread 包裝避免阻塞 event loop。
-    """
+    """以 asyncio.gather 並行展開所有 candidate 的圖譜。"""
 
     async def _expand_one(cand: dict) -> tuple[int, Any]:
         idx     = cand["index"]
@@ -296,17 +327,7 @@ async def _expand_all_graphs(
 # ======================================================================
 
 async def socratic_node(state: OrchestratorState) -> OrchestratorState:
-    """需求釐清 + 圖譜展開節點。
-
-    處理三種情況：
-    1. concept_resolved 且帶有 selected_path_id
-       → confirm_path → PATH_CONFIRMED → main_agent
-    2. concept_resolved 一般對話（無 selected_path_id）
-       → 注入 graph_context，讓 Socrates 解釋路徑或 re-retrieve
-       → 若 Socrates 再次觸發 retrieve，並行展開新 all_graphs（覆蓋）
-    3. socratic（初始需求釐清）
-       → 正常處理；retrieve 完成後並行展開 all_graphs
-    """
+    """需求釐清 + 圖譜展開節點。"""
     messages         = state.get("messages") or []
     user_msg         = _last_human_content(messages)
     selected_path_id = state.get("selected_path_id")
@@ -333,10 +354,14 @@ async def socratic_node(state: OrchestratorState) -> OrchestratorState:
         else None
     )
 
+    # 傳入完整 all_graphs，供 retrieve_concept_detail tool 從 dict lookup
+    all_graphs_full = state.get("all_graphs") if current_phase == "concept_resolved" else None
+
     new_socrates_state = shared_socrates_bot.process_message(
         old_socrates_state,
         user_msg,
         graph_context=graph_context,
+        all_graphs=all_graphs_full,
     )
 
     inner_phase = new_socrates_state.get("phase")
@@ -365,12 +390,7 @@ async def socratic_node(state: OrchestratorState) -> OrchestratorState:
 
 
 async def main_agent_node(state: OrchestratorState) -> OrchestratorState:
-    """MainAgent 執行節點。
-
-    支援重選 path：比對 selected_path_id vs confirmed_path_id。
-      重選：重建 handoff_task、清空 main_state。
-      繼續對話：沿用現有 main_state。
-    """
+    """MainAgent 執行節點。"""
     socrates_state = state.get("socrates_state")
     if not socrates_state:
         return OrchestratorState(
@@ -530,13 +550,21 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
         else None
     )
 
-    # all_graphs：concept_resolved 且無 selected_path_id 時回傳前端
+    # all_graphs_out：concept_resolved 且無 selected_path_id 時回傳前端
+    # 使用 project_concepts_only 投影，只含 concept 節點與 concept-to-concept 邊
     all_graphs_out: Optional[Dict[int, Any]] = None
     if (
         result.get("phase") == "concept_resolved"
         and request.selected_path_id is None
     ):
-        all_graphs_out = result.get("all_graphs")
+        raw_all_graphs = result.get("all_graphs") or {}
+        all_graphs_out = {
+            idx: (
+                Neo4jReasoningRetriever.project_concepts_only(g)
+                if g else None
+            )
+            for idx, g in raw_all_graphs.items()
+        }
 
     return ChatResponse(
         reply          = reply_text,
