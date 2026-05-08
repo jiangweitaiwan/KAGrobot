@@ -404,41 +404,28 @@ class Neo4jReasoningRetriever:
 
     @staticmethod
     def project_concepts_only(graph_data: Dict[str, Any]) -> Dict[str, Any]:
-        """將完整 graph_data 投影為只含 concept 節點與 concept-to-concept 邊。
-
-        - paper 節點與 paper meta 全部移除
-        - A 類邊（concept 直連）直接保留
-        - B 類邊（concept-paper-concept）折疊為 concept-to-concept 直連邊，
-          paper_title 保留於邊的 via_paper_title 欄位
-        - path.node_ids 只保留 concept eid
-        - path.direction 保留
-        - selected_path_id 保留
-        """
+        """將完整 graph_data 投影為只含 concept 節點與 concept-to-concept 邊。"""
         nodes_map  = {n["id"]: n for n in graph_data.get("nodes", [])}
         concept_ids = {
             nid for nid, n in nodes_map.items()
             if n.get("node_type") == "concept"
         }
 
-        # 投影後的節點
         proj_nodes = [
             n for n in graph_data.get("nodes", [])
             if n.get("node_type") == "concept"
         ]
 
-        # 投影邊：折疊 B 類 concept→paper→concept 為直連
+        # 投影邊
         proj_edges: Dict[str, dict] = {}
 
         edges_by_source: Dict[str, List[dict]] = {}
-        edges_by_target: Dict[str, List[dict]] = {}
         for e in graph_data.get("edges", []):
             edges_by_source.setdefault(e["source"], []).append(e)
-            edges_by_target.setdefault(e["target"], []).append(e)
 
         for e in graph_data.get("edges", []):
             src, tgt = e["source"], e["target"]
 
-            # A 類：concept → concept 直連
             if src in concept_ids and tgt in concept_ids:
                 key = f"{src}__{tgt}"
                 if key not in proj_edges:
@@ -446,13 +433,12 @@ class Neo4jReasoningRetriever:
                         "id":              key,
                         "source":          src,
                         "target":          tgt,
+                        "paper_title":     e.get("paper_title", ""),   # ← 修正欄位名
                         "via_paper_title": None,
                     }
 
-            # B 類前半段：concept → paper
             elif src in concept_ids and tgt not in concept_ids:
                 paper_eid = tgt
-                # 找 paper → concept 的後半段
                 for e2 in edges_by_source.get(paper_eid, []):
                     next_eid = e2["target"]
                     if next_eid in concept_ids:
@@ -462,12 +448,11 @@ class Neo4jReasoningRetriever:
                                 "id":              key,
                                 "source":          src,
                                 "target":          next_eid,
-                                "via_paper_title": (
-                                    nodes_map.get(paper_eid, {}).get("label")
-                                ),
+                                "paper_title":     nodes_map.get(paper_eid, {}).get("label", ""),
+                                "via_paper_title": nodes_map.get(paper_eid, {}).get("label"),
                             }
 
-        # 投影 paths：node_ids 只保留 concept eid
+        # 投影 paths：node_ids 只保留 concept eid，edge_ids 對應重建
         proj_paths: List[dict] = []
         for p in graph_data.get("paths", []):
             concept_node_ids = [
@@ -476,10 +461,19 @@ class Neo4jReasoningRetriever:
             ]
             if not concept_node_ids:
                 continue
+
+            # 重建 edge_ids：用相鄰 concept pair 對應到 proj_edges
+            proj_edge_ids: List[str] = []
+            for i in range(len(concept_node_ids) - 1):
+                eid = f"{concept_node_ids[i]}__{concept_node_ids[i+1]}"
+                if eid in proj_edges:
+                    proj_edge_ids.append(eid)
+
             proj_paths.append({
                 "path_id":       p["path_id"],
                 "direction":     p.get("direction", "downstream"),
                 "node_ids":      concept_node_ids,
+                "edge_ids":      proj_edge_ids,          # ← 修正：補上 edge_ids
                 "final_concept": p.get("final_concept"),
                 "final_label":   p.get("final_label", ""),
             })

@@ -29,12 +29,13 @@ type ChatResponse = {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Storage keys
+// Constants
 // ─────────────────────────────────────────────────────────────
 
-const SESSION_KEY = "kagrobot_session_id";
-const HISTORY_KEY = "kagrobot_history";
-const PHASE_KEY   = "kagrobot_phase";
+const SESSION_KEY  = "kagrobot_session_id";
+const HISTORY_KEY  = "kagrobot_history";
+const PHASE_KEY    = "kagrobot_phase";
+const MAX_HISTORY  = 60;   // localStorage 最多保留幾筆訊息
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 
@@ -52,9 +53,23 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** path 的方向標記前綴 */
 function directionPrefix(direction?: string): string {
   return direction === "upstream" ? "↑ " : "↓ ";
+}
+
+/** 安全寫入 localStorage，超過 5 MB 時自動清除舊歷史 */
+function saveHistory(msgs: ChatMessage[]): void {
+  const trimmed = msgs.slice(-MAX_HISTORY);
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(trimmed));
+  } catch {
+    // QuotaExceededError：只保留最近 20 筆再試一次
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(trimmed.slice(-20)));
+    } catch {
+      localStorage.removeItem(HISTORY_KEY);
+    }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -69,14 +84,25 @@ export default function Page() {
   const [isLoading, setIsLoading] = useState(false);
   const [error,     setError]     = useState("");
 
-  // ── graph state ───────────────────────────────────────────
-  const [allGraphs,       setAllGraphs]       = useState<Record<number, GraphData | null>>({});
-  const [activeChipIndex, setActiveChipIndex] = useState<number | null>(null);
+  // ── graph state（graphData / activeChipIndex / path 需觸發 render）──
   const [graphData,       setGraphData]       = useState<GraphData | null>(null);
+  const [activeChipIndex, setActiveChipIndex] = useState<number | null>(null);
   const [selectedPathId,  setSelectedPathId]  = useState<number | null>(null);
   const [selectedLabel,   setSelectedLabel]   = useState<string | null>(null);
   const [confirmedPathId, setConfirmedPathId] = useState<number | null>(null);
   const [graphVisible,    setGraphVisible]    = useState(false);
+  // ── chipList 需要觸發 render，但完整圖資只存 ref ──
+  const [chipList, setChipList] = useState<
+    { index: number; label: string; hasData: boolean }[]
+  >([]);
+
+  // allGraphs 不放 state，避免大物件觸發多餘 re-render
+  const allGraphsRef = useRef<Record<number, GraphData | null>>({});
+
+  // typewriter 進行中旗標，用來阻擋 localStorage 寫入
+  const isTypingRef  = useRef(false);
+  // 同步最新 messages 到 ref，供 typewriter 結束後存檔
+  const messagesRef  = useRef<ChatMessage[]>([]);
 
   const boxRef = useRef<HTMLDivElement | null>(null);
 
@@ -95,21 +121,28 @@ export default function Page() {
     setMessages(history);
   }, []);
 
+  // ── 同步 messagesRef（不做任何 localStorage 寫入）────────
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
   // ── auto-scroll ───────────────────────────────────────────
   useEffect(() => {
     if (!boxRef.current) return;
     boxRef.current.scrollTop = boxRef.current.scrollHeight;
   }, [messages, isLoading]);
 
-  const canSend = useMemo(
-    () => !!input.trim() && !isLoading && !!sessionId,
-    [input, isLoading, sessionId]
-  );
+  const canSend = !input.trim() === false && !isLoading && !!sessionId;
 
   // ── typewriter ────────────────────────────────────────────
-  async function typewriterAppend(fullText: string) {
+  async function typewriterAppend(fullText: string): Promise<void> {
+    isTypingRef.current = true;
     const aiId = createSessionId();
+
+    // 先插入空白訊息
     setMessages((prev) => [...prev, { id: aiId, role: "ai", content: "" }]);
+
+    // 逐字更新（只更新目標訊息，其餘不動）
     for (let i = 1; i <= fullText.length; i++) {
       setMessages((prev) =>
         prev.map((msg) =>
@@ -118,12 +151,16 @@ export default function Page() {
       );
       await wait(10);
     }
+
+    isTypingRef.current = false;
+    // typewriter 完成後才寫入 localStorage（用 ref 取得最新 messages）
+    saveHistory(messagesRef.current);
   }
 
   // ── chip 切換（純前端，零後端請求）───────────────────────
   function handleChipClick(index: number) {
     if (isLoading) return;
-    const g = allGraphs[index] ?? null;
+    const g = allGraphsRef.current[index] ?? null;
     setActiveChipIndex(index);
     setGraphData(g);
     if (g) {
@@ -146,9 +183,21 @@ export default function Page() {
 
   // ── 初始化圖面板（收到 all_graphs 時呼叫）────────────────
   function initGraphPanel(parsed: Record<number, GraphData | null>) {
-    setAllGraphs(parsed);
-    const keys      = Object.keys(parsed).map(Number).filter((k) => parsed[k]);
-    const firstIdx  = keys.length ? Math.min(...keys) : null;
+    // 完整圖資存 ref，不觸發 re-render
+    allGraphsRef.current = parsed;
+
+    const keys     = Object.keys(parsed).map(Number).filter((k) => parsed[k]);
+    const firstIdx = keys.length ? Math.min(...keys) : null;
+
+    // chipList 需要 render，單獨抽出精簡資料
+    const chips = Object.entries(parsed)
+      .map(([k, g]) => ({
+        index:   Number(k),
+        label:   g?.query_concepts?.[0]?.name ?? `選項 ${k}`,
+        hasData: !!g,
+      }))
+      .sort((a, b) => a.index - b.index);
+    setChipList(chips);
 
     if (firstIdx !== null) {
       setActiveChipIndex(firstIdx);
@@ -212,8 +261,15 @@ export default function Page() {
         ...prev,
         { id: createSessionId(), role: "ai", content: "抱歉，連線失敗，請稍後再試。" },
       ]);
+      // 錯誤時也要存一次
+      saveHistory(messagesRef.current);
     } finally {
       setIsLoading(false);
+      // 確保使用者訊息有被存到（typewriter 會在自己完成後存，
+      // 但若過程中 isLoading 先結束，補一次保險）
+      if (!isTypingRef.current) {
+        saveHistory(messagesRef.current);
+      }
     }
   }
 
@@ -264,17 +320,22 @@ export default function Page() {
         ...prev,
         { id: createSessionId(), role: "ai", content: "抱歉，連線失敗，請稍後再試。" },
       ]);
+      saveHistory(messagesRef.current);
     } finally {
       setIsLoading(false);
+      if (!isTypingRef.current) {
+        saveHistory(messagesRef.current);
+      }
     }
   }
 
-  // ── persist messages ──────────────────────────────────────
+  // ── persist sessionId ─────────────────────────────────────
+  // 注意：messages 的存檔已移至 typewriterAppend / catch / finally，
+  // 這裡只存 sessionId，避免每次 messages 變動都觸發
   useEffect(() => {
     if (!sessionId) return;
     localStorage.setItem(SESSION_KEY, sessionId);
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(messages));
-  }, [sessionId, messages]);
+  }, [sessionId]);
 
   // ── reset ─────────────────────────────────────────────────
   function resetConversation() {
@@ -283,7 +344,8 @@ export default function Page() {
     setPhase("socratic");
     setMessages([]);
     setError("");
-    setAllGraphs({});
+    allGraphsRef.current = {};
+    setChipList([]);
     setActiveChipIndex(null);
     setGraphData(null);
     setSelectedPathId(null);
@@ -299,15 +361,7 @@ export default function Page() {
   // Derived display state
   // ─────────────────────────────────────────────────────────
 
-  const showGraph = graphVisible && graphData && graphData.nodes.length > 0;
-
-  const chipList = Object.entries(allGraphs)
-    .map(([k, g]) => ({
-      index:   Number(k),
-      label:   g?.query_concepts?.[0]?.name ?? `選項 ${k}`,
-      hasData: !!g,
-    }))
-    .sort((a, b) => a.index - b.index);
+  const showGraph = graphVisible && !!graphData && graphData.nodes.length > 0;
 
   const isReselect      = phase === "main_agent" && confirmedPathId !== null;
   const hasNewSelection = selectedPathId !== null && selectedPathId !== confirmedPathId;
@@ -328,7 +382,7 @@ export default function Page() {
       ? "繼續詢問分析細節，或在右側切換路徑…"
       : "輸入你的問題…";
 
-  // path legend：上游排前，下游排後，同方向內保持 path_id 順序
+  // path legend：上游排前，下游排後
   const sortedPaths = useMemo(() => {
     if (!graphData?.paths) return [];
     return [...graphData.paths].sort((a, b) => {
@@ -438,15 +492,15 @@ export default function Page() {
               </div>
             )}
 
-            {/* path legend：上游在前，下游在後，各自顯示方向前綴 */}
+            {/* path legend */}
             {sortedPaths.length > 0 && (
               <div className="path-legend">
                 {sortedPaths.map((p) => {
-                  const prefix    = directionPrefix(p.direction);
-                  const color     = p.direction === "upstream"
+                  const prefix      = directionPrefix(p.direction);
+                  const color       = p.direction === "upstream"
                     ? UPSTREAM_COLORS[p.path_id % UPSTREAM_COLORS.length]
                     : PATH_COLORS[p.path_id % PATH_COLORS.length];
-                  const isActive  = selectedPathId === p.path_id;
+                  const isActive    = selectedPathId === p.path_id;
                   const isConfirmed = p.path_id === confirmedPathId;
 
                   return (
@@ -475,7 +529,6 @@ export default function Page() {
               height={400}
             />
 
-            {/* 確認/重選按鈕 */}
             {showConfirm && (
               <button
                 className="confirm-btn"
@@ -497,17 +550,17 @@ export default function Page() {
   );
 }
 
-const CHIP_COLORS = [
-  "#4f8ef7", "#00d4aa", "#e8a030",
-];
+// ─────────────────────────────────────────────────────────────
+// Color tokens
+// ─────────────────────────────────────────────────────────────
 
-// 下游路徑色系（暖色）
+const CHIP_COLORS = ["#4f8ef7", "#00d4aa", "#e8a030"];
+
 const PATH_COLORS = [
   "#4f8ef7", "#00d4aa", "#e8a030", "#e85d60",
   "#a060f0", "#3dd090", "#f07050", "#60b0f0",
 ];
 
-// 上游路徑色系（冷色，與下游區隔）
 const UPSTREAM_COLORS = [
   "#94a3b8", "#7dd3fc", "#a5b4fc", "#86efac",
   "#c4b5fd", "#93c5fd", "#6ee7b7", "#bfdbfe",
