@@ -297,7 +297,54 @@ def _find_graph_by_path_id(
 async def _expand_all_graphs(
     candidates: List[dict],
 ) -> Dict[int, Any]:
-    """以 asyncio.gather 並行展開所有 candidate 的圖譜。"""
+    """以 asyncio.gather 並行展開所有 candidate 的圖譜，每個只保留最長的 4 條 path。"""
+
+    def _trim_to_top_paths(graph_data: Dict[str, Any], top_n: int = 4) -> Dict[str, Any]:
+        """只保留 node_ids 最長的 top_n 條 path（上下游混排），
+        裁剪未使用的 nodes/edges，並以最長 path 作為 selected_path_id。
+        """
+        all_paths = graph_data.get("paths") or []
+        if not all_paths:
+            return graph_data
+
+        # 依 node_ids 長度降冪排序，取前 top_n 條
+        sorted_paths = sorted(
+            all_paths,
+            key=lambda p: len(p.get("node_ids", [])),
+            reverse=True,
+        )
+        top_paths = sorted_paths[:top_n]
+
+        # 重新指定 path_id（0, 1, 2, 3）
+        for new_id, path in enumerate(top_paths):
+            path["path_id"] = new_id
+
+        # 最長 path 排第一，selected_path_id = 0
+        selected_path_id = 0
+
+        # 收集這幾條 path 用到的 node_id 與 edge_id
+        used_node_ids: set = set()
+        used_edge_ids: set = set()
+        for path in top_paths:
+            used_node_ids.update(path.get("node_ids") or [])
+            used_edge_ids.update(path.get("edge_ids") or [])
+
+        trimmed_nodes = [
+            n for n in (graph_data.get("nodes") or [])
+            if n["id"] in used_node_ids
+        ]
+        trimmed_edges = [
+            e for e in (graph_data.get("edges") or [])
+            if e["id"] in used_edge_ids
+        ]
+
+        return {
+            **graph_data,
+            "paths":            top_paths,
+            "nodes":            trimmed_nodes,
+            "edges":            trimmed_edges,
+            "selected_path_id": selected_path_id,
+        }
 
     async def _expand_one(cand: dict) -> tuple[int, Any]:
         idx     = cand["index"]
@@ -313,7 +360,9 @@ async def _expand_all_graphs(
                 eid,
                 rc_name,
             )
-            return idx, _annotate_graph_with_default_path(raw_graph, rc_name)
+            # _annotate 的 selected_path_id 會被 _trim 覆蓋，直接裁剪即可
+            trimmed = _trim_to_top_paths(raw_graph, top_n=4)
+            return idx, trimmed
         except Exception as exc:
             print(f"[_expand_all_graphs] retrieve_graph failed for {rc_name}: {exc}")
             return idx, None
