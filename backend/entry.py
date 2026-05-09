@@ -1,12 +1,5 @@
 # -*- coding: utf-8 -*-
-"""entry.py  — FastAPI + LangGraph orchestrator.
-
-改動摘要（v4）：
-  • _annotate_graph_with_default_path：預設標記改為第一條 downstream path
-  • _build_graph_context：箭頭格式，上下游分區，只用 concept 鏈
-  • all_graphs_out：用 Neo4jReasoningRetriever.project_concepts_only 投影後回傳
-  • socratic_node：process_message 傳入完整 all_graphs（方向 B，tool lookup dict）
-"""
+"""entry.py  — FastAPI + LangGraph orchestrator."""
 
 from __future__ import annotations
 
@@ -54,7 +47,7 @@ class OrchestratorState(TypedDict, total=False):
     handoff_task:      Optional[str]
     selected_path_id:  Optional[int]
     confirmed_path_id: Optional[int]
-    all_graphs:        Optional[Dict[int, Any]]   # 完整資料（含 paper meta）
+    all_graphs:        Optional[Dict[int, Any]]
     graph_context:     Optional[str]
 
 
@@ -116,11 +109,7 @@ def _annotate_graph_with_default_path(
     graph_data: Dict[str, Any],
     rc_name:    str,
 ) -> Dict[str, Any]:
-    """在 graph_data 中找出第一條 downstream path 作為預設標記。
-
-    優先找 final_label 與 rc_name 完全匹配的 downstream path；
-    若無則取第一條 downstream path；若無 downstream 則取第一條 path。
-    """
+    """在 graph_data 中找出第一條 downstream path 作為預設標記。"""
     downstream_paths = [
         p for p in graph_data.get("paths", [])
         if p.get("direction", "downstream") == "downstream"
@@ -128,18 +117,15 @@ def _annotate_graph_with_default_path(
 
     selected_path_id: Optional[int] = None
 
-    # 1. 嘗試 final_label 完全匹配（downstream）
     rc_lower = rc_name.lower()
     for path in downstream_paths:
         if (path.get("final_label") or "").lower() == rc_lower:
             selected_path_id = path["path_id"]
             break
 
-    # 2. 取第一條 downstream path
     if selected_path_id is None and downstream_paths:
         selected_path_id = downstream_paths[0]["path_id"]
 
-    # 3. fallback：取任意第一條 path
     if selected_path_id is None:
         all_paths = graph_data.get("paths", [])
         if all_paths:
@@ -148,23 +134,48 @@ def _annotate_graph_with_default_path(
     return {**graph_data, "selected_path_id": selected_path_id}
 
 
-def _build_graph_context(all_graphs: Dict[int, Any]) -> str:
-    """將 all_graphs 序列化為 Socrates system prompt 用的文字。
+def _score_paths_by_intent(
+    graph_data:   Dict[str, Any],
+    intent_types: List[str],
+) -> Dict[str, Any]:
+    """對 graph_data 中每條 path 計算 intent_score，並依分數重新排序。
 
-    只使用 concept 鏈（project_concepts_only 後的資料），
-    上下游分區，以箭頭表示方向。
-
-    格式：
-        【候選 1】Exchange Rate Volatility
-          ↑ 上游
-            Interest Rate Dynamics → Exchange Rate Volatility
-            Monetary Policy → Exchange Rate Volatility
-          ↓ 下游
-            Exchange Rate Volatility → Conditional Variance → GARCH Model
-            Exchange Rate Volatility → Latent Process → Stochastic Volatility Model
-
-        【候選 2】…
+    只考慮 final concept 的 analysis_types 與 intent_types 的重疊度。
+    排序規則：intent_score 降冪；同分時以 node_ids 長度降冪（較長路徑優先）。
+    排序完成後重設 path_id（0, 1, 2, ...），selected_path_id = 0。
     """
+    if not intent_types or not graph_data:
+        return graph_data
+
+    nodes_by_id: Dict[str, Any] = {
+        n["id"]: n for n in graph_data.get("nodes", [])
+    }
+
+    def _type_overlap(node_analysis_types: List[str]) -> float:
+        if not node_analysis_types:
+            return 0.0
+        matched = len(set(node_analysis_types) & set(intent_types))
+        return matched / len(intent_types)
+
+    scored_paths = []
+    for path in graph_data.get("paths", []):
+        final_id   = path.get("final_concept")
+        final_node = nodes_by_id.get(final_id or "", {})
+        type_score = _type_overlap(final_node.get("analysis_types", []))
+        scored_paths.append({**path, "intent_score": type_score})
+
+    scored_paths.sort(
+        key=lambda p: (p["intent_score"], len(p.get("node_ids", []))),
+        reverse=True,
+    )
+    for new_id, path in enumerate(scored_paths):
+        path["path_id"] = new_id
+
+    return {**graph_data, "paths": scored_paths, "selected_path_id": 0}
+
+
+def _build_graph_context(all_graphs: Dict[int, Any]) -> str:
+    """將 all_graphs 序列化為 Socrates system prompt 用的文字。"""
     lines: List[str] = []
 
     for idx, g in sorted(all_graphs.items()):
@@ -175,7 +186,6 @@ def _build_graph_context(all_graphs: Dict[int, Any]) -> str:
         concept_name = (g.get("query_concepts") or [{}])[0].get("name", f"選項 {idx}")
         lines.append(f"【候選 {idx}】{concept_name}")
 
-        # 用 project_concepts_only 取得 concept-only 結構
         proj = Neo4jReasoningRetriever.project_concepts_only(g)
         nodes_by_id: Dict[str, Any] = {n["id"]: n for n in proj.get("nodes", [])}
 
@@ -186,7 +196,6 @@ def _build_graph_context(all_graphs: Dict[int, Any]) -> str:
             direction   = path.get("direction", "downstream")
             node_ids    = path.get("node_ids", [])
 
-            # 概念名稱序列
             concept_names = [
                 nodes_by_id.get(nid, {}).get("label", nid)
                 for nid in node_ids
@@ -212,7 +221,7 @@ def _build_graph_context(all_graphs: Dict[int, Any]) -> str:
         if not upstream_lines and not downstream_lines:
             lines.append("  （無可用路徑）")
 
-        lines.append("")  # 候選間空行
+        lines.append("")
 
     return "\n".join(lines).rstrip()
 
@@ -222,7 +231,6 @@ def _build_handoff_task(
     selected_path:  Optional[Dict[str, Any]] = None,
     all_graphs:     Optional[Dict[int, Any]] = None,
 ) -> str:
-    """建構 MainAgent 的 handoff task 字串。"""
     query = socrates_state.get("query") or "（未提供）"
 
     if selected_path and all_graphs:
@@ -280,7 +288,6 @@ def _find_graph_by_path_id(
     all_graphs: Dict[int, Any],
     path_id: int,
 ) -> Optional[Dict[str, Any]]:
-    """從 all_graphs 中找出含有指定 path_id 的 graph_data。"""
     for g in all_graphs.values():
         if not g:
             continue
@@ -297,17 +304,12 @@ def _find_graph_by_path_id(
 async def _expand_all_graphs(
     candidates: List[dict],
 ) -> Dict[int, Any]:
-    """以 asyncio.gather 並行展開所有 candidate 的圖譜，每個只保留最長的 4 條 path。"""
 
     def _trim_to_top_paths(graph_data: Dict[str, Any], top_n: int = 4) -> Dict[str, Any]:
-        """只保留 node_ids 最長的 top_n 條 path（上下游混排），
-        裁剪未使用的 nodes/edges，並以最長 path 作為 selected_path_id。
-        """
         all_paths = graph_data.get("paths") or []
         if not all_paths:
             return graph_data
 
-        # 依 node_ids 長度降冪排序，取前 top_n 條
         sorted_paths = sorted(
             all_paths,
             key=lambda p: len(p.get("node_ids", [])),
@@ -315,14 +317,11 @@ async def _expand_all_graphs(
         )
         top_paths = sorted_paths[:top_n]
 
-        # 重新指定 path_id（0, 1, 2, 3）
         for new_id, path in enumerate(top_paths):
             path["path_id"] = new_id
 
-        # 最長 path 排第一，selected_path_id = 0
         selected_path_id = 0
 
-        # 收集這幾條 path 用到的 node_id 與 edge_id
         used_node_ids: set = set()
         used_edge_ids: set = set()
         for path in top_paths:
@@ -360,7 +359,6 @@ async def _expand_all_graphs(
                 eid,
                 rc_name,
             )
-            # _annotate 的 selected_path_id 會被 _trim 覆蓋，直接裁剪即可
             trimmed = _trim_to_top_paths(raw_graph, top_n=4)
             return idx, trimmed
         except Exception as exc:
@@ -376,7 +374,6 @@ async def _expand_all_graphs(
 # ======================================================================
 
 async def socratic_node(state: OrchestratorState) -> OrchestratorState:
-    """需求釐清 + 圖譜展開節點。"""
     messages         = state.get("messages") or []
     user_msg         = _last_human_content(messages)
     selected_path_id = state.get("selected_path_id")
@@ -396,14 +393,12 @@ async def socratic_node(state: OrchestratorState) -> OrchestratorState:
             socrates_state = new_socrates_state,
         )
 
-    # ── 情況 2 & 3：一般 Socrates 對話 ───────────────────────
+    # ── 一般 Socrates 對話 ────────────────────────────────────
     graph_context = (
         state.get("graph_context")
         if current_phase == "concept_resolved"
         else None
     )
-
-    # 傳入完整 all_graphs，供 retrieve_concept_detail tool 從 dict lookup
     all_graphs_full = state.get("all_graphs") if current_phase == "concept_resolved" else None
 
     new_socrates_state = shared_socrates_bot.process_message(
@@ -418,8 +413,18 @@ async def socratic_node(state: OrchestratorState) -> OrchestratorState:
 
     # retrieve_tool 被呼叫 → concept_resolved → 並行展開圖譜
     if inner_phase == ConversationPhase.CONCEPT_RESOLVED.value:
-        candidates = new_socrates_state.get("candidates") or []
-        all_graphs = await _expand_all_graphs(candidates)
+        candidates   = new_socrates_state.get("candidates") or []
+        intent_types = new_socrates_state.get("intent_types") or []
+        all_graphs   = await _expand_all_graphs(candidates)
+
+        # 依 intent_types 對每個 candidate 的 path 做評分與排序
+        if intent_types:
+            all_graphs = {
+                idx: _score_paths_by_intent(g, intent_types)
+                for idx, g in all_graphs.items()
+                if g is not None
+            }
+
         new_graph_context = _build_graph_context(all_graphs)
 
         return OrchestratorState(
@@ -430,7 +435,6 @@ async def socratic_node(state: OrchestratorState) -> OrchestratorState:
             graph_context  = new_graph_context,
         )
 
-    # 仍在對話中
     return OrchestratorState(
         messages       = [AIMessage(content=reply_text)],
         phase          = current_phase,
@@ -439,7 +443,6 @@ async def socratic_node(state: OrchestratorState) -> OrchestratorState:
 
 
 async def main_agent_node(state: OrchestratorState) -> OrchestratorState:
-    """MainAgent 執行節點。"""
     socrates_state = state.get("socrates_state")
     if not socrates_state:
         return OrchestratorState(
@@ -599,8 +602,6 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
         else None
     )
 
-    # all_graphs_out：concept_resolved 且無 selected_path_id 時回傳前端
-    # 使用 project_concepts_only 投影，只含 concept 節點與 concept-to-concept 邊
     all_graphs_out: Optional[Dict[int, Any]] = None
     if (
         result.get("phase") == "concept_resolved"
