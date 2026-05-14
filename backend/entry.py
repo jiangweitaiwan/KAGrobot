@@ -140,7 +140,6 @@ def _score_paths_by_intent(
 ) -> Dict[str, Any]:
     """對 graph_data 中每條 path 計算 intent_score，並依分數重新排序。
 
-    只考慮 final concept 的 analysis_types 與 intent_types 的重疊度。
     排序規則：intent_score 降冪；同分時以 node_ids 長度降冪（較長路徑優先）。
     排序完成後重設 path_id（0, 1, 2, ...），selected_path_id = 0。
     """
@@ -175,7 +174,13 @@ def _score_paths_by_intent(
 
 
 def _build_graph_context(all_graphs: Dict[int, Any]) -> str:
-    """將 all_graphs 序列化為 Socrates system prompt 用的文字。"""
+    """將 all_graphs 序列化為 Socrates system prompt 用的文字。
+
+    每個 candidate 只列出：
+      - candidate RC 名稱
+      - 下游終點（top-3 path 的 final_label，去重）
+      - 基礎概念（foundations label，去重）
+    """
     lines: List[str] = []
 
     for idx, g in sorted(all_graphs.items()):
@@ -186,40 +191,29 @@ def _build_graph_context(all_graphs: Dict[int, Any]) -> str:
         concept_name = (g.get("query_concepts") or [{}])[0].get("name", f"選項 {idx}")
         lines.append(f"【候選 {idx}】{concept_name}")
 
+        # 下游終點：paths 已經由 _score_paths_by_intent 或 _trim_to_top_paths
+        # 排序並限制為 top-3，直接取 final_label
         proj = Neo4jReasoningRetriever.project_concepts_only(g)
-        nodes_by_id: Dict[str, Any] = {n["id"]: n for n in proj.get("nodes", [])}
-
-        upstream_lines:   List[str] = []
-        downstream_lines: List[str] = []
-
+        downstream_finals: List[str] = []
+        seen_finals: set = set()
         for path in proj.get("paths", []):
-            direction   = path.get("direction", "downstream")
-            node_ids    = path.get("node_ids", [])
+            label = path.get("final_label", "")
+            if label and label not in seen_finals:
+                seen_finals.add(label)
+                downstream_finals.append(label)
 
-            concept_names = [
-                nodes_by_id.get(nid, {}).get("label", nid)
-                for nid in node_ids
-            ]
-            if not concept_names:
-                continue
+        if downstream_finals:
+            lines.append(f"  下游終點：{', '.join(downstream_finals)}")
+        else:
+            lines.append("  下游終點：（無）")
 
-            chain_str = " → ".join(concept_names)
-
-            if direction == "upstream":
-                upstream_lines.append(f"    {chain_str}")
-            else:
-                downstream_lines.append(f"    {chain_str}")
-
-        if upstream_lines:
-            lines.append("  ↑ 上游")
-            lines.extend(upstream_lines)
-
-        if downstream_lines:
-            lines.append("  ↓ 下游")
-            lines.extend(downstream_lines)
-
-        if not upstream_lines and not downstream_lines:
-            lines.append("  （無可用路徑）")
+        # 基礎概念：foundations（leaf concepts）
+        foundations = g.get("foundations") or []
+        foundation_labels = [f["label"] for f in foundations if f.get("label")]
+        if foundation_labels:
+            lines.append(f"  基礎概念：{', '.join(foundation_labels)}")
+        else:
+            lines.append("  基礎概念：（無）")
 
         lines.append("")
 
@@ -305,22 +299,23 @@ async def _expand_all_graphs(
     candidates: List[dict],
 ) -> Dict[int, Any]:
 
-    def _trim_to_top_paths(graph_data: Dict[str, Any], top_n: int = 4) -> Dict[str, Any]:
+    TOP_N = 3
+
+    def _trim_to_top_paths(graph_data: Dict[str, Any]) -> Dict[str, Any]:
+        """保留 intent_score 最高的 top-3 下游路徑，重設 path_id。"""
         all_paths = graph_data.get("paths") or []
         if not all_paths:
             return graph_data
 
         sorted_paths = sorted(
             all_paths,
-            key=lambda p: len(p.get("node_ids", [])),
+            key=lambda p: (p.get("intent_score", 0.0), len(p.get("node_ids", []))),
             reverse=True,
         )
-        top_paths = sorted_paths[:top_n]
+        top_paths = sorted_paths[:TOP_N]
 
         for new_id, path in enumerate(top_paths):
             path["path_id"] = new_id
-
-        selected_path_id = 0
 
         used_node_ids: set = set()
         used_edge_ids: set = set()
@@ -342,7 +337,7 @@ async def _expand_all_graphs(
             "paths":            top_paths,
             "nodes":            trimmed_nodes,
             "edges":            trimmed_edges,
-            "selected_path_id": selected_path_id,
+            "selected_path_id": 0,
         }
 
     async def _expand_one(cand: dict) -> tuple[int, Any]:
@@ -354,15 +349,23 @@ async def _expand_all_graphs(
             return idx, None
 
         try:
-            raw_graph = await asyncio.to_thread(
-                shared_retriever.retrieve_graph,
-                eid,
-                rc_name,
+            # 下游圖譜與上游 foundations 並行跑
+            raw_graph, foundations = await asyncio.gather(
+                asyncio.to_thread(
+                    shared_retriever.retrieve_graph,
+                    eid,
+                    rc_name,
+                ),
+                asyncio.to_thread(
+                    shared_retriever.retrieve_foundations,
+                    eid,
+                ),
             )
-            trimmed = _trim_to_top_paths(raw_graph, top_n=4)
+            raw_graph["foundations"] = foundations
+            trimmed = _trim_to_top_paths(raw_graph)
             return idx, trimmed
         except Exception as exc:
-            print(f"[_expand_all_graphs] retrieve_graph failed for {rc_name}: {exc}")
+            print(f"[_expand_all_graphs] failed for {rc_name}: {exc}")
             return idx, None
 
     results = await asyncio.gather(*[_expand_one(c) for c in candidates[:3]])
