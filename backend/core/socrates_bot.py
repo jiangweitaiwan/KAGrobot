@@ -14,7 +14,7 @@ from langchain_core.messages import (
     AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage,
 )
 from langchain_core.tools import StructuredTool
-from langchain_google_genai import ChatGoogleGenerativeAI
+from core.google_llm import create_chat_google_generative_ai
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
@@ -24,7 +24,6 @@ from core.registry import (
     AGENTS_REGISTRY, AgentType, CONCEPT_TO_AGENT, TOOLS_REGISTRY,
 )
 from core.llm_retry import call_with_retry
-from settings import get_settings
 
 Neo4jReasoningRetriever = nrr.Neo4jReasoningRetriever
 
@@ -240,11 +239,11 @@ class SocratesChatBot:
         self._concept_to_agent = concept_to_agent or CONCEPT_TO_AGENT
         self._top_k            = top_k_entities
 
-        if not api_key:
-            api_key = get_settings().google_api_key
-
-        self._base_llm = ChatGoogleGenerativeAI(
-            model=model, google_api_key=api_key, temperature=0.1)
+        self._base_llm = create_chat_google_generative_ai(
+            model=model,
+            temperature=0.1,
+            api_key=api_key,
+        )
 
         # 兩個工具在 __init__ 建立一次，不再需要每次傳入 all_graphs
         self._retrieve_tool       = self._make_retrieve_tool()

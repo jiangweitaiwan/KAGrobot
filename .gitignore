@@ -1,5 +1,5 @@
 sbert_onnx/
-
+__pycache__/
 # 系統檔案 (Windows / Mac)
 Thumbs.db
 .DS_Store

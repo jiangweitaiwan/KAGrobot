@@ -17,7 +17,7 @@ from langchain_core.messages import (
     AIMessage, BaseMessage, HumanMessage, SystemMessage,
 )
 from langchain_core.tools import BaseTool, StructuredTool
-from langchain_google_genai import ChatGoogleGenerativeAI
+from core.google_llm import create_chat_google_generative_ai
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
@@ -33,7 +33,6 @@ from core.socrates_bot import (
     _resolve_agent_type,
     collect_tools_with_deps,
 )
-from settings import get_settings
 from tools.base import _TOOL_IMPLEMENTATIONS
 from tools.knowledge import make_knowledge_qa_tool, make_trace_rc_logic_tool
 
@@ -225,14 +224,11 @@ class MainAgent:
         model:   str = "gemini-2.5-flash",
         api_key: str = "",
     ):
-        if not api_key:
-            api_key = get_settings().google_api_key
         self._model_name = model
-        self._api_key    = api_key
-        self._base_llm   = ChatGoogleGenerativeAI(
+        self._base_llm   = create_chat_google_generative_ai(
             model=model,
-            google_api_key=api_key,
             temperature=0,
+            api_key=api_key,
         )
 
     def chat(

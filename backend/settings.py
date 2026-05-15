@@ -24,6 +24,14 @@ class Settings(BaseSettings):
     google_api_key: str = Field(default="", alias="GOOGLE_API_KEY")
     main_agent_model: str = Field(default="gemini-2.5-flash", alias="MAIN_AGENT_MODEL")
     socrates_model: str = Field(default="gemini-2.5-flash", alias="SOCRATES_MODEL")
+    # Vertex AI（設 GOOGLE_GENAI_USE_VERTEXAI=true 且 GOOGLE_CLOUD_PROJECT 時啟用）
+    google_genai_use_vertexai: bool = Field(
+        default=False, alias="GOOGLE_GENAI_USE_VERTEXAI"
+    )
+    google_cloud_project: str = Field(default="", alias="GOOGLE_CLOUD_PROJECT")
+    google_cloud_location: str = Field(
+        default="us-central1", alias="GOOGLE_CLOUD_LOCATION"
+    )
 
     # --- Neo4j ---
     neo4j_uri: str = Field(default="neo4j+s://124606a6.databases.neo4j.io", alias="NEO4J_URI")

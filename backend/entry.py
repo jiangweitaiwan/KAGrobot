@@ -74,11 +74,9 @@ s                   = get_settings()
 shared_socrates_bot = SocratesChatBot(
     retriever=shared_retriever,
     model=s.socrates_model,
-    api_key=s.google_api_key,
 )
 shared_main_agent = MainAgent(
     model=s.main_agent_model,
-    api_key=s.google_api_key,
 )
 
 
