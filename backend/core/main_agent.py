@@ -3,13 +3,19 @@ core/main_agent.py
 ─────────────────────────────────────────────────────────────
 MainAgent：無狀態設計，每次 chat() 呼叫動態組裝 LangGraph 執行圖。
 
+Skill 注入
+----------
+當 chat() 收到 skill: RCSkill 參數時：
+  - system prompt = BASE_SYSTEM_PROMPT + skill.prompt_context
+  - tools         = skill.tools（若 skill.has_tools）
+                    否則 fallback 到 build_tools_from_state()
+
 對外介面：
     MainAgent   — 主類別
 """
 
 from __future__ import annotations
 
-import json
 import textwrap
 from typing import List, Optional, Sequence, TypedDict
 
@@ -39,6 +45,11 @@ from tools.knowledge import make_knowledge_qa_tool, make_trace_rc_logic_tool
 # 確保所有工具副作用式註冊已執行
 import tools  # noqa: F401
 
+# RCSkill type（避免循環 import，用 TYPE_CHECKING）
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from skill_loader import RCSkill
+
 
 # ═══════════════════════════════════════════════════════════════
 # LangGraph Agent State
@@ -49,49 +60,104 @@ class AgentState(TypedDict):
 
 
 # ═══════════════════════════════════════════════════════════════
-# Reasoning chain 輔助
+# Base system prompt（固定，定位在「協助解決用戶 query」）
 # ═══════════════════════════════════════════════════════════════
 
-def _format_reasoning_chains(chains: List[dict]) -> str:
-    """將 reasoning chain 列表序列化為易讀文字（供 system prompt 使用）。"""
-    if not chains:
-        return "（無可用推理鏈）"
-    parts: List[str] = []
-    for i, chain in enumerate(chains, 1):
-        start = chain.get("start_concept", {}).get("name", "?")
-        step_names = [start]
-        for step in chain.get("steps", []):
-            to_name = step.get("to_concept", {}).get("name", "?")
-            step_names.append(to_name)
-            paper = step.get("via_paper")
-            if paper and paper.get("title"):
-                step_names[-1] += f" (via: {paper['title']})"
-        path_str = " → ".join(step_names)
-        final_paper = chain.get("final_paper")
-        paper_info  = ""
-        if final_paper:
-            paper_info = f"\n   關聯論文: {final_paper.get('title', 'N/A')}"
-            if premises := final_paper.get("conceptual_premises"):
-                paper_info += f"\n   前提假設: {premises}"
-            if constraints := final_paper.get("contextual_model_constraints"):
-                paper_info += f"\n   模型約束: {constraints}"
-        parts.append(f"推理鏈 {i}: {path_str}{paper_info}")
-    return "\n".join(parts)
+_BASE_SYSTEM_PROMPT = textwrap.dedent("""\
+    你是一位專業的金融與經濟分析助手。
+    你的核心任務是：理解使用者的分析需求，運用可用工具，提供清晰、有深度的分析結果。
+
+    ## 使用原則
+
+    - **主動判斷**：根據需求與可用工具，主動決定呼叫哪些工具、以何種順序組合
+    - **結果解讀**：收到工具結果後，以繁體中文清楚解讀，結合理論背景提供深度分析
+    - **參數確認**：若執行工具所需的參數不完整，先向使用者詢問，再執行
+    - **回答結構**：先給結論，再解釋原因；專業但易懂，避免過度學術術語
+    - **不確定性**：若分析結果存在前提假設或限制，主動向使用者說明
+""")
 
 
 # ═══════════════════════════════════════════════════════════════
-# Dynamic System Prompt Builder
+# Skill-aware prompt builder
 # ═══════════════════════════════════════════════════════════════
 
-def build_system_prompt(socrates_state: ChatState) -> str:
-    """從 SocratesChatBot 的 resolved state 動態組裝 system prompt。"""
-    query      = socrates_state.get("query") or "（未提供）"
+def build_system_prompt(
+    socrates_state: ChatState,
+    skill: Optional["RCSkill"] = None,
+) -> str:
+    """組裝完整 system prompt。
+
+    結構：
+        BASE_SYSTEM_PROMPT          （固定）
+        ── 使用者需求 ──             （來自 socrates_state）
+        ── RC Skill Context ──      （來自 skill，若有）
+        ── 可用工具清單 ──           （skill.tools 或 fallback）
+    """
+    query = socrates_state.get("query") or "（未提供）"
+
+    # ── 使用者需求區塊 ──
+    need_section = textwrap.dedent(f"""\
+        ══════════════════════════════
+        使用者需求
+        ══════════════════════════════
+        {query}
+    """)
+
+    # ── RC Skill Context 區塊（動態）──
+    if skill and skill.prompt_context.strip():
+        skill_section = textwrap.dedent(f"""\
+
+        ══════════════════════════════
+        分析方法：{skill.rc_name}
+        ══════════════════════════════
+        {skill.prompt_context.strip()}
+        """)
+    else:
+        skill_section = ""
+
+    # ── 工具清單區塊 ──
+    if skill and skill.has_tools:
+        # 工具來自 skill
+        tool_lines = [
+            f"{i}. **{t.name}** — {t.description}"
+            for i, t in enumerate(skill.tools, 1)
+        ]
+        tool_section_header = "可用工具（來自 RC Skill）"
+    else:
+        # Fallback：從 socrates_state 組裝（舊機制）
+        tool_lines = _build_fallback_tool_lines(socrates_state)
+        tool_section_header = "可用工具"
+
+    tool_section = (
+        f"══════════════════════════════\n"
+        f"{tool_section_header}\n"
+        f"══════════════════════════════\n"
+        + ("\n".join(tool_lines) if tool_lines else "（無額外工具）")
+    )
+
+    # 常駐工具提示
+    trace_hint = (
+        "\n此外，你始終可使用 **trace_rc_logic** 工具查詢 concept 中的理論背景。"
+    )
+
+    return (
+        _BASE_SYSTEM_PROMPT
+        + "\n"
+        + need_section
+        + skill_section
+        + "\n"
+        + tool_section
+        + trace_hint
+    )
+
+
+def _build_fallback_tool_lines(socrates_state: ChatState) -> List[str]:
+    """Fallback：從 socrates_state 組裝工具描述行（維持舊邏輯）。"""
     tools_info = socrates_state.get("tools") or []
     params     = socrates_state.get("parameters") or []
+    param_map  = {p["tool_name"]: p.get("parameters", {}) for p in params}
+    lines: List[str] = []
 
-    # ── 工具描述 ──
-    tool_lines: List[str] = []
-    param_map = {p["tool_name"]: p.get("parameters", {}) for p in params}
     for idx, t in enumerate(tools_info, 1):
         tname      = t["tool_name"]
         desc       = t.get("description", "")
@@ -113,69 +179,45 @@ def build_system_prompt(socrates_state: ChatState) -> str:
             if param_parts:
                 param_hint = "\n" + "\n".join(param_parts)
 
-        tool_lines.append(
+        lines.append(
             f"{idx}. **{tname}**{dep_tag} — {desc}\n"
-            f"   來源代理: {from_agent} ｜ 匹配概念: {concept} ｜ 技能: {skills}"
+            f"   來源: {from_agent} ｜ 概念: {concept} ｜ 技能: {skills}"
             f"{param_hint}"
         )
 
-    tool_section = "\n".join(tool_lines) if tool_lines else "（無額外工具）"
-
-    # ── 選定推理鏈（僅包含 Resulting Concept 節點名稱序列）──
-    selected_chain = _extract_selected_chain(socrates_state)
-    chain_section  = _format_selected_chain(selected_chain)
-
-    # ── 對話歷史摘要 ──
-    conv_snippets: List[str] = []
-    for msg in socrates_state.get("messages", []):
-        role = "使用者" if isinstance(msg, HumanMessage) else "助理"
-        text = msg.content[:200] if hasattr(msg, "content") else str(msg)[:200]
-        conv_snippets.append(f"  [{role}] {text}")
-    conv_summary = "\n".join(conv_snippets[-8:]) if conv_snippets else "（無前置對話）"
-
-    return textwrap.dedent(f"""\
-        你是一位專業的金融與經濟分析助手。你的任務是運用可用工具，
-        協助使用者解決以下經過釐清的需求。
-
-        ══════════════════════════════
-        使用者需求
-        ══════════════════════════════
-        {query}
-
-
-        ══════════════════════════════
-        推理鏈
-        ══════════════════════════════
-        {chain_section}
-
-        ══════════════════════════════
-        可用工具
-        ══════════════════════════════
-        {tool_section}
-
-        此外，你始終可使用 **trace_rc_logic** 工具查詢 concept 中的理論背景。
-
-        ══════════════════════════════
-        使用原則
-        ══════════════════════════════
-        - 主動判斷該呼叫哪些工具，可以組合多個工具完成任務
-        - 收到工具結果後，用繁體中文清楚解讀
-        - 結合推理鏈的理論背景提供深度分析
-        - 若參數不完整，先向使用者詢問
-        - 回答先給結論，再解釋原因
-        - 專業但易懂，避免過度學術術語
-    """)
+    return lines
 
 
 # ═══════════════════════════════════════════════════════════════
-# Dynamic Tool Builder
+# Dynamic Tool Builder（skill-aware）
 # ═══════════════════════════════════════════════════════════════
 
-def build_tools_from_state(socrates_state: ChatState) -> List[StructuredTool]:
-    """從 SocratesChatBot 的 resolved state 動態組裝 LangChain 工具清單。"""
+def build_tools(
+    socrates_state: ChatState,
+    skill: Optional["RCSkill"] = None,
+) -> List[StructuredTool]:
+    """組裝最終工具清單。
+
+    優先順序：
+    1. skill.tools（若 skill 存在且有工具）
+    2. fallback：從 _TOOL_IMPLEMENTATIONS 組裝（舊機制）
+
+    無論哪種情況，最後都附上常駐的 trace_rc_logic 工具。
+    """
+    if skill and skill.has_tools:
+        langchain_tools = list(skill.tools)
+    else:
+        langchain_tools = _build_fallback_tools(socrates_state)
+
+    # 常駐工具
+    langchain_tools.append(make_trace_rc_logic_tool())
+
+    return langchain_tools
+
+
+def _build_fallback_tools(socrates_state: ChatState) -> List[StructuredTool]:
+    """Fallback：從 socrates_state 的 tools 資訊組裝（舊機制）。"""
     resolved_tools = socrates_state.get("tools") or []
-    chains         = socrates_state.get("reasoning_chains") or []
-
     seen: set = set()
     langchain_tools: List[StructuredTool] = []
 
@@ -201,9 +243,6 @@ def build_tools_from_state(socrates_state: ChatState) -> List[StructuredTool]:
                 description=description,
             ))
 
-    # 常駐工具：trace_rc_logic（知識圖譜邏輯追蹤）
-    langchain_tools.append(make_trace_rc_logic_tool())
-
     return langchain_tools
 
 
@@ -216,6 +255,10 @@ class MainAgent:
 
     每次 chat() 呼叫都會動態組裝 system prompt 與 LangGraph 執行圖，
     不持有任何對話狀態，所有歷史由呼叫端（entry.py）管理。
+
+    Skill 注入：
+        chat(..., skill=RCSkill) 時，skill 的 prompt_context 與 tools
+        將取代舊的 socrates_state-based 組裝邏輯。
     """
 
     def __init__(
@@ -236,6 +279,7 @@ class MainAgent:
         user_input:     str,
         socrates_state: ChatState,
         history:        List[BaseMessage],
+        skill:          Optional["RCSkill"] = None,
     ) -> dict:
         """單次處理對話請求（完全無狀態）。
 
@@ -243,12 +287,16 @@ class MainAgent:
             user_input:     使用者當次輸入的文字。
             socrates_state: 包含 query / tools / parameters 等意圖收斂結果。
             history:        目前為止的對話歷史（由外部傳入）。
+            skill:          選取 path 後對應的 RC Skill（可為 None）。
+                            有 skill 時，使用 skill.prompt_context 與 skill.tools；
+                            無 skill 時，fallback 到 socrates_state-based 舊機制。
 
         Returns:
             dict: {
                 "content":         str,               # 助理回應文字
                 "tool_calls_made": List[str],         # 本次呼叫的工具名稱清單
                 "messages":        List[BaseMessage], # 更新後的完整歷史
+                "skill_used":      Optional[str],     # 使用的 skill rc_name（若有）
             }
         """
         if socrates_state.get("phase") != ConversationPhase.PATH_CONFIRMED.value:
@@ -256,8 +304,8 @@ class MainAgent:
                 f"MainAgent 需要 phase='path_confirmed'。目前為 {socrates_state.get('phase')}"
             )
 
-        system_prompt = build_system_prompt(socrates_state)
-        tools         = build_tools_from_state(socrates_state)
+        system_prompt = build_system_prompt(socrates_state, skill=skill)
+        tools         = build_tools(socrates_state, skill=skill)
         has_tools     = bool(tools)
 
         llm_bound = self._base_llm.bind_tools(tools) if has_tools else self._base_llm
@@ -297,7 +345,6 @@ class MainAgent:
         result           = graph.invoke({"messages": current_messages})
         updated_messages = list(result["messages"])
 
-        # 從 core/socrates_bot 借用靜態方法解析回傳內容
         from core.socrates_bot import SocratesChatBot
         content = SocratesChatBot._extract_raw_content(updated_messages)
 
@@ -310,15 +357,22 @@ class MainAgent:
             "content":         content,
             "tool_calls_made": tool_calls_made,
             "messages":        updated_messages,
+            "skill_used":      skill.rc_name if skill else None,
         }
 
-    def describe(self, socrates_state: ChatState) -> str:
+    def describe(
+        self,
+        socrates_state: ChatState,
+        skill: Optional["RCSkill"] = None,
+    ) -> str:
         """回傳 Agent 的摘要資訊（供 debug / logging）。"""
         query      = socrates_state.get("query")
-        tools      = build_tools_from_state(socrates_state)
+        tools      = build_tools(socrates_state, skill=skill)
         tool_names = [t.name for t in tools]
+        skill_info = f"  RC Skill: {skill.rc_name}" if skill else "  RC Skill: （無）"
         return "\n".join([
             "MainAgent 摘要 (Stateless)",
             f"  當前需求: {query}",
-            f"  動態工具: {', '.join(tool_names)}",
+            skill_info,
+            f"  工具清單: {', '.join(tool_names)}",
         ])

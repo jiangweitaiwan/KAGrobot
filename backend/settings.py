@@ -58,6 +58,12 @@ class Settings(BaseSettings):
     # --- Optional external data ---
     fred_api_key: str = Field(default="", alias="FRED_API_KEY")
 
+    # --- GCS skills ---
+    skills_bucket_name: str = Field(
+        default="your-gcs-skills-bucket-name",
+        alias="SKILLS_BUCKET_NAME",
+    )
+
     def resolved_sbert_paths(self, *, base_dir: Optional[Path] = None) -> tuple[str, str]:
         """Return (model_path, tokenizer_dir) with sane defaults."""
         bd = base_dir or Path(".").resolve()

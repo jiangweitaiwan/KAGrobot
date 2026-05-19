@@ -33,6 +33,7 @@ from core.socrates_bot import (
 )
 from neo4jreasoningretriever import Neo4jReasoningRetriever
 from core.main_agent import MainAgent
+from core.skill_loader import SkillLoader                          # ← 新增
 
 
 # ======================================================================
@@ -79,6 +80,10 @@ shared_main_agent = MainAgent(
     model=s.main_agent_model,
 )
 
+shared_skill_loader = SkillLoader(
+    bucket_name=s.skills_bucket_name,
+    gcs_prefix="skills" # GCS 裡的資料夾路徑
+)
 
 # ======================================================================
 # Pure helpers
@@ -136,11 +141,7 @@ def _score_paths_by_intent(
     graph_data:   Dict[str, Any],
     intent_types: List[str],
 ) -> Dict[str, Any]:
-    """對 graph_data 中每條 path 計算 intent_score，並依分數重新排序。
-
-    排序規則：intent_score 降冪；同分時以 node_ids 長度降冪（較長路徑優先）。
-    排序完成後重設 path_id（0, 1, 2, ...），selected_path_id = 0。
-    """
+    """對 graph_data 中每條 path 計算 intent_score，並依分數重新排序。"""
     if not intent_types or not graph_data:
         return graph_data
 
@@ -172,13 +173,7 @@ def _score_paths_by_intent(
 
 
 def _build_graph_context(all_graphs: Dict[int, Any]) -> str:
-    """將 all_graphs 序列化為 Socrates system prompt 用的文字。
-
-    每個 candidate 只列出：
-      - candidate RC 名稱
-      - 下游終點（top-3 path 的 final_label，去重）
-      - 基礎概念（foundations label，去重）
-    """
+    """將 all_graphs 序列化為 Socrates system prompt 用的文字。"""
     lines: List[str] = []
 
     for idx, g in sorted(all_graphs.items()):
@@ -189,8 +184,6 @@ def _build_graph_context(all_graphs: Dict[int, Any]) -> str:
         concept_name = (g.get("query_concepts") or [{}])[0].get("name", f"選項 {idx}")
         lines.append(f"【候選 {idx}】{concept_name}")
 
-        # 下游終點：paths 已經由 _score_paths_by_intent 或 _trim_to_top_paths
-        # 排序並限制為 top-3，直接取 final_label
         proj = Neo4jReasoningRetriever.project_concepts_only(g)
         downstream_finals: List[str] = []
         seen_finals: set = set()
@@ -205,7 +198,6 @@ def _build_graph_context(all_graphs: Dict[int, Any]) -> str:
         else:
             lines.append("  下游終點：（無）")
 
-        # 基礎概念：foundations（leaf concepts）
         foundations = g.get("foundations") or []
         foundation_labels = [f["label"] for f in foundations if f.get("label")]
         if foundation_labels:
@@ -216,64 +208,6 @@ def _build_graph_context(all_graphs: Dict[int, Any]) -> str:
         lines.append("")
 
     return "\n".join(lines).rstrip()
-
-
-def _build_handoff_task(
-    socrates_state: ChatState,
-    selected_path:  Optional[Dict[str, Any]] = None,
-    all_graphs:     Optional[Dict[int, Any]] = None,
-) -> str:
-    query = socrates_state.get("query") or "（未提供）"
-
-    if selected_path and all_graphs:
-        model_name  = selected_path.get("final_label") or "（未指定）"
-
-        nodes_by_id: Dict[str, Any] = {}
-        for g in all_graphs.values():
-            if g:
-                for n in g.get("nodes", []):
-                    nodes_by_id[n["id"]] = n
-
-        path_labels: List[str] = []
-        for nid in (selected_path.get("node_ids") or []):
-            node = nodes_by_id.get(nid)
-            if node and node.get("node_type") == "concept":
-                path_labels.append(node.get("label", nid))
-        path_description = " → ".join(path_labels) if path_labels else model_name
-
-        paper_info_lines: List[str] = []
-        for nid in (selected_path.get("node_ids") or []):
-            node = nodes_by_id.get(nid)
-            if node and node.get("node_type") == "paper":
-                meta        = node.get("meta") or {}
-                line        = f"  論文：{node.get('label', '')}"
-                premises    = meta.get("conceptual_premises") or ""
-                constraints = meta.get("contextual_model_constraints") or ""
-                if premises:
-                    line += f"\n    前提假設：{premises}"
-                if constraints:
-                    line += f"\n    模型約束：{constraints}"
-                paper_info_lines.append(line)
-        paper_section = "\n".join(paper_info_lines) if paper_info_lines else "（無論文資訊）"
-
-    else:
-        candidates   = socrates_state.get("candidates") or []
-        model_name   = candidates[0].get("rc_name", "（未指定）") if candidates else "（未指定）"
-        path_description = model_name
-        paper_section    = "（無路徑資訊）"
-
-    tools_info    = socrates_state.get("tools") or []
-    primary_tools = [t["tool_name"] for t in tools_info if not t.get("is_dependency", False)]
-    tools_str     = "、".join(primary_tools) if primary_tools else "（無）"
-
-    return (
-        f"使用者需求：{query}\n"
-        f"選定模型：{model_name}\n"
-        f"推理路徑：{path_description}\n"
-        f"關聯論文資訊：\n{paper_section}\n"
-        f"可用工具：{tools_str}\n"
-        f"請根據以上需求、推理路徑與工具，開始執行分析。"
-    )
 
 
 def _find_graph_by_path_id(
@@ -300,7 +234,6 @@ async def _expand_all_graphs(
     TOP_N = 3
 
     def _trim_to_top_paths(graph_data: Dict[str, Any]) -> Dict[str, Any]:
-        """保留 intent_score 最高的 top-3 下游路徑，重設 path_id。"""
         all_paths = graph_data.get("paths") or []
         if not all_paths:
             return graph_data
@@ -347,7 +280,6 @@ async def _expand_all_graphs(
             return idx, None
 
         try:
-            # 下游圖譜與上游 foundations 並行跑
             raw_graph, foundations = await asyncio.gather(
                 asyncio.to_thread(
                     shared_retriever.retrieve_graph,
@@ -400,13 +332,11 @@ async def socratic_node(state: OrchestratorState) -> OrchestratorState:
         if current_phase == "concept_resolved"
         else None
     )
-    all_graphs_full = state.get("all_graphs") if current_phase == "concept_resolved" else None
 
     new_socrates_state = shared_socrates_bot.process_message(
         old_socrates_state,
         user_msg,
         graph_context=graph_context,
-        all_graphs=all_graphs_full,
     )
 
     inner_phase = new_socrates_state.get("phase")
@@ -418,7 +348,6 @@ async def socratic_node(state: OrchestratorState) -> OrchestratorState:
         intent_types = new_socrates_state.get("intent_types") or []
         all_graphs   = await _expand_all_graphs(candidates)
 
-        # 依 intent_types 對每個 candidate 的 path 做評分與排序
         if intent_types:
             all_graphs = {
                 idx: _score_paths_by_intent(g, intent_types)
@@ -460,10 +389,29 @@ async def main_agent_node(state: OrchestratorState) -> OrchestratorState:
         and selected_path_id != confirmed_path_id
     )
 
-    if is_reselect:
+    # ── 找出 selected_path（reselect 或初次進入都需要）──────────
+    selected_path: Optional[Dict[str, Any]] = None
+    if selected_path_id is not None:
         target_graph  = _find_graph_by_path_id(all_graphs or {}, selected_path_id)
         selected_path = _find_path_by_id(target_graph, selected_path_id)
-        user_msg      = _build_handoff_task(socrates_state, selected_path, all_graphs)
+
+    # ── 根據 final_rc 載入對應 skill ──────────────────────────
+    skill = None
+    if selected_path:
+        final_rc_name = selected_path.get("final_label") or ""
+        if final_rc_name:
+            skill = shared_skill_loader.load(final_rc_name)
+            if skill:
+                print(f"[main_agent_node] skill loaded: '{skill.rc_name}' "
+                      f"(tools={len(skill.tools)})")
+            else:
+                print(f"[main_agent_node] no skill found for rc='{final_rc_name}', "
+                      f"using fallback")
+
+    # ── 組裝 user_msg 與 history ─────────────────────────────
+    if is_reselect:
+        # 任務脈絡已由 skill system prompt 承載，user_msg 只需帶入原始 query
+        user_msg = socrates_state.get("query") or "請開始執行分析。"
         history: List[BaseMessage] = []
         path_label    = (selected_path or {}).get("final_label") or f"路徑 {selected_path_id}"
         reselect_notice = AIMessage(
@@ -482,6 +430,7 @@ async def main_agent_node(state: OrchestratorState) -> OrchestratorState:
         user_msg,
         socrates_state,
         history,
+        skill=skill,                                          # ← 注入 skill
     )
 
     output_messages: List[BaseMessage] = []
@@ -563,6 +512,7 @@ class ChatResponse(BaseModel):
     phase:          str
     socrates_phase: Optional[str]            = None
     all_graphs:     Optional[Dict[int, Any]] = None
+    skill_used:     Optional[str]            = None   # ← 新增：回傳給前端的 skill 資訊
 
 
 api = FastAPI()
@@ -622,4 +572,5 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
         phase          = result.get("phase", initial_phase),
         socrates_phase = socrates_phase,
         all_graphs     = all_graphs_out,
+        skill_used     = result.get("skill_used"),            # ← 新增
     )
