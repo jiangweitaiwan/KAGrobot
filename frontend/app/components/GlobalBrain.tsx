@@ -431,6 +431,7 @@ export default function GlobalBrain({
       // Raycasting（拖曳中跳過）
       if (
         !isDragging.current &&
+        layout &&
         raycasterRef.current &&
         cameraRef.current &&
         proxyMeshesRef.current.length > 0 &&
