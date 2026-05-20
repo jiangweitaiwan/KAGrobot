@@ -3,9 +3,14 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import type { GraphData } from "./components/KnowledgeGraph";
+import type { GlobalLayout } from "./components/GlobalBrain";
 
 const KnowledgeGraph = dynamic(
   () => import("./components/KnowledgeGraph"),
+  { ssr: false }
+);
+const GlobalBrain = dynamic(
+  () => import("./components/GlobalBrain"),
   { ssr: false }
 );
 
@@ -66,6 +71,20 @@ function saveHistory(msgs: ChatMessage[]): void {
   }
 }
 
+/** 從 all_graphs 提取所有 candidate concept 的 element_id */
+function extractCandidateEids(parsed: Record<number, GraphData | null>): string[] {
+  const eids: string[] = [];
+  for (const g of Object.values(parsed)) {
+    if (!g) continue;
+    const qc = (g.query_concepts ?? [])[0];
+    if (qc?.id && !eids.includes(qc.id)) eids.push(qc.id);
+    for (const node of g.nodes ?? []) {
+      if (node.matched && !eids.includes(node.id)) eids.push(node.id);
+    }
+  }
+  return eids;
+}
+
 // ─────────────────────────────────────────────────────────────
 // Page
 // ─────────────────────────────────────────────────────────────
@@ -78,6 +97,7 @@ export default function Page() {
   const [isLoading, setIsLoading] = useState(false);
   const [error,     setError]     = useState("");
 
+  // ── KnowledgeGraph state ───────────────────────────────────
   const [graphData,       setGraphData]       = useState<GraphData | null>(null);
   const [activeChipIndex, setActiveChipIndex] = useState<number | null>(null);
   const [selectedPathId,  setSelectedPathId]  = useState<number | null>(null);
@@ -88,11 +108,16 @@ export default function Page() {
     { index: number; label: string; hasData: boolean }[]
   >([]);
 
+  // ── GlobalBrain state ──────────────────────────────────────
+  const [globalLayout,        setGlobalLayout]        = useState<GlobalLayout | null>(null);
+  const [globalLayoutFetched, setGlobalLayoutFetched] = useState(false);
+  const [activeCandidateEids, setActiveCandidateEids] = useState<string[]>([]);
+  const [activePathEids,      setActivePathEids]      = useState<string[]>([]);
+
   const allGraphsRef = useRef<Record<number, GraphData | null>>({});
   const isTypingRef  = useRef(false);
   const messagesRef  = useRef<ChatMessage[]>([]);
-
-  const boxRef = useRef<HTMLDivElement | null>(null);
+  const boxRef       = useRef<HTMLDivElement | null>(null);
 
   // ── init from localStorage ────────────────────────────────
   useEffect(() => {
@@ -117,6 +142,39 @@ export default function Page() {
     if (!boxRef.current) return;
     boxRef.current.scrollTop = boxRef.current.scrollHeight;
   }, [messages, isLoading]);
+
+  // ── 第一次收到 AI 回覆後 fetch global layout ──────────────
+  useEffect(() => {
+    if (messages.length === 0) return;
+    if (globalLayoutFetched) return;
+    if (!API_BASE) return;
+
+    setGlobalLayoutFetched(true);
+
+    fetch(`${API_BASE.replace(/\/$/, "")}/graph/global-layout`)
+      .then((r) => {
+        if (!r.ok) throw new Error(`global-layout ${r.status}`);
+        return r.json();
+      })
+      .then((d: GlobalLayout) => setGlobalLayout(d))
+      .catch((err) => console.warn("[GlobalBrain] layout fetch failed:", err));
+  }, [messages, globalLayoutFetched]);
+
+  // ── selectedPathId 變化 → 更新 activePathEids ─────────────
+  useEffect(() => {
+    if (selectedPathId === null || !graphData) {
+      setActivePathEids([]);
+      return;
+    }
+    const path = graphData.paths?.find((p) => p.path_id === selectedPathId);
+    if (!path) { setActivePathEids([]); return; }
+
+    const conceptEids = path.node_ids.filter((nid) => {
+      const node = graphData.nodes?.find((n) => n.id === nid);
+      return node?.node_type === "concept";
+    });
+    setActivePathEids(conceptEids);
+  }, [selectedPathId, graphData]);
 
   const canSend = !input.trim() === false && !isLoading && !!sessionId;
 
@@ -194,6 +252,11 @@ export default function Page() {
         setSelectedLabel(defaultPath?.final_label ?? null);
       }
     }
+
+    // ── GlobalBrain 激活 ──
+    const candidateEids = extractCandidateEids(parsed);
+    setActiveCandidateEids(candidateEids);
+    setActivePathEids([]);   // 新 retrieve，清除舊 path 高亮
   }
 
   // ── 送出訊息 ──────────────────────────────────────────────
@@ -245,9 +308,7 @@ export default function Page() {
       saveHistory(messagesRef.current);
     } finally {
       setIsLoading(false);
-      if (!isTypingRef.current) {
-        saveHistory(messagesRef.current);
-      }
+      if (!isTypingRef.current) saveHistory(messagesRef.current);
     }
   }
 
@@ -301,9 +362,7 @@ export default function Page() {
       saveHistory(messagesRef.current);
     } finally {
       setIsLoading(false);
-      if (!isTypingRef.current) {
-        saveHistory(messagesRef.current);
-      }
+      if (!isTypingRef.current) saveHistory(messagesRef.current);
     }
   }
 
@@ -327,6 +386,9 @@ export default function Page() {
     setSelectedLabel(null);
     setConfirmedPathId(null);
     setGraphVisible(false);
+    // GlobalBrain reset
+    setActiveCandidateEids([]);
+    setActivePathEids([]);
     localStorage.setItem(SESSION_KEY, sid);
     localStorage.setItem(PHASE_KEY, "socratic");
     localStorage.removeItem(HISTORY_KEY);
@@ -357,7 +419,6 @@ export default function Page() {
       ? "繼續詢問分析細節，或在右側切換路徑…"
       : "輸入你的問題…";
 
-  // 所有路徑均為 downstream，直接按 path_id 排序
   const sortedPaths = useMemo(() => {
     if (!graphData?.paths) return [];
     return [...graphData.paths].sort((a, b) => a.path_id - b.path_id);
@@ -368,7 +429,7 @@ export default function Page() {
   // ─────────────────────────────────────────────────────────
 
   return (
-    <main className={showGraph ? "with-graph" : ""}>
+    <main>
       {/* ── header ── */}
       <header>
         <div>
@@ -394,7 +455,22 @@ export default function Page() {
 
       {/* ── content area ── */}
       <div className="content-area">
-        {/* chat column */}
+
+        {/* ── GlobalBrain 面板（左側，對話後出現）── */}
+        {globalLayout && (
+          <div className="brain-panel">
+            <div className="brain-panel-label">Knowledge Field</div>
+            <GlobalBrain
+              layout={globalLayout}
+              activeCandidateEids={activeCandidateEids}
+              activePathEids={activePathEids}
+              width={300}
+              height={300}
+            />
+          </div>
+        )}
+
+        {/* ── chat column ── */}
         <div className="chat-column">
           <div className="chat-box" ref={boxRef}>
             {messages.length === 0 ? (
@@ -423,7 +499,7 @@ export default function Page() {
           </div>
         </div>
 
-        {/* graph panel */}
+        {/* ── KnowledgeGraph 面板（右側）── */}
         {showGraph && (
           <div className="graph-panel">
             <div className="graph-header">
@@ -438,7 +514,6 @@ export default function Page() {
               )}
             </div>
 
-            {/* concept chips */}
             {chipList.length > 1 && (
               <div className="chip-legend">
                 {chipList.map((chip) => (
@@ -449,11 +524,9 @@ export default function Page() {
                     disabled={!chip.hasData || isLoading}
                     style={{
                       borderColor: activeChipIndex === chip.index
-                        ? CHIP_COLORS[chip.index % CHIP_COLORS.length]
-                        : undefined,
+                        ? CHIP_COLORS[chip.index % CHIP_COLORS.length] : undefined,
                       color: activeChipIndex === chip.index
-                        ? CHIP_COLORS[chip.index % CHIP_COLORS.length]
-                        : undefined,
+                        ? CHIP_COLORS[chip.index % CHIP_COLORS.length] : undefined,
                     }}
                   >
                     {chip.label}
@@ -462,7 +535,6 @@ export default function Page() {
               </div>
             )}
 
-            {/* path legend — downstream only */}
             {sortedPaths.length > 0 && (
               <div className="path-legend">
                 {sortedPaths.map((p) => {

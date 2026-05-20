@@ -85,6 +85,33 @@ shared_skill_loader = SkillLoader(
     gcs_prefix="skills" # GCS 裡的資料夾路徑
 )
 
+import os as _os
+from pathlib import Path as _Path
+ 
+# PKL 路徑：優先環境變數，fallback 到同目錄下的 results_dict.pkl
+_PKL_PATH = _os.environ.get(
+    "RESULTS_PKL_PATH",
+    str(_Path(__file__).resolve().parent / "results_dict.pkl"),
+)
+ 
+# 全局佈局快取（None = 尚未計算）
+_global_layout_cache: dict | None = None
+ 
+ 
+def _get_global_layout() -> dict:
+    """取得（或計算）全局佈局，結果快取在模組變數。"""
+    global _global_layout_cache
+    if _global_layout_cache is None:
+        _global_layout_cache = shared_retriever.get_global_layout(
+            _PKL_PATH,
+            gcs_bucket_name=(getattr(s, "gcs_bucketforresult", "") or "").strip(),
+            gcs_object_name="results_dict.pkl",
+        )
+    return _global_layout_cache
+ 
+
+
+
 # ======================================================================
 # Pure helpers
 # ======================================================================
@@ -515,6 +542,12 @@ class ChatResponse(BaseModel):
     skill_used:     Optional[str]            = None   # ← 新增：回傳給前端的 skill 資訊
 
 
+class GlobalLayoutResponse(BaseModel):
+    nodes: list[dict]
+    edges: list[dict]
+ 
+
+
 api = FastAPI()
 
 cors_origins = [o.strip() for o in s.cors_allow_origins.split(",") if o.strip()]
@@ -574,3 +607,16 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
         all_graphs     = all_graphs_out,
         skill_used     = result.get("skill_used"),            # ← 新增
     )
+
+@api.get("/graph/global-layout", response_model=GlobalLayoutResponse)
+async def global_layout_endpoint() -> GlobalLayoutResponse:
+    """
+    回傳全局知識圖譜佈局（PCA 3D 座標）。
+    第一次呼叫會計算並快取，後續直接回傳快取結果。
+    """
+    layout = await asyncio.to_thread(_get_global_layout)
+    return GlobalLayoutResponse(
+        nodes=layout["nodes"],
+        edges=layout["edges"],
+    )
+ 

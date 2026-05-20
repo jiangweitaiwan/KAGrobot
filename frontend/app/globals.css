@@ -240,3 +240,40 @@ textarea {
   font-size:   0.7rem;
   color:       #6a5acd;
 }
+
+
+/* ════════════════════════════════════════════════════════════
+   globals.css 新增區塊
+   加到現有 globals.css 的末尾
+   ════════════════════════════════════════════════════════════ */
+ 
+/* ── brain panel（全局知識場域，左側）──────────────────────── */
+.brain-panel {
+  flex:           0 0 300px;
+  display:        flex;
+  flex-direction: column;
+  align-items:    center;
+  gap:            8px;
+  padding:        8px 0;
+  /* 不需要 border，GlobalBrain 本身有 borderRadius */
+}
+ 
+.brain-panel-label {
+  font-size:      0.6rem;
+  color:          #1a3050;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  font-family:    "IBM Plex Mono", monospace;
+  text-align:     center;
+  width:          100%;
+  padding-left:   4px;
+}
+ 
+/* ── content-area 有三欄時的 flex 調整 ──────────────────────
+   原有的 content-area 已是 flex row，不需改動。
+   但加上 brain-panel 後總寬度可能超出，需要讓 chat-column 自適應。
+   修改現有 .chat-column 的 flex: 1 1 380px → flex: 1 1 300px
+   ──────────────────────────────────────────────────────────── */
+.chat-column {
+  flex: 1 1 300px;   /* 原本是 380px，縮小讓三欄可以共存 */
+}

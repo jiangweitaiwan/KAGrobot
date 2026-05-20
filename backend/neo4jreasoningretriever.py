@@ -35,9 +35,15 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional, Union
 
+import os
+import tempfile
+from google.cloud import storage as gcs_storage
 from transformers import AutoTokenizer
 import onnxruntime as ort
 from neo4j import GraphDatabase
+import pickle
+from pathlib import Path
+from sklearn.decomposition import PCA
 
 
 # ============================================================
@@ -328,6 +334,231 @@ class Neo4jReasoningRetriever:
             "analysis_types": row["analysis_types"] or [],
             "papers":         papers,
         }
+
+
+
+    # ----------------------------------------------------------
+    # Public: get_global_layout()
+    # ----------------------------------------------------------
+ 
+    def get_global_layout(
+        self,
+        pkl_path: str,
+        *,
+        gcs_bucket_name: Optional[str] = None,
+        gcs_object_name: str = "results_dict.pkl",
+        force_recompute: bool = False,
+    ) -> dict:
+        """
+        讀取 pkl embedding，做 PCA 降到 3D，與 Neo4j element_id 對齊，
+        回傳全局佈局供前端 GlobalBrain 使用。
+ 
+        結果會快取在 self._global_layout_cache，伺服器生命週期內只算一次。
+ 
+        Parameters
+        ----------
+        pkl_path        : results_dict.pkl 的絕對路徑。
+        force_recompute : 強制重算（測試用）。
+ 
+        Returns
+        -------
+        {
+          "nodes": [{"id", "name", "type", "x", "y", "z"}, ...],
+          "edges": [{"source", "target"}, ...]
+        }
+        """
+        if not force_recompute and hasattr(self, "_global_layout_cache"):
+            return self._global_layout_cache
+
+        # ── Optional：從 GCS 下載 results_dict.pkl 到暫存檔 ─────────
+        bucket = (gcs_bucket_name or os.environ.get("GCS_BUCKETFORRESULT", "")).strip()
+        if bucket:
+            try:
+                client = gcs_storage.Client()
+                b = client.bucket(bucket)
+                blob = b.blob(gcs_object_name)
+
+                if not blob.exists(client):
+                    raise FileNotFoundError(
+                        f"GCS object not found: gs://{bucket}/{gcs_object_name}"
+                    )
+
+                with tempfile.NamedTemporaryFile(
+                    prefix="results_dict_",
+                    suffix=".pkl",
+                    delete=False,
+                ) as tmp:
+                    tmp_path = tmp.name
+
+                blob.download_to_filename(tmp_path)
+                pkl_path = tmp_path
+            except Exception as exc:
+                print(
+                    f"[GlobalLayout] GCS load failed, fallback to local '{pkl_path}': {exc}"
+                )
+ 
+        # ── Step 1：讀 pkl，去重，提取 embedding ──────────────
+        import pickle
+        from collections import defaultdict
+ 
+        with open(pkl_path, "rb") as f:
+            raw_data = pickle.load(f)
+ 
+        by_cluster: dict = defaultdict(list)
+        for _paper, concepts in raw_data.items():
+            for c in concepts:
+                emb_dict = c["alignment"]["embeddings"]
+                all_embs = []
+                for emb_list in emb_dict.values():
+                    for emb in emb_list:
+                        arr = np.array(emb)
+                        if arr.shape == (384,):
+                            all_embs.append(arr)
+                if all_embs:
+                    by_cluster[c["cluster_name"]].append({
+                        "role":    c["role"],
+                        "embedding": np.mean(all_embs, axis=0),
+                    })
+ 
+        # 每個 cluster_name → 平均 embedding + 是否 Resulting_Concept
+        pkl_concepts: list[dict] = []
+        for name, entries in by_cluster.items():
+            mean_emb = np.mean([e["embedding"] for e in entries], axis=0)
+            is_rc    = any("Resulting_Concept" in e["role"] for e in entries)
+            pkl_concepts.append({
+                "name":    name,
+                "is_rc":   is_rc,
+                "embedding": mean_emb,
+            })
+ 
+        # ── Step 2：PCA 384 → 3 ───────────────────────────────
+        try:
+            from sklearn.decomposition import PCA
+        except ImportError:
+            # Fallback：純 numpy PCA
+            embs_matrix = np.array([c["embedding"] for c in pkl_concepts])
+            centered     = embs_matrix - embs_matrix.mean(axis=0)
+            _, _, Vt     = np.linalg.svd(centered, full_matrices=False)
+            coords_3d    = centered @ Vt[:3].T
+        else:
+            embs_matrix = np.array([c["embedding"] for c in pkl_concepts])
+            pca         = PCA(n_components=3, random_state=42)
+            coords_3d   = pca.fit_transform(embs_matrix)
+ 
+        # 正規化到 [-1, 1]
+        for i in range(3):
+            max_abs = np.abs(coords_3d[:, i]).max()
+            if max_abs > 1e-9:
+                coords_3d[:, i] /= max_abs
+ 
+        # pkl_name → (x, y, z)
+        name_to_coord: dict[str, tuple] = {
+            c["name"]: (
+                float(coords_3d[i, 0]),
+                float(coords_3d[i, 1]),
+                float(coords_3d[i, 2]),
+            )
+            for i, c in enumerate(pkl_concepts)
+        }
+        name_to_is_rc: dict[str, bool] = {
+            c["name"]: c["is_rc"] for c in pkl_concepts
+        }
+ 
+        # ── Step 3：查 Neo4j，取所有 Concept 節點 ─────────────
+        with self.driver.session() as session:
+            concept_rows = session.run(
+                """
+                MATCH (c:Concept)
+                RETURN elementId(c) AS eid,
+                       c.name       AS name,
+                       c.type       AS type
+                """
+            ).data()
+ 
+            # 查 concept → concept 邊
+            # 直接邊
+            direct_edges = session.run(
+                """
+                MATCH (a:Concept)-[:REASONING]->(b:Concept)
+                RETURN elementId(a) AS src, elementId(b) AS tgt
+                """
+            ).data()
+ 
+            # 透過 Paper 的二跳邊
+            paper_edges = session.run(
+                """
+                MATCH (a:Concept)-[:INSPIRES|INDIRECT_INSPIRES|REASONING]->
+                      (:Paper)-[:PRODUCES]->(b:Concept)
+                RETURN elementId(a) AS src, elementId(b) AS tgt
+                """
+            ).data()
+ 
+        # ── Step 4：對齊 name → element_id ───────────────────
+        nodes_out: list[dict] = []
+        eid_set: set[str]     = set()
+ 
+        # 精確匹配：c.name == pkl cluster_name
+        matched_eids: set[str] = set()
+        name_to_eid: dict[str, str] = {}
+ 
+        for row in concept_rows:
+            eid  = row["eid"]
+            name = row["name"] or ""
+            ctype = row["type"] or "other"
+            eid_set.add(eid)
+ 
+            coord = name_to_coord.get(name)
+            if coord:
+                matched_eids.add(eid)
+                name_to_eid[name] = eid
+                nodes_out.append({
+                    "id":   eid,
+                    "name": name,
+                    "type": ctype,
+                    "x":    coord[0],
+                    "y":    coord[1],
+                    "z":    coord[2],
+                })
+            else:
+                # 沒有 embedding 的節點：放在原點附近隨機位置
+                rng = np.random.default_rng(abs(hash(name)) % (2**32))
+                nodes_out.append({
+                    "id":   eid,
+                    "name": name,
+                    "type": ctype,
+                    "x":    float(rng.uniform(-0.15, 0.15)),
+                    "y":    float(rng.uniform(-0.15, 0.15)),
+                    "z":    float(rng.uniform(-0.15, 0.15)),
+                })
+ 
+        print(
+            f"[GlobalLayout] Neo4j concepts: {len(concept_rows)}, "
+            f"pkl-matched: {len(matched_eids)}, "
+            f"unmatched: {len(concept_rows) - len(matched_eids)}"
+        )
+ 
+        # ── Step 5：整理邊（去重）──────────────────────────────
+        seen_edges: set[tuple] = set()
+        edges_out: list[dict]  = []
+ 
+        for e in direct_edges + paper_edges:
+            src, tgt = e["src"], e["tgt"]
+            if src not in eid_set or tgt not in eid_set:
+                continue
+            key = (min(src, tgt), max(src, tgt))
+            if key not in seen_edges:
+                seen_edges.add(key)
+                edges_out.append({"source": src, "target": tgt})
+ 
+        print(
+            f"[GlobalLayout] edges: {len(edges_out)} "
+            f"(direct={len(direct_edges)}, via-paper={len(paper_edges)})"
+        )
+ 
+        result = {"nodes": nodes_out, "edges": edges_out}
+        self._global_layout_cache = result
+        return result
+
 
     # ----------------------------------------------------------
     # Public: retrieve_foundations()

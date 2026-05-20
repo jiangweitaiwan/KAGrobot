@@ -12,6 +12,7 @@
     "next":       "latest",
     "react":      "latest",
     "react-dom":  "latest",
+    "three":      "^0.174.0" ,
     "d3":         "^7.9.0"
   },
   "devDependencies": {
@@ -19,6 +20,7 @@
     "@types/node":       "latest",
     "@types/react":      "latest",
     "@types/react-dom":  "latest",
+    "@types/three":     "^0.174.0",
     "@types/d3":         "^7.4.3"
   }
 }

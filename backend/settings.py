@@ -64,12 +64,28 @@ class Settings(BaseSettings):
         alias="SKILLS_BUCKET_NAME",
     )
 
+    # --- GCS results_dict (GlobalBrain layout) ---
+    gcs_bucketforresult: str = Field(
+        default="kagrobot-result",
+        alias="GCS_BUCKETFORRESULT",
+        description="GCS bucket that stores results_dict object at bucket root (object name: results_dict)",
+    )
+
+    results_pkl_path: str = Field(
+        default="results_dict.pkl",
+        alias="RESULTS_PKL_PATH",
+        description="Path to results_dict.pkl for GlobalBrain layout",
+    )    
+
     def resolved_sbert_paths(self, *, base_dir: Optional[Path] = None) -> tuple[str, str]:
         """Return (model_path, tokenizer_dir) with sane defaults."""
         bd = base_dir or Path(".").resolve()
         model_path = self.sbert_onnx_model_path or str(bd / "sbert_onnx" / "sbert_multilingual.onnx")
         tokenizer_dir = self.sbert_tokenizer_dir or str(bd / "sbert_onnx")
         return model_path, tokenizer_dir
+
+
+
 
 
 @lru_cache
