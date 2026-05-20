@@ -1,34 +1,37 @@
 :root {
   color-scheme: dark;
-  --bg:       #0a0f1f;
-  --panel:    #11182b;
-  --panel-2:  #161f35;
-  --text:     #f6f8ff;
-  --muted:    #9db0db;
-  --user:     #2d67ff;
-  --ai:       #203052;
-  --border:   #26365e;
+  --bg:       #06080f;
+  --panel:    #0d1220;
+  --panel-2:  #111828;
+  --text:     #e8ddd0;
+  --muted:    #7a8a9a;
+  --user:     #1a3a6a;
+  --ai:       #12203a;
+  --border:   #1e2e48;
   --teal:     #00d4aa;
+  --orange:   #e87030;
+  --orange-dim: #7a3010;
 }
 
 * { box-sizing: border-box; }
 
 body {
   margin: 0;
-  font-family: "IBM Plex Sans", "Noto Sans TC", system-ui, sans-serif;
-  background: radial-gradient(circle at top, #111a34, var(--bg) 50%);
+  font-family: "IBM Plex Mono", "Noto Sans TC", monospace;
+  background: radial-gradient(ellipse at 50% 30%, #120a04, var(--bg) 65%);
   color: var(--text);
+  min-height: 100vh;
 }
 
 /* ── outer shell ──────────────────────────────────────────── */
 main {
-  max-width: 1200px;
+  max-width: 1600px;
   margin: 0 auto;
   min-height: 100vh;
   display: grid;
   grid-template-rows: auto 1fr;
-  gap: 12px;
-  padding: 20px;
+  gap: 10px;
+  padding: 16px 20px;
 }
 
 /* ── header ───────────────────────────────────────────────── */
@@ -37,14 +40,24 @@ header {
   justify-content: space-between;
   align-items:     center;
   gap:             12px;
+  padding-bottom:  10px;
+  border-bottom:   1px solid rgba(232, 112, 48, 0.12);
 }
 
-h1   { margin: 0; font-size: 1.1rem; }
+h1 {
+  margin: 0;
+  font-size: 0.9rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--orange);
+  font-family: "IBM Plex Mono", monospace;
+}
 
 .session {
   color:      var(--muted);
-  font-size:  0.8rem;
+  font-size:  0.7rem;
   word-break: break-all;
+  opacity: 0.5;
 }
 
 /* ── buttons ──────────────────────────────────────────────── */
@@ -52,100 +65,164 @@ button {
   border:        1px solid var(--border);
   background:    var(--panel-2);
   color:         var(--text);
-  border-radius: 10px;
-  padding:       8px 12px;
+  border-radius: 8px;
+  padding:       6px 12px;
   cursor:        pointer;
+  font-family:   "IBM Plex Mono", monospace;
+  font-size:     0.75rem;
   transition:    background 0.15s, border-color 0.15s;
 }
-button:hover:not(:disabled) { background: #1f2e50; }
-button:disabled { opacity: 0.6; cursor: not-allowed; }
+button:hover:not(:disabled) {
+  background:    rgba(232, 112, 48, 0.1);
+  border-color:  rgba(232, 112, 48, 0.4);
+}
+button:disabled { opacity: 0.4; cursor: not-allowed; }
 
-/* ── content area: chat + optional graph ─────────────────── */
+/* ═══════════════════════════════════════════════════════════
+   THREE-COLUMN LAYOUT
+   Left: chat  |  Centre: Brain  |  Right: KnowledgeGraph
+   ═══════════════════════════════════════════════════════════ */
+
 .content-area {
-  display:   flex;
-  gap:       16px;
+  display:   grid;
+  /* chat柱固定260px，Brain自適應佔中間大空間，graph柱固定480px */
+  grid-template-columns: 260px 1fr 480px;
+  gap:       14px;
   min-height: 0;
-  height:    calc(100vh - 100px);
+  height:    calc(100vh - 90px);
+  align-items: stretch;
 }
 
-/* ── chat column ─────────────────────────────────────────── */
+/* ── chat column（左側） ──────────────────────────────────── */
 .chat-column {
   display:        flex;
   flex-direction: column;
-  gap:            12px;
-  flex:           1 1 380px;
+  gap:            10px;
   min-width:      0;
+  /* 降低存在感，作為輔助工具 */
+  opacity: 0.92;
 }
 
 .chat-box {
-  border:         1px solid var(--border);
-  border-radius:  16px;
-  padding:        16px;
-  background:     color-mix(in oklab, var(--panel), black 7%);
+  border:         1px solid rgba(30, 46, 72, 0.8);
+  border-radius:  14px;
+  padding:        14px;
+  background:     rgba(13, 18, 32, 0.7);
+  backdrop-filter: blur(8px);
   overflow-y:     auto;
   display:        flex;
   flex-direction: column;
-  gap:            12px;
+  gap:            10px;
   flex:           1;
 }
 
-.msg {
-  max-width:   85%;
-  border-radius: 14px;
-  padding:     10px 12px;
-  white-space: pre-wrap;
-  line-height: 1.5;
-}
-.msg.user { align-self: flex-end; background: var(--user); }
-.msg.ai   { align-self: flex-start; background: var(--ai); border: 1px solid var(--border); }
+/* scrollbar */
+.chat-box::-webkit-scrollbar { width: 3px; }
+.chat-box::-webkit-scrollbar-track { background: transparent; }
+.chat-box::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
-.meta   { color: var(--muted); font-size: 0.8rem; margin-top: 4px; }
-.status { color: var(--muted); font-size: 0.85rem; }
+.msg {
+  max-width:     100%;
+  border-radius: 10px;
+  padding:       8px 10px;
+  white-space:   pre-wrap;
+  line-height:   1.55;
+  font-size:     0.82rem;
+}
+.msg.user {
+  align-self: flex-end;
+  background: var(--user);
+  border: 1px solid rgba(79, 142, 247, 0.25);
+}
+.msg.ai {
+  align-self: flex-start;
+  background: var(--ai);
+  border: 1px solid var(--border);
+  color: #c8d8e8;
+}
+
+.meta   { color: var(--muted); font-size: 0.72rem; margin-top: 3px; opacity: 0.6; }
+.status { color: var(--orange); font-size: 0.75rem; }
 
 form {
   display:               grid;
   grid-template-columns: 1fr auto;
-  gap:                   12px;
+  gap:                   8px;
 }
 textarea {
   resize:        none;
-  border-radius: 12px;
+  border-radius: 10px;
   border:        1px solid var(--border);
-  background:    var(--panel);
+  background:    rgba(13, 18, 32, 0.8);
   color:         var(--text);
-  padding:       12px;
-  min-height:    72px;
-  font-size:     0.95rem;
+  padding:       10px;
+  min-height:    64px;
+  font-size:     0.82rem;
+  font-family:   "IBM Plex Mono", monospace;
+  transition:    border-color 0.2s;
+}
+textarea:focus {
+  outline:      none;
+  border-color: rgba(232, 112, 48, 0.4);
 }
 
-/* ── graph panel ─────────────────────────────────────────── */
+/* ── Brain column（中間，主角）────────────────────────────── */
+.brain-panel {
+  display:        flex;
+  flex-direction: column;
+  align-items:    center;
+  justify-content: center;
+  gap:            8px;
+  position:       relative;
+  /* 橘色光暈背景 */
+  background: radial-gradient(
+    ellipse at 50% 50%,
+    rgba(232, 112, 48, 0.04) 0%,
+    transparent 70%
+  );
+  border-radius: 20px;
+  border: 1px solid rgba(232, 112, 48, 0.08);
+}
+
+.brain-panel-label {
+  font-size:      0.58rem;
+  color:          rgba(232, 112, 48, 0.3);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  font-family:    "IBM Plex Mono", monospace;
+  text-align:     center;
+}
+
+/* ── graph panel（右側） ──────────────────────────────────── */
 .graph-panel {
-  flex:           0 0 540px;
   display:        flex;
   flex-direction: column;
   gap:            10px;
-  border:         1px solid var(--border);
-  border-radius:  16px;
-  padding:        14px;
-  background:     color-mix(in oklab, var(--panel), black 10%);
+  border:         1px solid rgba(30, 46, 72, 0.8);
+  border-radius:  14px;
+  padding:        12px;
+  background:     rgba(13, 18, 32, 0.7);
+  backdrop-filter: blur(8px);
   overflow:       hidden;
+  /* 降低存在感，作為輔助工具 */
+  opacity: 0.92;
 }
 
 .graph-header {
   display:     flex;
   align-items: center;
-  gap:         10px;
+  gap:         8px;
   flex-shrink: 0;
 }
 .graph-title {
-  font-size:   0.85rem;
-  font-weight: 600;
-  color:       var(--muted);
+  font-size:      0.72rem;
+  font-weight:    600;
+  color:          var(--muted);
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.1em;
 }
 .graph-selected {
-  font-size: 0.8rem;
+  font-size: 0.72rem;
   color:     var(--teal);
 }
 
@@ -153,127 +230,113 @@ textarea {
 .path-legend {
   display:    flex;
   flex-wrap:  wrap;
-  gap:        6px;
+  gap:        5px;
   flex-shrink: 0;
 }
 .path-chip {
-  font-size:     0.75rem;
-  padding:       4px 10px;
+  font-size:     0.7rem;
+  padding:       3px 9px;
   border-radius: 20px;
   border:        1px solid var(--border);
   background:    transparent;
   color:         var(--muted);
   cursor:        pointer;
+  font-family:   "IBM Plex Mono", monospace;
   transition:    border-color 0.15s, color 0.15s, background 0.15s;
 }
-.path-chip:hover { background: #1a2840; }
-.path-chip.active {
-  background: #0d1a30;
-  font-weight: 600;
-}
+.path-chip:hover { background: rgba(30, 46, 72, 0.6); }
+.path-chip.active { background: rgba(13, 26, 48, 0.8); font-weight: 600; }
 
 /* ── confirm button ──────────────────────────────────────── */
 .confirm-btn {
   margin-top:    auto;
   width:         100%;
-  background:    linear-gradient(135deg, #0d3060, #0a4a38);
+  background:    linear-gradient(135deg, rgba(13, 48, 96, 0.8), rgba(10, 74, 56, 0.8));
   border:        1px solid var(--teal);
   color:         var(--teal);
-  font-size:     0.85rem;
+  font-size:     0.78rem;
   font-weight:   600;
-  border-radius: 10px;
-  padding:       10px;
+  font-family:   "IBM Plex Mono", monospace;
+  border-radius: 8px;
+  padding:       9px;
   cursor:        pointer;
-  transition:    background 0.2s;
+  transition:    background 0.2s, box-shadow 0.2s;
+  letter-spacing: 0.04em;
 }
-.confirm-btn:hover { background: linear-gradient(135deg, #143878, #0d5a46); }
+.confirm-btn:hover {
+  background:  linear-gradient(135deg, rgba(20, 56, 120, 0.9), rgba(13, 90, 70, 0.9));
+  box-shadow:  0 0 12px rgba(0, 212, 170, 0.2);
+}
 
-/* ── 在 globals.css 的 .confirm-btn 區塊之後加入以下樣式 ── */
-
-/* ── concept chip（多候選切換）────────────────────────────── */
+/* ── concept chips ───────────────────────────────────────── */
 .chip-legend {
   display:   flex;
   flex-wrap: wrap;
-  gap:       6px;
+  gap:       5px;
   flex-shrink: 0;
 }
 .concept-chip {
-  font-size:     0.75rem;
-  padding:       4px 10px;
+  font-size:     0.7rem;
+  padding:       3px 9px;
   border-radius: 20px;
   border:        1px solid var(--border);
   background:    transparent;
   color:         var(--muted);
   cursor:        pointer;
+  font-family:   "IBM Plex Mono", monospace;
   transition:    border-color 0.15s, color 0.15s, background 0.15s;
 }
-.concept-chip:hover:not(:disabled) { background: #1a2840; }
-.concept-chip:disabled { opacity: 0.4; cursor: not-allowed; }
-.concept-chip.active {
-  background: #0d1a30;
-  font-weight: 600;
-}
+.concept-chip:hover:not(:disabled) { background: rgba(30, 46, 72, 0.6); }
+.concept-chip:disabled { opacity: 0.35; cursor: not-allowed; }
+.concept-chip.active   { background: rgba(13, 26, 48, 0.8); font-weight: 600; }
 
-/* ── foundation legend（圖譜下方說明列）──────────────────── */
+/* ── foundation legend ───────────────────────────────────── */
 .foundation-legend {
   display:     flex;
   flex-wrap:   wrap;
-  gap:         6px;
+  gap:         5px;
   flex-shrink: 0;
   padding:     4px 0;
-  border-top:  1px dashed #26365e;
+  border-top:  1px dashed rgba(30, 46, 72, 0.6);
 }
 .foundation-chip {
-  font-size:     0.72rem;
-  padding:       3px 8px;
+  font-size:     0.68rem;
+  padding:       2px 7px;
   border-radius: 4px;
   border:        1px dashed #6a5acd;
-  background:    #1a1a2e;
+  background:    rgba(26, 26, 46, 0.7);
   color:         #9b89e8;
   cursor:        default;
   display:       flex;
   align-items:   center;
   gap:           4px;
+  font-family:   "IBM Plex Mono", monospace;
 }
-.foundation-chip::before {
-  content:     "◈";
-  font-size:   0.7rem;
-  color:       #6a5acd;
+.foundation-chip::before { content: "◈"; font-size: 0.65rem; color: #6a5acd; }
+
+/* ── responsive fallback（小螢幕退回兩欄）──────────────────
+   < 1100px：graph 面板隱藏或折疊
+   ────────────────────────────────────────────────────────── */
+@media (max-width: 1100px) {
+  .content-area {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto 1fr;
+  }
+  .brain-panel {
+    grid-column: 1 / -1;
+    height: 360px;
+  }
 }
 
-
-/* ════════════════════════════════════════════════════════════
-   globals.css 新增區塊
-   加到現有 globals.css 的末尾
-   ════════════════════════════════════════════════════════════ */
- 
-/* ── brain panel（全局知識場域，左側）──────────────────────── */
-.brain-panel {
-  flex:           0 0 300px;
-  display:        flex;
-  flex-direction: column;
-  align-items:    center;
-  gap:            8px;
-  padding:        8px 0;
-  /* 不需要 border，GlobalBrain 本身有 borderRadius */
-}
- 
-.brain-panel-label {
-  font-size:      0.6rem;
-  color:          #1a3050;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  font-family:    "IBM Plex Mono", monospace;
-  text-align:     center;
-  width:          100%;
-  padding-left:   4px;
-}
- 
-/* ── content-area 有三欄時的 flex 調整 ──────────────────────
-   原有的 content-area 已是 flex row，不需改動。
-   但加上 brain-panel 後總寬度可能超出，需要讓 chat-column 自適應。
-   修改現有 .chat-column 的 flex: 1 1 380px → flex: 1 1 300px
-   ──────────────────────────────────────────────────────────── */
-.chat-column {
-  flex: 1 1 300px;   /* 原本是 380px，縮小讓三欄可以共存 */
+@media (max-width: 720px) {
+  .content-area {
+    grid-template-columns: 1fr;
+    height: auto;
+  }
+  .brain-panel {
+    height: 300px;
+  }
+  .graph-panel {
+    display: none;
+  }
 }

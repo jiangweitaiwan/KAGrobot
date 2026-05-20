@@ -60,7 +60,7 @@ class Settings(BaseSettings):
 
     # --- GCS skills ---
     skills_bucket_name: str = Field(
-        default="your-gcs-skills-bucket-name",
+        default="kagrobot-skills",
         alias="SKILLS_BUCKET_NAME",
     )
 
