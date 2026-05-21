@@ -174,11 +174,18 @@ export default function Page() {
     if (selectedPathId === null || !graphData) { setActivePathEids([]); return; }
     const path = graphData.paths?.find((p) => p.path_id === selectedPathId);
     if (!path) { setActivePathEids([]); return; }
+
     const conceptEids = path.node_ids.filter((nid) => {
       const node = graphData.nodes?.find((n) => n.id === nid);
       return node?.node_type === "concept";
     });
-    setActivePathEids(conceptEids);
+    const foundationEids = (graphData.foundations ?? []).map(
+      (f: { element_id: string }) => f.element_id
+    );
+    setActivePathEids([...conceptEids, ...foundationEids]);
+
+
+
   }, [selectedPathId, graphData]);
 
   const canSend = !!input.trim() && !isLoading && !!sessionId;

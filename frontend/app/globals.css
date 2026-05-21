@@ -174,6 +174,8 @@ textarea:focus {
   justify-content: center;
   gap:            8px;
   position:       relative;
+  min-height:      0;        /* ← 新增：允許 flex 子元素縮小 */
+  overflow:        hidden;   /* ← 新增：防止超出父容器 */  
   /* 橘色光暈背景 */
   background: radial-gradient(
     ellipse at 50% 50%,

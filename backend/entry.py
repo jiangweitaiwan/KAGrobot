@@ -99,13 +99,17 @@ _global_layout_cache: dict | None = None
  
  
 def _get_global_layout() -> dict:
-    """取得（或計算）全局佈局，結果快取在模組變數。"""
     global _global_layout_cache
     if _global_layout_cache is None:
         _global_layout_cache = shared_retriever.get_global_layout(
             _PKL_PATH,
+            chapter_pkl_path=_os.environ.get(
+                "CHAPTER_PKL_PATH",
+                str(_Path(__file__).resolve().parent / "chapter_results_dict.pkl"),
+            ),
             gcs_bucket_name=(getattr(s, "gcs_bucketforresult", "") or "").strip(),
             gcs_object_name="results_dict.pkl",
+            chapter_gcs_object_name="chapter_results_dict.pkl",
         )
     return _global_layout_cache
  

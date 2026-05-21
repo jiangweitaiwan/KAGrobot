@@ -3,11 +3,11 @@
 /**
  * GlobalBrain.tsx — 全局知識圖譜 3D 密度雲視覺化
  *
- * 變更：
- *   - 密度雲改為亮橘色系（Resulting_Concept: #e87030，其他: #7a3010）
- *   - Bloom 參數調整（threshold 降至 0.25，strength 升至 2.2）
- *   - 新增 hover tooltip：用不可見代理 Mesh 做 raycasting，命中顯示 node.name
- *     threshold = 0.12，拖曳旋轉時隱藏
+ * 顏色語意：
+ *   results  來源 → 亮橘色  (#ff6010 / #7a2800)
+ *   chapter  來源 → 亮紫色  (#c060ff / #5a1a9a)
+ *   active candidate → 青綠 #00d4aa
+ *   active path      → 藍   #4f8ef7
  */
 
 import { useEffect, useRef, useMemo } from "react";
@@ -21,12 +21,13 @@ import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPa
 // ─────────────────────────────────────────────────────────────
 
 export type GlobalLayoutNode = {
-  id:   string;
-  name: string;
-  type: string;
-  x:    number;
-  y:    number;
-  z:    number;
+  id:      string;
+  name:    string;
+  type:    string;
+  source?: string;   // "results" | "chapter"
+  x:       number;
+  y:       number;
+  z:       number;
 };
 
 export type GlobalLayoutEdge = {
@@ -52,48 +53,49 @@ type Props = {
 // ─────────────────────────────────────────────────────────────
 
 const C = {
-  bg:               0x020810,
-  bg_css:           "#020810",
-  // ── 密度雲基礎色（亮橘色系）──
-  cloud_rc:         new THREE.Color(0xe87030),   // Resulting_Concept：亮橘
-  cloud_other:      new THREE.Color(0x7a3010),   // 其他：深橘
-  // ── 激活色 ──
+  bg:               0x000000,
+  bg_css:           "#000000",
+
+  // results 來源：亮橘
+  cloud_results_rc:    new THREE.Color(0xff6010),
+  cloud_results_other: new THREE.Color(0x7a2800),
+
+  // chapter 來源：亮紫
+  cloud_chapter_rc:    new THREE.Color(0xc060ff),
+  cloud_chapter_other: new THREE.Color(0x5a1a9a),
+
+  // 激活色
   active_candidate: new THREE.Color(0x00d4aa),
-  active_path:      [
+  active_path: [
     new THREE.Color(0x4f8ef7),
     new THREE.Color(0x00d4aa),
     new THREE.Color(0xe8a030),
     new THREE.Color(0xe85d60),
     new THREE.Color(0xa060f0),
   ],
-  // ── bloom ──
-  bloom_strength:   2.2,
-  bloom_radius:     0.5,
-  bloom_threshold:  0.25,
+
+  bloom_strength:  2.4,
+  bloom_radius:    0.5,
+  bloom_threshold: 0.20,
 };
 
-// 密度雲參數
+// 密度雲參數（×10 vs 原始）
 const CLOUD = {
-  particles_per_rc:    60,
-  particles_per_other: 20,
+  particles_per_rc:    600,
+  particles_per_other: 200,
   spread_rc:           0.06,
   spread_other:        0.10,
   size_rc:             0.018,
   size_other:          0.010,
 };
 
-// 背景粒子場
-const BG_PARTICLE_COUNT = 12000;
+const BG_PARTICLE_COUNT = 8000;
 const BG_SPREAD         = 3.5;
 
-// 路徑粒子流
 const PATH_PARTICLE_COUNT = 180;
 const PATH_PARTICLE_SPEED = 0.0018;
 
-// 座標縮放
-const WORLD_SCALE = 2.2;
-
-// Raycasting
+const WORLD_SCALE     = 2.2;
 const PROXY_THRESHOLD = 0.12;
 
 // ─────────────────────────────────────────────────────────────
@@ -110,6 +112,14 @@ function nodeToWorld(n: GlobalLayoutNode): THREE.Vector3 {
 
 function isRC(node: GlobalLayoutNode): boolean {
   return (node.type || "").toLowerCase().includes("resulting");
+}
+
+function getNodeColors(node: GlobalLayoutNode): { rc: THREE.Color; other: THREE.Color } {
+  const src = (node.source || "results").toLowerCase();
+  if (src === "chapter") {
+    return { rc: C.cloud_chapter_rc, other: C.cloud_chapter_other };
+  }
+  return { rc: C.cloud_results_rc, other: C.cloud_results_other };
 }
 
 function seededRand(seed: number): () => number {
@@ -146,7 +156,8 @@ function buildDensityCloud(nodes: GlobalLayoutNode[]): {
     const count     = rc ? CLOUD.particles_per_rc    : CLOUD.particles_per_other;
     const spread    = rc ? CLOUD.spread_rc           : CLOUD.spread_other;
     const baseSize  = rc ? CLOUD.size_rc             : CLOUD.size_other;
-    const baseColor = rc ? C.cloud_rc                : C.cloud_other;
+    const palette   = getNodeColors(node);
+    const baseColor = rc ? palette.rc : palette.other;
     const rand      = seededRand(ni * 7919 + 1);
     const center    = nodeToWorld(node);
 
@@ -173,7 +184,7 @@ function buildDensityCloud(nodes: GlobalLayoutNode[]): {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Build background particle geometry
+// Build background particle geometry（純黑背景用，極稀疏）
 // ─────────────────────────────────────────────────────────────
 
 function buildBgParticles(): Float32Array {
@@ -198,41 +209,37 @@ export default function GlobalBrain({
   width  = 480,
   height = 480,
 }: Props) {
-  const canvasRef    = useRef<HTMLCanvasElement>(null);
-  const tooltipRef   = useRef<HTMLDivElement>(null);
+  const canvasRef  = useRef<HTMLCanvasElement>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
 
-  // Three.js refs
-  const sceneRef        = useRef<THREE.Scene | null>(null);
-  const rendererRef     = useRef<THREE.WebGLRenderer | null>(null);
-  const composerRef     = useRef<EffectComposer | null>(null);
-  const cameraRef       = useRef<THREE.PerspectiveCamera | null>(null);
-  const cloudMeshRef    = useRef<THREE.Points | null>(null);
-  const glowGroupRef    = useRef<THREE.Group | null>(null);
-  const pathLineRef     = useRef<THREE.LineSegments | null>(null);
-  const pathParticles   = useRef<THREE.Points | null>(null);
-  const pathProgress    = useRef<Float32Array | null>(null);
-  const pathCurve       = useRef<THREE.CatmullRomCurve3 | null>(null);
-  const animFrameRef    = useRef<number>(0);
-  const isDragging      = useRef(false);
-  const prevMouse       = useRef({ x: 0, y: 0 });
-  const rotGroup        = useRef<THREE.Group | null>(null);
+  const sceneRef      = useRef<THREE.Scene | null>(null);
+  const rendererRef   = useRef<THREE.WebGLRenderer | null>(null);
+  const composerRef   = useRef<EffectComposer | null>(null);
+  const cameraRef     = useRef<THREE.PerspectiveCamera | null>(null);
+  const cloudMeshRef  = useRef<THREE.Points | null>(null);
+  const glowGroupRef  = useRef<THREE.Group | null>(null);
+  const pathLineRef   = useRef<THREE.LineSegments | null>(null);
+  const pathParticles = useRef<THREE.Points | null>(null);
+  const pathProgress  = useRef<Float32Array | null>(null);
+  const pathCurve     = useRef<THREE.CatmullRomCurve3 | null>(null);
+  const animFrameRef  = useRef<number>(0);
+  const isDragging    = useRef(false);
+  const prevMouse     = useRef({ x: 0, y: 0 });
+  const rotGroup      = useRef<THREE.Group | null>(null);
 
-  // Raycasting refs
-  const proxyMeshesRef  = useRef<THREE.Mesh[]>([]);
-  const raycasterRef    = useRef<THREE.Raycaster | null>(null);
-  const mouseNDCRef     = useRef(new THREE.Vector2(-9999, -9999));
+  const proxyMeshesRef = useRef<THREE.Mesh[]>([]);
+  const raycasterRef   = useRef<THREE.Raycaster | null>(null);
+  const mouseNDCRef    = useRef(new THREE.Vector2(-9999, -9999));
 
-  // node id → index map
   const nodeIdxMap = useMemo(() => {
     if (!layout) return new Map<string, number>();
     return new Map(layout.nodes.map((n, i) => [n.id, i]));
   }, [layout]);
 
-  // ── 初始化 Three.js 場景 ──────────────────────────────────
+  // ── 初始化場景 ────────────────────────────────────────────
   useEffect(() => {
     if (!canvasRef.current || !layout || layout.nodes.length === 0) return;
 
-    // ── renderer ──
     const renderer = new THREE.WebGLRenderer({
       canvas:    canvasRef.current,
       antialias: true,
@@ -243,7 +250,6 @@ export default function GlobalBrain({
     renderer.setClearColor(C.bg, 1);
     rendererRef.current = renderer;
 
-    // ── scene & camera ──
     const scene = new THREE.Scene();
     sceneRef.current = scene;
 
@@ -251,12 +257,10 @@ export default function GlobalBrain({
     camera.position.set(0, 0, 5.5);
     cameraRef.current = camera;
 
-    // ── rotation group ──
     const rg = new THREE.Group();
     scene.add(rg);
     rotGroup.current = rg;
 
-    // ── bloom composer ──
     const composer = new EffectComposer(renderer);
     composer.addPass(new RenderPass(scene, camera));
     const bloomPass = new UnrealBloomPass(
@@ -268,27 +272,26 @@ export default function GlobalBrain({
     composer.addPass(bloomPass);
     composerRef.current = composer;
 
-    // ── Layer 0：背景粒子場 ──
+    // 背景粒子（純黑背景，非常稀疏的暗星點）
     const bgPos = buildBgParticles();
     const bgGeo = new THREE.BufferGeometry();
     bgGeo.setAttribute("position", new THREE.BufferAttribute(bgPos, 3));
     const bgMat = new THREE.PointsMaterial({
-      color:       0x2a1a0a,   // 深橘棕背景粒子
-      size:        0.006,
+      color:       0x111111,
+      size:        0.005,
       transparent: true,
-      opacity:     0.3,
+      opacity:     0.25,
       depthWrite:  false,
     });
     scene.add(new THREE.Points(bgGeo, bgMat));
 
-    // ── Layer 1：密度雲 ──
+    // 密度雲
     const { positions, colors, sizes, nodeIndex } = buildDensityCloud(layout.nodes);
-
     const cloudGeo = new THREE.BufferGeometry();
-    cloudGeo.setAttribute("position", new THREE.BufferAttribute(positions.slice(), 3));
-    cloudGeo.setAttribute("color",    new THREE.BufferAttribute(colors.slice(),    3));
-    cloudGeo.setAttribute("size",     new THREE.BufferAttribute(sizes.slice(),     1));
-    cloudGeo.setAttribute("nodeIndex", new THREE.BufferAttribute(nodeIndex, 1));
+    cloudGeo.setAttribute("position",  new THREE.BufferAttribute(positions.slice(), 3));
+    cloudGeo.setAttribute("color",     new THREE.BufferAttribute(colors.slice(),    3));
+    cloudGeo.setAttribute("size",      new THREE.BufferAttribute(sizes.slice(),     1));
+    cloudGeo.setAttribute("nodeIndex", new THREE.BufferAttribute(nodeIndex,         1));
 
     const cloudMat = new THREE.ShaderMaterial({
       uniforms: { uTime: { value: 0 } },
@@ -323,15 +326,15 @@ export default function GlobalBrain({
     rg.add(cloudMesh);
     cloudMeshRef.current = cloudMesh;
 
-    // ── Layer 2：激活光暈群組 ──
+    // 激活光暈群組
     const glowGroup = new THREE.Group();
     rg.add(glowGroup);
     glowGroupRef.current = glowGroup;
 
-    // ── Layer 3：路徑線段 ──
+    // 路徑線段
     const pathLineGeo = new THREE.BufferGeometry();
     const pathLineMat = new THREE.LineBasicMaterial({
-      color:       0x00d4aa,
+      color:       0x4f8ef7,
       transparent: true,
       opacity:     0.0,
       depthWrite:  false,
@@ -341,12 +344,12 @@ export default function GlobalBrain({
     rg.add(pathLine);
     pathLineRef.current = pathLine;
 
-    // ── Layer 4：路徑粒子流 ──
+    // 路徑粒子流
     const ppGeo = new THREE.BufferGeometry();
     const ppPos = new Float32Array(PATH_PARTICLE_COUNT * 3);
     ppGeo.setAttribute("position", new THREE.BufferAttribute(ppPos, 3));
     const ppMat = new THREE.PointsMaterial({
-      color:       0x00d4aa,
+      color:       0x4f8ef7,
       size:        0.025,
       transparent: true,
       opacity:     0.0,
@@ -360,44 +363,33 @@ export default function GlobalBrain({
       (_, i) => i / PATH_PARTICLE_COUNT,
     );
 
-    // ── Layer 5：不可見代理 Mesh（供 Raycasting 使用）──
+    // 不可見代理 Mesh（Raycasting）
     const proxyGeo = new THREE.SphereGeometry(PROXY_THRESHOLD, 6, 6);
-    const proxyMat = new THREE.MeshBasicMaterial({
-      visible:     false,   // 不渲染，僅用於碰撞偵測
-      transparent: true,
-      opacity:     0,
-    });
+    const proxyMat = new THREE.MeshBasicMaterial({ visible: false, transparent: true, opacity: 0 });
     const proxies: THREE.Mesh[] = [];
     layout.nodes.forEach((node, ni) => {
       const proxy = new THREE.Mesh(proxyGeo, proxyMat);
-      const pos   = nodeToWorld(node);
-      proxy.position.copy(pos);
+      proxy.position.copy(nodeToWorld(node));
       proxy.userData.nodeIndex = ni;
       rg.add(proxy);
       proxies.push(proxy);
     });
     proxyMeshesRef.current = proxies;
 
-    // ── Raycaster ──
-    const raycaster = new THREE.Raycaster();
-    raycaster.params.Mesh = {};
-    raycasterRef.current = raycaster;
+    raycasterRef.current = new THREE.Raycaster();
 
-    scene.add(new THREE.AmbientLight(0x331100, 2));
+    scene.add(new THREE.AmbientLight(0x110800, 2));
 
-    // ── Animation loop ──
     let frameCount = 0;
     function animate() {
       animFrameRef.current = requestAnimationFrame(animate);
       frameCount++;
 
-      // 緩慢自轉
       if (rotGroup.current && !isDragging.current) {
         rotGroup.current.rotation.y += 0.0008;
         rotGroup.current.rotation.x += 0.0002;
       }
 
-      // 路徑粒子流
       if (
         pathCurve.current &&
         pathParticles.current &&
@@ -417,9 +409,8 @@ export default function GlobalBrain({
         (pathParticles.current.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
       }
 
-      // 光暈脈動
       if (frameCount % 2 === 0 && glowGroupRef.current) {
-        const t     = frameCount * 0.02;
+        const t = frameCount * 0.02;
         const pulse = 0.85 + 0.15 * Math.sin(t);
         glowGroupRef.current.children.forEach((child) => {
           if (child instanceof THREE.Sprite) {
@@ -428,7 +419,6 @@ export default function GlobalBrain({
         });
       }
 
-      // Raycasting（拖曳中跳過）
       if (
         !isDragging.current &&
         layout &&
@@ -439,7 +429,6 @@ export default function GlobalBrain({
       ) {
         raycasterRef.current.setFromCamera(mouseNDCRef.current, cameraRef.current);
         const hits = raycasterRef.current.intersectObjects(proxyMeshesRef.current, false);
-
         if (hits.length > 0) {
           const ni   = hits[0].object.userData.nodeIndex as number;
           const node = layout.nodes[ni];
@@ -454,9 +443,8 @@ export default function GlobalBrain({
     }
     animate();
 
-    // ── 滑鼠事件 ──
+    // 滑鼠 / 觸控事件
     const canvas = canvasRef.current;
-    const rect   = canvas.getBoundingClientRect();
 
     function updateNDC(clientX: number, clientY: number) {
       const r = canvasRef.current?.getBoundingClientRect();
@@ -485,7 +473,6 @@ export default function GlobalBrain({
       mouseNDCRef.current.set(-9999, -9999);
       if (tooltipRef.current) tooltipRef.current.style.opacity = "0";
     }
-
     function onTouchStart(e: TouchEvent) {
       isDragging.current = true;
       prevMouse.current  = { x: e.touches[0].clientX, y: e.touches[0].clientY };
@@ -541,12 +528,12 @@ export default function GlobalBrain({
 
     colorArr.set(baseColors);
 
-    const activeColor = C.active_candidate;
+    const ac = C.active_candidate;
     for (let i = 0; i < niArr.length; i++) {
       if (activeIdxSet.has(niArr[i])) {
-        colorArr[i * 3 + 0] = activeColor.r * 1.6;
-        colorArr[i * 3 + 1] = activeColor.g * 1.6;
-        colorArr[i * 3 + 2] = activeColor.b * 1.6;
+        colorArr[i * 3 + 0] = ac.r * 1.8;
+        colorArr[i * 3 + 1] = ac.g * 1.8;
+        colorArr[i * 3 + 2] = ac.b * 1.8;
       }
     }
     colorAttr.needsUpdate = true;
@@ -556,8 +543,7 @@ export default function GlobalBrain({
     if (activeIdxSet.size === 0) return;
 
     const canvas2d = document.createElement("canvas");
-    canvas2d.width  = 64;
-    canvas2d.height = 64;
+    canvas2d.width = canvas2d.height = 64;
     const ctx  = canvas2d.getContext("2d")!;
     const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
     grad.addColorStop(0,   "rgba(0, 212, 170, 0.9)");
@@ -573,20 +559,20 @@ export default function GlobalBrain({
       const spriteMat = new THREE.SpriteMaterial({
         map:         glowTex,
         transparent: true,
-        opacity:     0.7,
+        opacity:     0.75,
         blending:    THREE.AdditiveBlending,
         depthWrite:  false,
       });
       const sprite = new THREE.Sprite(spriteMat);
       sprite.position.copy(pos);
       sprite.scale.setScalar(isRC(node) ? 0.55 : 0.35);
-      sprite.userData.baseOpacity = 0.7;
+      sprite.userData.baseOpacity = 0.75;
       glowGroup.add(sprite);
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeCandidateEids, layout, nodeIdxMap]);
 
-  // ── 激活 path 路徑 ───────────────────────────────────────
+  // ── 激活 path 路徑（含 foundations）─────────────────────
   useEffect(() => {
     if (!layout || !pathLineRef.current || !pathParticles.current) return;
 
@@ -623,8 +609,8 @@ export default function GlobalBrain({
       "position",
       new THREE.BufferAttribute(new Float32Array(linePositions), 3),
     );
-    lineGeo.attributes.position.needsUpdate = true;
-    pathMat.opacity = 0.65;
+    (lineGeo.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+    pathMat.opacity = 0.70;
 
     pathCurve.current = new THREE.CatmullRomCurve3(pathPoints, false, "catmullrom", 0.5);
     if (pathProgress.current) {
@@ -651,6 +637,7 @@ export default function GlobalBrain({
         overflow:     "hidden",
         background:   C.bg_css,
         cursor:       "grab",
+        flexShrink:   0,
       }}
     >
       <canvas
@@ -658,7 +645,7 @@ export default function GlobalBrain({
         style={{ display: "block", width: "100%", height: "100%" }}
       />
 
-      {/* Node name tooltip */}
+      {/* Tooltip */}
       <div
         ref={tooltipRef}
         style={{
@@ -666,8 +653,8 @@ export default function GlobalBrain({
           bottom:        40,
           left:          "50%",
           transform:     "translateX(-50%)",
-          background:    "rgba(2, 8, 16, 0.85)",
-          border:        "1px solid rgba(232, 112, 48, 0.4)",
+          background:    "rgba(0,0,0,0.88)",
+          border:        "1px solid rgba(255,96,16,0.4)",
           borderRadius:  "6px",
           padding:       "5px 12px",
           fontSize:      "0.72rem",
@@ -685,15 +672,15 @@ export default function GlobalBrain({
         }}
       />
 
-      {/* 空狀態遮罩 */}
+      {/* 空狀態 */}
       {!layout && (
         <div style={{
-          position:      "absolute",
-          inset:         0,
-          display:       "flex",
-          alignItems:    "center",
+          position:       "absolute",
+          inset:          0,
+          display:        "flex",
+          alignItems:     "center",
           justifyContent: "center",
-          color:          "#3a2010",
+          color:          "#3a1a00",
           fontSize:       "0.8rem",
           letterSpacing:  "0.12em",
           textTransform:  "uppercase",
@@ -710,7 +697,7 @@ export default function GlobalBrain({
         top:           10,
         left:          12,
         fontSize:      "0.6rem",
-        color:         "#4a2010",
+        color:         "#3a1800",
         letterSpacing: "0.15em",
         textTransform: "uppercase",
         fontFamily:    "monospace",
@@ -720,7 +707,28 @@ export default function GlobalBrain({
         Global Knowledge Field
       </div>
 
-      {/* 激活狀態指示 */}
+      {/* 圖例 */}
+      <div style={{
+        position:      "absolute",
+        top:           10,
+        right:         12,
+        display:       "flex",
+        flexDirection: "column",
+        gap:           "4px",
+        pointerEvents: "none",
+        userSelect:    "none",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+          <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#ff6010", display: "inline-block", boxShadow: "0 0 4px #ff6010" }} />
+          <span style={{ fontSize: "0.58rem", color: "#ff6010", fontFamily: "monospace", letterSpacing: "0.1em" }}>RESEARCH</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+          <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#c060ff", display: "inline-block", boxShadow: "0 0 4px #c060ff" }} />
+          <span style={{ fontSize: "0.58rem", color: "#c060ff", fontFamily: "monospace", letterSpacing: "0.1em" }}>TEXTBOOK</span>
+        </div>
+      </div>
+
+      {/* 激活狀態 */}
       {activeCandidateEids.length > 0 && (
         <div style={{
           position:      "absolute",

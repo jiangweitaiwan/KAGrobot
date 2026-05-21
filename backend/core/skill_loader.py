@@ -227,32 +227,58 @@ def _load_references(skill_dir: Path, ref_paths: List[str]) -> str:
 # ══════════════════════════════════════════════════════════════
 # GCS 輔助下載函數
 # ══════════════════════════════════════════════════════════════
-def _download_gcs_folder(bucket_name: str, gcs_prefix: str, local_dir: Path) -> bool:
-    """將 GCS 儲存桶中指定前綴的資料夾，下載到本地指定目錄"""
+import zipfile
+import os
+from pathlib import Path
+from google.cloud import storage
+
+def _download_gcs_skill_file(bucket_name: str, gcs_blob_path: str, local_dir: Path) -> bool:
+    """下載 .skill (ZIP) 檔案，並自動剔除 ZIP 內部的第一層根目錄，直接解壓到 local_dir"""
     try:
         storage_client = storage.Client()
         bucket = storage_client.bucket(bucket_name)
-        blobs = bucket.list_blobs(prefix=gcs_prefix)
+        blob = bucket.blob(gcs_blob_path)
         
-        has_files = False
-        for blob in blobs:
-            if blob.name.endswith('/'): # 跳過資料夾物件
-                continue
+        if not blob.exists():
+            print(f"[SkillLoader] GCS file not found: {gcs_blob_path}")
+            return False
+            
+        # 1. 下載為本地暫存的 zip 檔
+        zip_tmp_path = local_dir.with_suffix('.zip')
+        local_dir.mkdir(parents=True, exist_ok=True)
+        blob.download_to_filename(str(zip_tmp_path))
+        
+        # 2. 解壓縮並動態修正路徑
+        with zipfile.ZipFile(zip_tmp_path, 'r') as zip_ref:
+            for member in zip_ref.infolist():
+                # 剔除路徑中的第一層資料夾名稱
+                # 例如 "dsge-model/references/equations.md" -> 拆成 ["dsge-model", "references", "equations.md"]
+                parts = Path(member.filename).parts
                 
-            has_files = True
-            # 計算本地相對路徑
-            relative_path = os.path.relpath(blob.name, gcs_prefix)
-            local_file_path = local_dir / relative_path
+                # 如果只有一層（代表是外層根目錄本身，例如 "dsge-model/"），直接跳過不建立
+                if len(parts) <= 1:
+                    continue
+                
+                # 重新組合路徑：去掉第一層 (parts[0])，保留後續所有結構
+                relative_path = Path(*parts[1:])
+                target_path = local_dir / relative_path
+                
+                if member.is_dir():
+                    # 如果是目錄，建立目錄即可
+                    target_path.mkdir(parents=True, exist_ok=True)
+                else:
+                    # 如果是檔案，確保上層目錄存在，然後寫入檔案
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    with zip_ref.open(member) as source, open(target_path, "wb") as target:
+                        target.write(source.read())
+                        
+        # 3. 刪除暫存的 zip 檔
+        if zip_tmp_path.exists():
+            zip_tmp_path.unlink()
             
-            # 自動建立本地上層目錄
-            local_file_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # 下載檔案
-            blob.download_to_filename(str(local_file_path))
-            
-        return has_files
+        return True
     except Exception as e:
-        print(f"[SkillLoader] GCS Download Error: {e}")
+        print(f"[SkillLoader] GCS .skill Download & Flatten Error: {e}")
         return False
 
 
@@ -283,13 +309,13 @@ class SkillLoader:
         slug = self._slug(rc_name)
         
         # 1. 決定 GCS 的路徑與本地 /tmp 的暫存路徑
-        gcs_skill_folder = f"{self.gcs_prefix}/{slug}"
+        gcs_skill_folder = f"{self.gcs_prefix}/{rc_name}.skill"
         local_skill_dir = self._local_base_dir / slug
 
         # 2. 從 GCS 下載該技能的完整目錄 (SKILL.md, scripts/, references/)
         # 注意：因為有 lru_cache，同一個技能在同一個實例中只會被下載一次
         print(f"[SkillLoader] Fetching '{rc_name}' from GCS bucket '{self.bucket_name}'...")
-        success = _download_gcs_folder(self.bucket_name, gcs_skill_folder, local_skill_dir)
+        success = _download_gcs_skill_file(self.bucket_name, gcs_skill_folder, local_skill_dir)
         
         if not success or not local_skill_dir.exists():
             print(f"[SkillLoader] no skill found in GCS for rc_name='{rc_name}' (slug='{slug}')")
