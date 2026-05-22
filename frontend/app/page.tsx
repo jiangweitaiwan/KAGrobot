@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import type { GraphData } from "./components/KnowledgeGraph";
-import type { GlobalLayout } from "./components/GlobalBrain";
+import type { GlobalLayout, FoundationTree } from "./components/GlobalBrain";
 
 const KnowledgeGraph = dynamic(() => import("./components/KnowledgeGraph"), { ssr: false });
 const GlobalBrain    = dynamic(() => import("./components/GlobalBrain"),    { ssr: false });
@@ -75,7 +75,7 @@ function extractCandidateEids(parsed: Record<number, GraphData | null>): string[
 }
 
 // ─────────────────────────────────────────────────────────────
-// useBrainSize — Brain 畫布尺寸跟隨中間欄動態計算
+// useBrainSize
 // ─────────────────────────────────────────────────────────────
 
 function useBrainSize(ref: React.RefObject<HTMLDivElement>) {
@@ -126,14 +126,16 @@ export default function Page() {
   const [globalLayout,        setGlobalLayout]        = useState<GlobalLayout | null>(null);
   const [globalLayoutFetched, setGlobalLayoutFetched] = useState(false);
   const [activeCandidateEids, setActiveCandidateEids] = useState<string[]>([]);
-  const [activePathEids,      setActivePathEids]      = useState<string[]>([]);
+  // selected-path activation
+  const [activePathNodeEids,  setActivePathNodeEids]  = useState<string[]>([]);
+  const [activePathEdges,     setActivePathEdges]     = useState<{source:string;target:string}[]>([]);
+  const [activeFoundationTree, setActiveFoundationTree] = useState<FoundationTree>({ nodes: [], edges: [] });
 
   const allGraphsRef = useRef<Record<number, GraphData | null>>({});
   const isTypingRef  = useRef(false);
   const messagesRef  = useRef<ChatMessage[]>([]);
   const boxRef       = useRef<HTMLDivElement | null>(null);
 
-  // Brain 欄 ref，用於動態尺寸
   const brainColRef = useRef<HTMLDivElement>(null);
   const brainSize   = useBrainSize(brainColRef as React.RefObject<HTMLDivElement>);
 
@@ -159,7 +161,7 @@ export default function Page() {
     boxRef.current.scrollTop = boxRef.current.scrollHeight;
   }, [messages, isLoading]);
 
-  // ── fetch global layout（第一條 AI 回覆後）────────────────
+  // ── fetch global layout ────────────────────────────────────
   useEffect(() => {
     if (messages.length === 0 || globalLayoutFetched || !API_BASE) return;
     setGlobalLayoutFetched(true);
@@ -169,23 +171,41 @@ export default function Page() {
       .catch((err) => console.warn("[GlobalBrain] layout fetch failed:", err));
   }, [messages, globalLayoutFetched]);
 
-  // ── selectedPathId → activePathEids ──────────────────────
+  // ── selectedPathId → GlobalBrain active sets ──────────────
   useEffect(() => {
-    if (selectedPathId === null || !graphData) { setActivePathEids([]); return; }
-    const path = graphData.paths?.find((p) => p.path_id === selectedPathId);
-    if (!path) { setActivePathEids([]); return; }
+    if (selectedPathId === null || !graphData) {
+      setActivePathNodeEids([]);
+      setActivePathEdges([]);
+      setActiveFoundationTree({ nodes: [], edges: [] });
+      return;
+    }
 
-    const conceptEids = path.node_ids.filter((nid) => {
+    const path = graphData.paths?.find((p) => p.path_id === selectedPathId);
+    if (!path) {
+      setActivePathNodeEids([]);
+      setActivePathEdges([]);
+      setActiveFoundationTree({ nodes: [], edges: [] });
+      return;
+    }
+
+    // Collect concept node eids for the selected downstream path
+    const pathConceptEids = (path.node_ids ?? []).filter((nid) => {
       const node = graphData.nodes?.find((n) => n.id === nid);
       return node?.node_type === "concept";
     });
-    const foundationEids = (graphData.foundations ?? []).map(
-      (f: { element_id: string }) => f.element_id
-    );
-    setActivePathEids([...conceptEids, ...foundationEids]);
 
+    // Collect the edges for the selected path (source→target pairs from graphData.edges)
+    const pathEdgeIdSet = new Set(path.edge_ids ?? []);
+    const pathEdgePairs = (graphData.edges ?? [])
+      .filter((e) => pathEdgeIdSet.has(e.id))
+      .map((e) => ({ source: e.source as string, target: e.target as string }));
 
+    // Foundation tree from graphData (all upstream intermediate nodes + edges)
+    const foundationTree: FoundationTree = (graphData as any).foundation_tree ?? { nodes: [], edges: [] };
 
+    setActivePathNodeEids(pathConceptEids);
+    setActivePathEdges(pathEdgePairs);
+    setActiveFoundationTree(foundationTree);
   }, [selectedPathId, graphData]);
 
   const canSend = !!input.trim() && !isLoading && !!sessionId;
@@ -256,7 +276,10 @@ export default function Page() {
 
     const candidateEids = extractCandidateEids(parsed);
     setActiveCandidateEids(candidateEids);
-    setActivePathEids([]);
+    // reset path highlights when new graphs arrive
+    setActivePathNodeEids([]);
+    setActivePathEdges([]);
+    setActiveFoundationTree({ nodes: [], edges: [] });
   }
 
   // ── 送出訊息 ──────────────────────────────────────────────
@@ -382,7 +405,9 @@ export default function Page() {
     setConfirmedPathId(null);
     setGraphVisible(false);
     setActiveCandidateEids([]);
-    setActivePathEids([]);
+    setActivePathNodeEids([]);
+    setActivePathEdges([]);
+    setActiveFoundationTree({ nodes: [], edges: [] });
     localStorage.setItem(SESSION_KEY, sid);
     localStorage.setItem(PHASE_KEY, "socratic");
     localStorage.removeItem(HISTORY_KEY);
@@ -469,7 +494,7 @@ export default function Page() {
             )}
           </div>
 
-          <div>
+          <div className="chat-input-area">
             <form onSubmit={submitMessage}>
               <textarea
                 placeholder={inputPlaceholder}
@@ -493,13 +518,15 @@ export default function Page() {
           </div>
         </div>
 
-        {/* ══ CENTRE: Brain column（主角）══ */}
+        {/* ══ CENTRE: Brain column ══ */}
         <div className="brain-panel" ref={brainColRef}>
           <div className="brain-panel-label">Global Knowledge Field</div>
           <GlobalBrain
             layout={globalLayout}
             activeCandidateEids={activeCandidateEids}
-            activePathEids={activePathEids}
+            activePathNodeEids={activePathNodeEids}
+            activePathEdges={activePathEdges}
+            activeFoundationTree={activeFoundationTree}
             width={brainSize.w}
             height={Math.max(brainSize.h - 32, 300)}
           />
@@ -590,7 +617,7 @@ export default function Page() {
           </div>
         )}
 
-        {/* ── graph panel 佔位（未展開時保持三欄）── */}
+        {/* ── graph panel 佔位 ── */}
         {!showGraph && (
           <div style={{
             display:        "flex",

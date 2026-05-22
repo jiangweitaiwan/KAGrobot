@@ -16,8 +16,9 @@ retrieve_graph(start_eid, rc_name, max_depth)
     上游資訊改由 retrieve_foundations 負責。
 
 retrieve_foundations(start_eid)
-    從已知 element_id 走上游 BFS，找出每條上游路徑的 leaf concept（去重）。
-    回傳 [{"element_id": ..., "label": ...}, ...]
+    從已知 element_id 走上游 BFS（max_depth=3），回傳：
+      - final_foundations : 每條路徑最末端 leaf（給 KnowledgeGraph diamond 節點）
+      - foundation_tree   : 所有上游中間節點+邊（給 GlobalBrain 樹狀線段）
 
 retrieve_concept_detail(rc_name)
     查詢指定 concept 的 description 以及所屬 paper 的
@@ -27,7 +28,7 @@ retrieve_concept_detail(rc_name)
 project_concepts_only(graph_data)
     靜態方法。將完整 graph_data 投影為只含 concept 節點與
     concept-to-concept 邊的精簡結構，供前端與 graph_context 使用。
-    同時保留 foundations 欄位。
+    同時保留 foundations 與 foundation_tree 欄位。
 """
 
 import numpy as np
@@ -335,12 +336,96 @@ class Neo4jReasoningRetriever:
             "papers":         papers,
         }
 
+    # ----------------------------------------------------------
+    # Public: retrieve_foundations()  ← UPDATED
+    # ----------------------------------------------------------
 
+    def retrieve_foundations(
+        self,
+        start_eid: str,
+        max_depth: int = 3,
+    ) -> Dict[str, Any]:
+        """走上游 BFS（max_depth=3），回傳兩份資料：
+
+        - final_foundations : 每條路徑最末端 leaf（給 KnowledgeGraph diamond 節點）
+        - foundation_tree   : 所有上游中間節點 + 邊（給 GlobalBrain 樹狀線段）
+
+        Returns
+        -------
+        {
+            "final_foundations": [{"element_id": str, "label": str}, ...],
+            "foundation_tree": {
+                "nodes": [{"element_id": str, "label": str}, ...],
+                "edges": [{"source": str, "target": str}, ...]
+            }
+        }
+        """
+        with self.driver.session() as session:
+            raw_paths = session.execute_read(
+                self._walk_upstream, start_eid, max_depth
+            )
+
+        seen_leaf_eids: set = set()
+        final_foundations: List[Dict[str, Any]] = []
+
+        tree_nodes: Dict[str, Dict[str, Any]] = {}
+        tree_edges: Dict[str, Dict[str, Any]] = {}
+
+        for path in raw_paths:
+            steps = path.get("steps") or []
+            if not steps:
+                continue
+
+            # leaf = steps[0]["from_concept"]
+            # (_walk_upstream 以 [new_step] + steps 的方式 prepend，
+            #  所以 steps[0]["from_concept"] 是最末端上游節點)
+            leaf = steps[0]["from_concept"]
+            leaf_eid = leaf["element_id"]
+            if leaf_eid not in seen_leaf_eids:
+                seen_leaf_eids.add(leaf_eid)
+                final_foundations.append({
+                    "element_id": leaf_eid,
+                    "label": leaf.get("name") or leaf_eid,
+                })
+
+            # 所有途經節點（每個 step 的 from + to）
+            for step in steps:
+                fc = step["from_concept"]
+                fc_eid = fc["element_id"]
+                if fc_eid not in tree_nodes:
+                    tree_nodes[fc_eid] = {
+                        "element_id": fc_eid,
+                        "label": fc.get("name") or fc_eid,
+                    }
+
+                tc = step["to_concept"]
+                tc_eid = tc["element_id"]
+                if tc_eid not in tree_nodes:
+                    tree_nodes[tc_eid] = {
+                        "element_id": tc_eid,
+                        "label": tc.get("name") or tc_eid,
+                    }
+
+                # 邊方向：from → to（上游流向 candidate，最終匯聚到 start_eid）
+                edge_key = f"{fc_eid}__{tc_eid}"
+                if edge_key not in tree_edges:
+                    tree_edges[edge_key] = {
+                        "source": fc_eid,
+                        "target": tc_eid,
+                    }
+
+        return {
+            "final_foundations": final_foundations,
+            "foundation_tree": {
+                "nodes": list(tree_nodes.values()),
+                "edges": list(tree_edges.values()),
+            },
+        }
 
     # ----------------------------------------------------------
     # Public: get_global_layout()
     # ----------------------------------------------------------
- 
+
     def get_global_layout(
             self,
             pkl_path: str,
@@ -408,7 +493,6 @@ class Neo4jReasoningRetriever:
             with open(local_results_path, "rb") as f:
                 results_raw = pickle.load(f)
 
-            # results_dict 結構：{paper_title: [{cluster_name, role, alignment:{embeddings:{..:[emb,...]}}}, ...]}
             results_by_name: dict[str, list[np.ndarray]] = defaultdict(list)
             for _paper, concepts in results_raw.items():
                 for c in concepts:
@@ -438,7 +522,6 @@ class Neo4jReasoningRetriever:
                 try:
                     with open(local_chapter_path, "rb") as f:
                         chapter_raw = pickle.load(f)
-                    # chapter 結構：{chapter_name: [{index, concept, embeddings(384,)}, ...]}
                     chapter_by_name: dict[str, np.ndarray] = {}
                     for _chap, items in chapter_raw.items():
                         for item in items:
@@ -448,7 +531,6 @@ class Neo4jReasoningRetriever:
                                 if cname not in chapter_by_name:
                                     chapter_by_name[cname] = emb
                                 else:
-                                    # 同名多次出現取平均
                                     chapter_by_name[cname] = (
                                         chapter_by_name[cname] + emb
                                     ) / 2
@@ -464,7 +546,6 @@ class Neo4jReasoningRetriever:
                 print("[GlobalLayout] chapter pkl not found, skipping.")
 
             # ── Step 1c：合併，results 優先 ────────────────────────
-            # 先放 results，再放 chapter 中不重名的
             results_names = {c["name"] for c in results_concepts}
             all_concepts  = results_concepts + [
                 c for c in chapter_concepts if c["name"] not in results_names
@@ -487,7 +568,6 @@ class Neo4jReasoningRetriever:
                 _, _, Vt  = np.linalg.svd(centered, full_matrices=False)
                 coords_3d = centered @ Vt[:3].T
 
-            # 正規化到 [-1, 1]
             for i in range(3):
                 max_abs = np.abs(coords_3d[:, i]).max()
                 if max_abs > 1e-9:
@@ -557,7 +637,6 @@ class Neo4jReasoningRetriever:
                         "z":      coord[2],
                     })
                 else:
-                    # 無 embedding：原點附近隨機，來源標 results（預設）
                     rng = np.random.default_rng(abs(hash(name)) % (2**32))
                     nodes_out.append({
                         "id":     eid,
@@ -597,51 +676,6 @@ class Neo4jReasoningRetriever:
             self._global_layout_cache = result
             return result
 
-
-    # ----------------------------------------------------------
-    # Public: retrieve_foundations()
-    # ----------------------------------------------------------
-
-    def retrieve_foundations(
-        self,
-        start_eid: str,
-        max_depth: int = 3,
-    ) -> List[Dict[str, Any]]:
-        """走上游 BFS，找出每條上游路徑的 leaf concept（去重）。
-
-        leaf concept 定義：在上游方向沒有更上游 concept 的節點，
-        或已達 max_depth 的路徑終點。
-
-        Returns
-        -------
-        List of {"element_id": str, "label": str}，已去重。
-        """
-        with self.driver.session() as session:
-            raw_paths = session.execute_read(
-                self._walk_upstream, start_eid, max_depth
-            )
-
-        seen_eids: set = set()
-        foundations: List[Dict[str, Any]] = []
-
-        for path in raw_paths:
-            steps = path.get("steps") or []
-            if not steps:
-                continue
-            # 上游路徑的 leaf 是第一個 step 的 from_concept
-            # （_walk_upstream 以 [new_step] + steps 的方式 prepend，
-            #   所以 steps[0]["from_concept"] 是最末端上游）
-            leaf = steps[0]["from_concept"]
-            eid  = leaf["element_id"]
-            if eid not in seen_eids:
-                seen_eids.add(eid)
-                foundations.append({
-                    "element_id": eid,
-                    "label":      leaf.get("name") or eid,
-                })
-
-        return foundations
-
     # ----------------------------------------------------------
     # Public: retrieve_graph()  — 下游 BFS only
     # ----------------------------------------------------------
@@ -655,26 +689,6 @@ class Neo4jReasoningRetriever:
         """以 element_id 展開下游 BFS，回傳 D3 渲染用結構。
 
         上游資訊改由 retrieve_foundations() 負責，此方法不再走上游。
-
-        支援：
-          A 類圖：(s)-[:REASONING]->(t)
-          B 類圖：s -[:INSPIRES|INDIRECT_INSPIRES|REASONING]-> Paper -[:PRODUCES]-> t
-
-        Parameters
-        ----------
-        start_eid       : Neo4j elementId，由 retrieve_candidates 取得。
-        rc_name         : 僅作 label 用。
-        max_depth_down  : 下游 BFS 最大深度（預設 8）。
-
-        Returns
-        -------
-        {
-          "query_concepts": [{"id", "name", "type", "score"}],
-          "nodes":  [...],
-          "edges":  [...],
-          "paths":  [...],   # 全為 direction="downstream"
-          "foundations": [], # 由 _expand_all_graphs 填入，此處為空
-        }
         """
         nodes_map: Dict[str, dict] = {}
         edges_map: Dict[str, dict] = {}
@@ -704,7 +718,6 @@ class Neo4jReasoningRetriever:
             else:
                 effective_eid = None
 
-            # ── 下游 BFS ──────────────────────────────────────
             if effective_eid:
                 raw_down = session.execute_read(
                     self._walk_downstream, effective_eid, max_depth_down
@@ -718,7 +731,6 @@ class Neo4jReasoningRetriever:
                 self._integrate_path(raw, nodes_map, edges_map, all_paths,
                                      direction="downstream")
 
-        # 去重（相同 node_ids 序列視為同一條路徑）
         seen_sigs: set = set()
         unique_paths: List[dict] = []
         for p in all_paths:
@@ -740,7 +752,8 @@ class Neo4jReasoningRetriever:
             "nodes":       list(nodes_map.values()),
             "edges":       list(edges_map.values()),
             "paths":       unique_paths,
-            "foundations": [],  # 由 _expand_all_graphs 呼叫 retrieve_foundations 後填入
+            "foundations": [],       # filled by _expand_all_graphs → retrieve_foundations
+            "foundation_tree": {"nodes": [], "edges": []},  # idem
         }
 
     def _enrich_nodes_with_analysis_types(
@@ -764,7 +777,7 @@ class Neo4jReasoningRetriever:
     @staticmethod
     def project_concepts_only(graph_data: Dict[str, Any]) -> Dict[str, Any]:
         """將完整 graph_data 投影為只含 concept 節點與 concept-to-concept 邊。
-        foundations 欄位直接透傳。
+        foundations 與 foundation_tree 欄位直接透傳。
         """
         nodes_map  = {n["id"]: n for n in graph_data.get("nodes", [])}
         concept_ids = {
@@ -843,7 +856,8 @@ class Neo4jReasoningRetriever:
             "edges":            list(proj_edges.values()),
             "paths":            proj_paths,
             "selected_path_id": graph_data.get("selected_path_id"),
-            "foundations":      graph_data.get("foundations", []),  # 直接透傳
+            "foundations":      graph_data.get("foundations", []),
+            "foundation_tree":  graph_data.get("foundation_tree", {"nodes": [], "edges": []}),
         }
 
     # ----------------------------------------------------------
@@ -1127,7 +1141,7 @@ class Neo4jReasoningRetriever:
     def _walk_upstream(tx, start_eid: str,
                        max_depth: int = 3) -> List[Dict[str, Any]]:
         """走上游 BFS，回傳所有完整路徑（含 steps）。
-        retrieve_foundations 從中提取各路徑的 leaf concept。
+        retrieve_foundations 從中提取各路徑的 leaf concept 及所有中間節點。
         """
         rec0 = tx.run(
             """

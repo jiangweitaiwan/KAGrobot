@@ -33,7 +33,7 @@ from core.socrates_bot import (
 )
 from neo4jreasoningretriever import Neo4jReasoningRetriever
 from core.main_agent import MainAgent
-from core.skill_loader import SkillLoader                          # ← 新增
+from core.skill_loader import SkillLoader
 
 
 # ======================================================================
@@ -82,22 +82,20 @@ shared_main_agent = MainAgent(
 
 shared_skill_loader = SkillLoader(
     bucket_name=s.skills_bucket_name,
-    gcs_prefix="skills" # GCS 裡的資料夾路徑
+    gcs_prefix="skills"
 )
 
 import os as _os
 from pathlib import Path as _Path
- 
-# PKL 路徑：優先環境變數，fallback 到同目錄下的 results_dict.pkl
+
 _PKL_PATH = _os.environ.get(
     "RESULTS_PKL_PATH",
     str(_Path(__file__).resolve().parent / "results_dict.pkl"),
 )
- 
-# 全局佈局快取（None = 尚未計算）
+
 _global_layout_cache: dict | None = None
- 
- 
+
+
 def _get_global_layout() -> dict:
     global _global_layout_cache
     if _global_layout_cache is None:
@@ -112,8 +110,6 @@ def _get_global_layout() -> dict:
             chapter_gcs_object_name="chapter_results_dict.pkl",
         )
     return _global_layout_cache
- 
-
 
 
 # ======================================================================
@@ -143,7 +139,6 @@ def _annotate_graph_with_default_path(
     graph_data: Dict[str, Any],
     rc_name:    str,
 ) -> Dict[str, Any]:
-    """在 graph_data 中找出第一條 downstream path 作為預設標記。"""
     downstream_paths = [
         p for p in graph_data.get("paths", [])
         if p.get("direction", "downstream") == "downstream"
@@ -172,7 +167,6 @@ def _score_paths_by_intent(
     graph_data:   Dict[str, Any],
     intent_types: List[str],
 ) -> Dict[str, Any]:
-    """對 graph_data 中每條 path 計算 intent_score，並依分數重新排序。"""
     if not intent_types or not graph_data:
         return graph_data
 
@@ -204,7 +198,6 @@ def _score_paths_by_intent(
 
 
 def _build_graph_context(all_graphs: Dict[int, Any]) -> str:
-    """將 all_graphs 序列化為 Socrates system prompt 用的文字。"""
     lines: List[str] = []
 
     for idx, g in sorted(all_graphs.items()):
@@ -311,7 +304,7 @@ async def _expand_all_graphs(
             return idx, None
 
         try:
-            raw_graph, foundations = await asyncio.gather(
+            raw_graph, foundations_data = await asyncio.gather(
                 asyncio.to_thread(
                     shared_retriever.retrieve_graph,
                     eid,
@@ -322,7 +315,9 @@ async def _expand_all_graphs(
                     eid,
                 ),
             )
-            raw_graph["foundations"] = foundations
+            # foundations_data is now {"final_foundations": [...], "foundation_tree": {...}}
+            raw_graph["foundations"]     = foundations_data["final_foundations"]
+            raw_graph["foundation_tree"] = foundations_data["foundation_tree"]
             trimmed = _trim_to_top_paths(raw_graph)
             return idx, trimmed
         except Exception as exc:
@@ -348,7 +343,6 @@ async def socratic_node(state: OrchestratorState) -> OrchestratorState:
 
     old_socrates_state = state.get("socrates_state") or SocratesChatBot.init_state()
 
-    # ── 情況 1：使用者確認 path ───────────────────────────────
     if selected_path_id is not None and current_phase == "concept_resolved":
         new_socrates_state = shared_socrates_bot.confirm_path(old_socrates_state)
         return OrchestratorState(
@@ -357,7 +351,6 @@ async def socratic_node(state: OrchestratorState) -> OrchestratorState:
             socrates_state = new_socrates_state,
         )
 
-    # ── 一般 Socrates 對話 ────────────────────────────────────
     graph_context = (
         state.get("graph_context")
         if current_phase == "concept_resolved"
@@ -373,7 +366,6 @@ async def socratic_node(state: OrchestratorState) -> OrchestratorState:
     inner_phase = new_socrates_state.get("phase")
     reply_text  = shared_socrates_bot.get_last_reply(new_socrates_state)
 
-    # retrieve_tool 被呼叫 → concept_resolved → 並行展開圖譜
     if inner_phase == ConversationPhase.CONCEPT_RESOLVED.value:
         candidates   = new_socrates_state.get("candidates") or []
         intent_types = new_socrates_state.get("intent_types") or []
@@ -420,13 +412,11 @@ async def main_agent_node(state: OrchestratorState) -> OrchestratorState:
         and selected_path_id != confirmed_path_id
     )
 
-    # ── 找出 selected_path（reselect 或初次進入都需要）──────────
     selected_path: Optional[Dict[str, Any]] = None
     if selected_path_id is not None:
         target_graph  = _find_graph_by_path_id(all_graphs or {}, selected_path_id)
         selected_path = _find_path_by_id(target_graph, selected_path_id)
 
-    # ── 根據 final_rc 載入對應 skill ──────────────────────────
     skill = None
     if selected_path:
         final_rc_name = selected_path.get("final_label") or ""
@@ -439,9 +429,7 @@ async def main_agent_node(state: OrchestratorState) -> OrchestratorState:
                 print(f"[main_agent_node] no skill found for rc='{final_rc_name}', "
                       f"using fallback")
 
-    # ── 組裝 user_msg 與 history ─────────────────────────────
     if is_reselect:
-        # 任務脈絡已由 skill system prompt 承載，user_msg 只需帶入原始 query
         user_msg = socrates_state.get("query") or "請開始執行分析。"
         history: List[BaseMessage] = []
         path_label    = (selected_path or {}).get("final_label") or f"路徑 {selected_path_id}"
@@ -461,7 +449,7 @@ async def main_agent_node(state: OrchestratorState) -> OrchestratorState:
         user_msg,
         socrates_state,
         history,
-        skill=skill,                                          # ← 注入 skill
+        skill=skill,
     )
 
     output_messages: List[BaseMessage] = []
@@ -543,13 +531,12 @@ class ChatResponse(BaseModel):
     phase:          str
     socrates_phase: Optional[str]            = None
     all_graphs:     Optional[Dict[int, Any]] = None
-    skill_used:     Optional[str]            = None   # ← 新增：回傳給前端的 skill 資訊
+    skill_used:     Optional[str]            = None
 
 
 class GlobalLayoutResponse(BaseModel):
     nodes: list[dict]
     edges: list[dict]
- 
 
 
 api = FastAPI()
@@ -609,18 +596,14 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
         phase          = result.get("phase", initial_phase),
         socrates_phase = socrates_phase,
         all_graphs     = all_graphs_out,
-        skill_used     = result.get("skill_used"),            # ← 新增
+        skill_used     = result.get("skill_used"),
     )
+
 
 @api.get("/graph/global-layout", response_model=GlobalLayoutResponse)
 async def global_layout_endpoint() -> GlobalLayoutResponse:
-    """
-    回傳全局知識圖譜佈局（PCA 3D 座標）。
-    第一次呼叫會計算並快取，後續直接回傳快取結果。
-    """
     layout = await asyncio.to_thread(_get_global_layout)
     return GlobalLayoutResponse(
         nodes=layout["nodes"],
         edges=layout["edges"],
     )
- 

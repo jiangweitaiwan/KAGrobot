@@ -4,10 +4,15 @@
  * GlobalBrain.tsx — 全局知識圖譜 3D 密度雲視覺化
  *
  * 顏色語意：
- *   results  來源 → 亮橘色  (#ff6010 / #7a2800)
- *   chapter  來源 → 亮紫色  (#c060ff / #5a1a9a)
- *   active candidate → 青綠 #00d4aa
- *   active path      → 藍   #4f8ef7
+ *   results RC    → 橘色圓形粒子  (#ff6010)
+ *   results other → 橘色菱形粒子  (#c04808, 較暗但形狀區別)
+ *   chapter RC    → 紫色圓形粒子  (#c060ff)
+ *   chapter other → 紫色菱形粒子  (#8030c0)
+ *
+ * 激活邏輯（selected path）：
+ *   foundation_tree nodes/edges → 青綠線段（上游樹枝）
+ *   candidate node              → 青綠光暈
+ *   path node/edges             → 藍色線段（下游路徑）
  */
 
 import { useEffect, useRef, useMemo } from "react";
@@ -17,7 +22,7 @@ import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 
 // ─────────────────────────────────────────────────────────────
-// Types
+// Exported types
 // ─────────────────────────────────────────────────────────────
 
 export type GlobalLayoutNode = {
@@ -40,12 +45,19 @@ export type GlobalLayout = {
   edges: GlobalLayoutEdge[];
 };
 
+export type FoundationTree = {
+  nodes: { element_id: string; label: string }[];
+  edges: { source: string; target: string }[];
+};
+
 type Props = {
-  layout:              GlobalLayout | null;
-  activeCandidateEids: string[];
-  activePathEids:      string[];
-  width?:              number;
-  height?:             number;
+  layout:               GlobalLayout | null;
+  activeCandidateEids:  string[];
+  activePathNodeEids:   string[];
+  activePathEdges:      { source: string; target: string }[];
+  activeFoundationTree: FoundationTree;
+  width?:               number;
+  height?:              number;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -53,33 +65,30 @@ type Props = {
 // ─────────────────────────────────────────────────────────────
 
 const C = {
-  bg:               0x000000,
-  bg_css:           "#000000",
+  bg:     0x000000,
+  bg_css: "#000000",
 
-  // results 來源：亮橘
+  // results RC → 橘色圓形
   cloud_results_rc:    new THREE.Color(0xff6010),
-  cloud_results_other: new THREE.Color(0x7a2800),
+  // results other → 較暗橘，菱形
+  cloud_results_other: new THREE.Color(0xb03800),
 
-  // chapter 來源：亮紫
+  // chapter RC → 紫色圓形
   cloud_chapter_rc:    new THREE.Color(0xc060ff),
-  cloud_chapter_other: new THREE.Color(0x5a1a9a),
+  // chapter other → 較暗紫，菱形
+  cloud_chapter_other: new THREE.Color(0x7020b0),
 
   // 激活色
-  active_candidate: new THREE.Color(0x00d4aa),
-  active_path: [
-    new THREE.Color(0x4f8ef7),
-    new THREE.Color(0x00d4aa),
-    new THREE.Color(0xe8a030),
-    new THREE.Color(0xe85d60),
-    new THREE.Color(0xa060f0),
-  ],
+  active_candidate:   new THREE.Color(0x00d4aa),
+  active_path:        new THREE.Color(0x4f8ef7),
+  active_foundation:  new THREE.Color(0x00d4aa),
 
   bloom_strength:  2.4,
   bloom_radius:    0.5,
   bloom_threshold: 0.20,
 };
 
-// 密度雲參數（×10 vs 原始）
+// 密度雲參數
 const CLOUD = {
   particles_per_rc:    600,
   particles_per_other: 200,
@@ -91,12 +100,8 @@ const CLOUD = {
 
 const BG_PARTICLE_COUNT = 8000;
 const BG_SPREAD         = 3.5;
-
-const PATH_PARTICLE_COUNT = 180;
-const PATH_PARTICLE_SPEED = 0.0018;
-
-const WORLD_SCALE     = 2.2;
-const PROXY_THRESHOLD = 0.12;
+const WORLD_SCALE       = 2.2;
+const PROXY_THRESHOLD   = 0.12;
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
@@ -132,12 +137,14 @@ function seededRand(seed: number): () => number {
 
 // ─────────────────────────────────────────────────────────────
 // Build density cloud geometry
+// isRC flag stored as attribute for shape shader
 // ─────────────────────────────────────────────────────────────
 
 function buildDensityCloud(nodes: GlobalLayoutNode[]): {
   positions: Float32Array;
   colors:    Float32Array;
   sizes:     Float32Array;
+  isRCArr:   Float32Array;
   nodeIndex: Int32Array;
 } {
   const totalParticles = nodes.reduce(
@@ -148,6 +155,7 @@ function buildDensityCloud(nodes: GlobalLayoutNode[]): {
   const positions = new Float32Array(totalParticles * 3);
   const colors    = new Float32Array(totalParticles * 3);
   const sizes     = new Float32Array(totalParticles);
+  const isRCArr   = new Float32Array(totalParticles);
   const nodeIndex = new Int32Array(totalParticles);
 
   let ptr = 0;
@@ -175,16 +183,17 @@ function buildDensityCloud(nodes: GlobalLayoutNode[]): {
       colors[ptr * 3 + 2] = baseColor.b;
 
       sizes[ptr]     = baseSize * (0.5 + rand() * 0.8);
+      isRCArr[ptr]   = rc ? 1.0 : 0.0;
       nodeIndex[ptr] = ni;
       ptr++;
     }
   });
 
-  return { positions, colors, sizes, nodeIndex };
+  return { positions, colors, sizes, isRCArr, nodeIndex };
 }
 
 // ─────────────────────────────────────────────────────────────
-// Build background particle geometry（純黑背景用，極稀疏）
+// Build background particle geometry
 // ─────────────────────────────────────────────────────────────
 
 function buildBgParticles(): Float32Array {
@@ -199,13 +208,37 @@ function buildBgParticles(): Float32Array {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Build LineSegments geometry from a list of {source,target} EID pairs
+// Returns null if no valid pairs found
+// ─────────────────────────────────────────────────────────────
+
+function buildLineSegments(
+  edges: { source: string; target: string }[],
+  nodeById: Map<string, GlobalLayoutNode>,
+): Float32Array | null {
+  const pts: number[] = [];
+  for (const e of edges) {
+    const src = nodeById.get(e.source);
+    const tgt = nodeById.get(e.target);
+    if (!src || !tgt) continue;
+    const s = nodeToWorld(src);
+    const t = nodeToWorld(tgt);
+    pts.push(s.x, s.y, s.z, t.x, t.y, t.z);
+  }
+  if (pts.length === 0) return null;
+  return new Float32Array(pts);
+}
+
+// ─────────────────────────────────────────────────────────────
 // GlobalBrain component
 // ─────────────────────────────────────────────────────────────
 
 export default function GlobalBrain({
   layout,
   activeCandidateEids,
-  activePathEids,
+  activePathNodeEids,
+  activePathEdges,
+  activeFoundationTree,
   width  = 480,
   height = 480,
 }: Props) {
@@ -218,18 +251,24 @@ export default function GlobalBrain({
   const cameraRef     = useRef<THREE.PerspectiveCamera | null>(null);
   const cloudMeshRef  = useRef<THREE.Points | null>(null);
   const glowGroupRef  = useRef<THREE.Group | null>(null);
-  const pathLineRef   = useRef<THREE.LineSegments | null>(null);
-  const pathParticles = useRef<THREE.Points | null>(null);
-  const pathProgress  = useRef<Float32Array | null>(null);
-  const pathCurve     = useRef<THREE.CatmullRomCurve3 | null>(null);
   const animFrameRef  = useRef<number>(0);
   const isDragging    = useRef(false);
   const prevMouse     = useRef({ x: 0, y: 0 });
   const rotGroup      = useRef<THREE.Group | null>(null);
 
+  // Line segment refs (updated on activation)
+  const foundationLinesRef = useRef<THREE.LineSegments | null>(null);
+  const pathLinesRef       = useRef<THREE.LineSegments | null>(null);
+
   const proxyMeshesRef = useRef<THREE.Mesh[]>([]);
   const raycasterRef   = useRef<THREE.Raycaster | null>(null);
   const mouseNDCRef    = useRef(new THREE.Vector2(-9999, -9999));
+
+  // nodeById map built once per layout
+  const nodeById = useMemo(() => {
+    if (!layout) return new Map<string, GlobalLayoutNode>();
+    return new Map(layout.nodes.map((n) => [n.id, n]));
+  }, [layout]);
 
   const nodeIdxMap = useMemo(() => {
     if (!layout) return new Map<string, number>();
@@ -272,7 +311,7 @@ export default function GlobalBrain({
     composer.addPass(bloomPass);
     composerRef.current = composer;
 
-    // 背景粒子（純黑背景，非常稀疏的暗星點）
+    // ── 背景粒子 ──────────────────────────────────────────
     const bgPos = buildBgParticles();
     const bgGeo = new THREE.BufferGeometry();
     bgGeo.setAttribute("position", new THREE.BufferAttribute(bgPos, 3));
@@ -285,34 +324,49 @@ export default function GlobalBrain({
     });
     scene.add(new THREE.Points(bgGeo, bgMat));
 
-    // 密度雲
-    const { positions, colors, sizes, nodeIndex } = buildDensityCloud(layout.nodes);
+    // ── 密度雲（RC=圓形, other=菱形，via shader）─────────
+    const { positions, colors, sizes, isRCArr, nodeIndex } = buildDensityCloud(layout.nodes);
     const cloudGeo = new THREE.BufferGeometry();
     cloudGeo.setAttribute("position",  new THREE.BufferAttribute(positions.slice(), 3));
     cloudGeo.setAttribute("color",     new THREE.BufferAttribute(colors.slice(),    3));
     cloudGeo.setAttribute("size",      new THREE.BufferAttribute(sizes.slice(),     1));
+    cloudGeo.setAttribute("isRC",      new THREE.BufferAttribute(isRCArr.slice(),   1));
     cloudGeo.setAttribute("nodeIndex", new THREE.BufferAttribute(nodeIndex,         1));
 
     const cloudMat = new THREE.ShaderMaterial({
       uniforms: { uTime: { value: 0 } },
       vertexShader: /* glsl */`
         attribute float size;
-        attribute vec3 color;
-        varying vec3 vColor;
+        attribute vec3  color;
+        attribute float isRC;
+        varying vec3    vColor;
+        varying float   vIsRC;
         void main() {
           vColor = color;
+          vIsRC  = isRC;
           vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
           gl_PointSize = size * (300.0 / -mvPosition.z);
           gl_Position  = projectionMatrix * mvPosition;
         }
       `,
       fragmentShader: /* glsl */`
-        varying vec3 vColor;
+        varying vec3  vColor;
+        varying float vIsRC;
         void main() {
-          float d = length(gl_PointCoord - vec2(0.5));
-          if (d > 0.5) discard;
-          float alpha = smoothstep(0.5, 0.1, d);
-          gl_FragColor = vec4(vColor, alpha * 0.85);
+          vec2 uv = gl_PointCoord - vec2(0.5);
+          float alpha;
+          if (vIsRC > 0.5) {
+            /* RC: soft circle */
+            float d = length(uv);
+            if (d > 0.5) discard;
+            alpha = smoothstep(0.5, 0.1, d) * 0.85;
+          } else {
+            /* other: diamond (rotated square) */
+            float d = abs(uv.x) + abs(uv.y);
+            if (d > 0.48) discard;
+            alpha = smoothstep(0.48, 0.12, d) * 0.70;
+          }
+          gl_FragColor = vec4(vColor, alpha);
         }
       `,
       transparent: true,
@@ -326,44 +380,40 @@ export default function GlobalBrain({
     rg.add(cloudMesh);
     cloudMeshRef.current = cloudMesh;
 
-    // 激活光暈群組
+    // ── 激活光暈群組 ──────────────────────────────────────
     const glowGroup = new THREE.Group();
     rg.add(glowGroup);
     glowGroupRef.current = glowGroup;
 
-    // 路徑線段
-    const pathLineGeo = new THREE.BufferGeometry();
-    const pathLineMat = new THREE.LineBasicMaterial({
-      color:       0x4f8ef7,
+    // ── Foundation tree lines（初始不可見）────────────────
+    const ftGeo = new THREE.BufferGeometry();
+    ftGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(0), 3));
+    const ftMat = new THREE.LineBasicMaterial({
+      color:       C.active_foundation,
       transparent: true,
       opacity:     0.0,
       depthWrite:  false,
       blending:    THREE.AdditiveBlending,
     });
-    const pathLine = new THREE.LineSegments(pathLineGeo, pathLineMat);
-    rg.add(pathLine);
-    pathLineRef.current = pathLine;
+    const ftLines = new THREE.LineSegments(ftGeo, ftMat);
+    rg.add(ftLines);
+    foundationLinesRef.current = ftLines;
 
-    // 路徑粒子流
-    const ppGeo = new THREE.BufferGeometry();
-    const ppPos = new Float32Array(PATH_PARTICLE_COUNT * 3);
-    ppGeo.setAttribute("position", new THREE.BufferAttribute(ppPos, 3));
-    const ppMat = new THREE.PointsMaterial({
-      color:       0x4f8ef7,
-      size:        0.025,
+    // ── Path lines（初始不可見）───────────────────────────
+    const plGeo = new THREE.BufferGeometry();
+    plGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(0), 3));
+    const plMat = new THREE.LineBasicMaterial({
+      color:       C.active_path,
       transparent: true,
       opacity:     0.0,
       depthWrite:  false,
       blending:    THREE.AdditiveBlending,
     });
-    const ppPoints = new THREE.Points(ppGeo, ppMat);
-    rg.add(ppPoints);
-    pathParticles.current = ppPoints;
-    pathProgress.current  = new Float32Array(PATH_PARTICLE_COUNT).map(
-      (_, i) => i / PATH_PARTICLE_COUNT,
-    );
+    const plLines = new THREE.LineSegments(plGeo, plMat);
+    rg.add(plLines);
+    pathLinesRef.current = plLines;
 
-    // 不可見代理 Mesh（Raycasting）
+    // ── 不可見代理 Mesh（Raycasting）─────────────────────
     const proxyGeo = new THREE.SphereGeometry(PROXY_THRESHOLD, 6, 6);
     const proxyMat = new THREE.MeshBasicMaterial({ visible: false, transparent: true, opacity: 0 });
     const proxies: THREE.Mesh[] = [];
@@ -377,9 +427,9 @@ export default function GlobalBrain({
     proxyMeshesRef.current = proxies;
 
     raycasterRef.current = new THREE.Raycaster();
-
     scene.add(new THREE.AmbientLight(0x110800, 2));
 
+    // ── Animation loop ─────────────────────────────────────
     let frameCount = 0;
     function animate() {
       animFrameRef.current = requestAnimationFrame(animate);
@@ -390,25 +440,7 @@ export default function GlobalBrain({
         rotGroup.current.rotation.x += 0.0002;
       }
 
-      if (
-        pathCurve.current &&
-        pathParticles.current &&
-        pathProgress.current &&
-        (pathParticles.current.material as THREE.PointsMaterial).opacity > 0
-      ) {
-        const ppPositions = (
-          pathParticles.current.geometry.attributes.position as THREE.BufferAttribute
-        ).array as Float32Array;
-        for (let i = 0; i < PATH_PARTICLE_COUNT; i++) {
-          pathProgress.current[i] = (pathProgress.current[i] + PATH_PARTICLE_SPEED) % 1.0;
-          const pt = pathCurve.current.getPoint(pathProgress.current[i]);
-          ppPositions[i * 3 + 0] = pt.x;
-          ppPositions[i * 3 + 1] = pt.y;
-          ppPositions[i * 3 + 2] = pt.z;
-        }
-        (pathParticles.current.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
-      }
-
+      // Pulse glow sprites
       if (frameCount % 2 === 0 && glowGroupRef.current) {
         const t = frameCount * 0.02;
         const pulse = 0.85 + 0.15 * Math.sin(t);
@@ -419,6 +451,7 @@ export default function GlobalBrain({
         });
       }
 
+      // Tooltip raycasting
       if (
         !isDragging.current &&
         layout &&
@@ -443,7 +476,7 @@ export default function GlobalBrain({
     }
     animate();
 
-    // 滑鼠 / 觸控事件
+    // ── Mouse / touch events ──────────────────────────────
     const canvas = canvasRef.current;
 
     function updateNDC(clientX: number, clientY: number) {
@@ -476,7 +509,6 @@ export default function GlobalBrain({
     function onTouchStart(e: TouchEvent) {
       isDragging.current = true;
       prevMouse.current  = { x: e.touches[0].clientX, y: e.touches[0].clientY };
-      if (tooltipRef.current) tooltipRef.current.style.opacity = "0";
     }
     function onTouchMove(e: TouchEvent) {
       if (!isDragging.current || !rotGroup.current) return;
@@ -510,7 +542,7 @@ export default function GlobalBrain({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layout, width, height]);
 
-  // ── 激活 candidate 節點 ──────────────────────────────────
+  // ── 激活 candidate 節點（雲端著色 + 光暈）────────────────
   useEffect(() => {
     if (!cloudMeshRef.current || !layout || !glowGroupRef.current) return;
 
@@ -542,6 +574,7 @@ export default function GlobalBrain({
     glowGroup.clear();
     if (activeIdxSet.size === 0) return;
 
+    // Build glow texture
     const canvas2d = document.createElement("canvas");
     canvas2d.width = canvas2d.height = 64;
     const ctx  = canvas2d.getContext("2d")!;
@@ -572,60 +605,141 @@ export default function GlobalBrain({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeCandidateEids, layout, nodeIdxMap]);
 
-  // ── 激活 path 路徑（含 foundations）─────────────────────
+  // ── Foundation tree lines ─────────────────────────────────
   useEffect(() => {
-    if (!layout || !pathLineRef.current || !pathParticles.current) return;
+    const lines = foundationLinesRef.current;
+    if (!lines || !layout) return;
+    const mat = lines.material as THREE.LineBasicMaterial;
 
-    const pathMat = pathLineRef.current.material as THREE.LineBasicMaterial;
-    const ppMat   = pathParticles.current.material as THREE.PointsMaterial;
-
-    if (activePathEids.length < 2) {
-      pathMat.opacity = 0;
-      ppMat.opacity   = 0;
-      pathCurve.current = null;
+    if (activeFoundationTree.edges.length === 0) {
+      mat.opacity = 0;
+      lines.geometry.setAttribute(
+        "position",
+        new THREE.BufferAttribute(new Float32Array(0), 3),
+      );
       return;
     }
 
-    const pathPoints: THREE.Vector3[] = [];
-    activePathEids.forEach((eid) => {
-      const ni = nodeIdxMap.get(eid);
-      if (ni !== undefined) pathPoints.push(nodeToWorld(layout.nodes[ni]));
-    });
-    if (pathPoints.length < 2) return;
+    // Build edge list from foundation_tree using element_id → globalLayout node lookup
+    // foundation_tree nodes have element_id; globalLayout nodes have id (same value)
+    const ftEdges = activeFoundationTree.edges.map((e) => ({
+      source: e.source,
+      target: e.target,
+    }));
 
-    const pathColor = C.active_path[0];
-    pathMat.color.copy(pathColor);
-    ppMat.color.copy(pathColor);
-
-    const linePositions: number[] = [];
-    for (let i = 0; i < pathPoints.length - 1; i++) {
-      linePositions.push(
-        pathPoints[i].x, pathPoints[i].y, pathPoints[i].z,
-        pathPoints[i + 1].x, pathPoints[i + 1].y, pathPoints[i + 1].z,
-      );
+    const posArr = buildLineSegments(ftEdges, nodeById);
+    if (!posArr) {
+      mat.opacity = 0;
+      return;
     }
-    const lineGeo = pathLineRef.current.geometry;
-    lineGeo.setAttribute(
-      "position",
-      new THREE.BufferAttribute(new Float32Array(linePositions), 3),
-    );
-    (lineGeo.attributes.position as THREE.BufferAttribute).needsUpdate = true;
-    pathMat.opacity = 0.70;
 
-    pathCurve.current = new THREE.CatmullRomCurve3(pathPoints, false, "catmullrom", 0.5);
-    if (pathProgress.current) {
-      for (let i = 0; i < PATH_PARTICLE_COUNT; i++) {
-        pathProgress.current[i] = i / PATH_PARTICLE_COUNT;
+    lines.geometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(posArr, 3),
+    );
+    (lines.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+    mat.color.copy(C.active_foundation);
+    mat.opacity = 0.65;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeFoundationTree, layout, nodeById]);
+
+  // ── Path lines ────────────────────────────────────────────
+  useEffect(() => {
+    const lines = pathLinesRef.current;
+    if (!lines || !layout) return;
+    const mat = lines.material as THREE.LineBasicMaterial;
+
+    if (activePathEdges.length === 0) {
+      mat.opacity = 0;
+      lines.geometry.setAttribute(
+        "position",
+        new THREE.BufferAttribute(new Float32Array(0), 3),
+      );
+      return;
+    }
+
+    const posArr = buildLineSegments(activePathEdges, nodeById);
+    if (!posArr) {
+      mat.opacity = 0;
+      return;
+    }
+
+    lines.geometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(posArr, 3),
+    );
+    (lines.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+    mat.color.copy(C.active_path);
+    mat.opacity = 0.75;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePathEdges, layout, nodeById]);
+
+  // ── Path node cloud highlight ─────────────────────────────
+  useEffect(() => {
+    if (!cloudMeshRef.current || !layout) return;
+
+    const geo        = cloudMeshRef.current.geometry;
+    const colorAttr  = geo.attributes.color as THREE.BufferAttribute;
+    const colorArr   = colorAttr.array as Float32Array;
+    const baseColors = cloudMeshRef.current.userData.baseColors as Float32Array;
+    const niArr      = cloudMeshRef.current.userData.nodeIndex as Int32Array;
+
+    // Reset to base
+    colorArr.set(baseColors);
+
+    // Re-apply candidate glow first
+    const candidateIdxSet = new Set(
+      activeCandidateEids
+        .map((eid) => nodeIdxMap.get(eid))
+        .filter((i): i is number => i !== undefined),
+    );
+    const ac = C.active_candidate;
+    for (let i = 0; i < niArr.length; i++) {
+      if (candidateIdxSet.has(niArr[i])) {
+        colorArr[i * 3 + 0] = ac.r * 1.8;
+        colorArr[i * 3 + 1] = ac.g * 1.8;
+        colorArr[i * 3 + 2] = ac.b * 1.8;
       }
     }
-    ppMat.opacity = 0.85;
-    ppMat.size    = 0.022;
+
+    // Apply path node highlight (blue)
+    const pathIdxSet = new Set(
+      activePathNodeEids
+        .map((eid) => nodeIdxMap.get(eid))
+        .filter((i): i is number => i !== undefined),
+    );
+    const ap = C.active_path;
+    for (let i = 0; i < niArr.length; i++) {
+      if (pathIdxSet.has(niArr[i])) {
+        colorArr[i * 3 + 0] = ap.r * 1.8;
+        colorArr[i * 3 + 1] = ap.g * 1.8;
+        colorArr[i * 3 + 2] = ap.b * 1.8;
+      }
+    }
+
+    // Apply foundation tree node highlight (teal, lighter)
+    const ftNodeSet = new Set(
+      (activeFoundationTree.nodes ?? [])
+        .map((n) => nodeIdxMap.get(n.element_id))
+        .filter((i): i is number => i !== undefined),
+    );
+    for (let i = 0; i < niArr.length; i++) {
+      if (ftNodeSet.has(niArr[i]) && !candidateIdxSet.has(niArr[i])) {
+        colorArr[i * 3 + 0] = ac.r * 1.2;
+        colorArr[i * 3 + 1] = ac.g * 1.2;
+        colorArr[i * 3 + 2] = ac.b * 1.2;
+      }
+    }
+
+    colorAttr.needsUpdate = true;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activePathEids, layout, nodeIdxMap]);
+  }, [activePathNodeEids, activeFoundationTree, activeCandidateEids, layout, nodeIdxMap]);
 
   // ─────────────────────────────────────────────────────────
   // Render
   // ─────────────────────────────────────────────────────────
+
+  const hasActiveSelection = activePathNodeEids.length > 0 || activeFoundationTree.edges.length > 0;
 
   return (
     <div
@@ -718,21 +832,41 @@ export default function GlobalBrain({
         pointerEvents: "none",
         userSelect:    "none",
       }}>
+        {/* results: circle */}
         <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-          <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#ff6010", display: "inline-block", boxShadow: "0 0 4px #ff6010" }} />
-          <span style={{ fontSize: "0.58rem", color: "#ff6010", fontFamily: "monospace", letterSpacing: "0.1em" }}>RESEARCH</span>
+          <svg width="9" height="9" viewBox="0 0 9 9">
+            <circle cx="4.5" cy="4.5" r="4" fill="#ff6010" />
+          </svg>
+          <span style={{ fontSize: "0.58rem", color: "#ff6010", fontFamily: "monospace", letterSpacing: "0.1em" }}>RESEARCH·RC</span>
         </div>
+        {/* results other: diamond */}
         <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-          <span style={{ width: 7, height: 7, borderRadius: "50%", background: "#c060ff", display: "inline-block", boxShadow: "0 0 4px #c060ff" }} />
-          <span style={{ fontSize: "0.58rem", color: "#c060ff", fontFamily: "monospace", letterSpacing: "0.1em" }}>TEXTBOOK</span>
+          <svg width="9" height="9" viewBox="0 0 9 9">
+            <polygon points="4.5,0.5 8.5,4.5 4.5,8.5 0.5,4.5" fill="#b03800" />
+          </svg>
+          <span style={{ fontSize: "0.58rem", color: "#b03800", fontFamily: "monospace", letterSpacing: "0.1em" }}>RESEARCH</span>
+        </div>
+        {/* chapter RC: circle purple */}
+        <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+          <svg width="9" height="9" viewBox="0 0 9 9">
+            <circle cx="4.5" cy="4.5" r="4" fill="#c060ff" />
+          </svg>
+          <span style={{ fontSize: "0.58rem", color: "#c060ff", fontFamily: "monospace", letterSpacing: "0.1em" }}>TEXTBOOK·RC</span>
+        </div>
+        {/* chapter other: diamond purple */}
+        <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+          <svg width="9" height="9" viewBox="0 0 9 9">
+            <polygon points="4.5,0.5 8.5,4.5 4.5,8.5 0.5,4.5" fill="#7020b0" />
+          </svg>
+          <span style={{ fontSize: "0.58rem", color: "#7020b0", fontFamily: "monospace", letterSpacing: "0.1em" }}>TEXTBOOK</span>
         </div>
       </div>
 
-      {/* 激活狀態 */}
+      {/* 激活候選狀態 */}
       {activeCandidateEids.length > 0 && (
         <div style={{
           position:      "absolute",
-          bottom:        10,
+          bottom:        hasActiveSelection ? 32 : 10,
           left:          12,
           fontSize:      "0.65rem",
           color:         "#00d4aa",
@@ -743,6 +877,7 @@ export default function GlobalBrain({
           display:       "flex",
           alignItems:    "center",
           gap:           "6px",
+          transition:    "bottom 0.2s ease",
         }}>
           <span style={{
             display:      "inline-block",
@@ -757,19 +892,30 @@ export default function GlobalBrain({
         </div>
       )}
 
-      {activePathEids.length > 0 && (
+      {/* 激活路徑狀態 */}
+      {hasActiveSelection && (
         <div style={{
           position:      "absolute",
           bottom:        10,
-          right:         12,
+          left:          12,
           fontSize:      "0.65rem",
           color:         "#4f8ef7",
           letterSpacing: "0.1em",
           fontFamily:    "monospace",
           pointerEvents: "none",
           userSelect:    "none",
+          display:       "flex",
+          alignItems:    "center",
+          gap:           "6px",
         }}>
-          ↝ path active
+          <span style={{
+            display:      "inline-block",
+            width:        20,
+            height:       1,
+            background:   "linear-gradient(90deg, #00d4aa, #4f8ef7)",
+            boxShadow:    "0 0 4px #4f8ef7",
+          }} />
+          path active
         </div>
       )}
 

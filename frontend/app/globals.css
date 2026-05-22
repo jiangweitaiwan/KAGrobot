@@ -15,23 +15,28 @@
 
 * { box-sizing: border-box; }
 
-body {
+html, body {
   margin: 0;
+  height: 100%;
+  overflow: hidden; /* prevent page scroll — everything scrolls internally */
+}
+
+body {
   font-family: "IBM Plex Mono", "Noto Sans TC", monospace;
   background: radial-gradient(ellipse at 50% 30%, #120a04, var(--bg) 65%);
   color: var(--text);
-  min-height: 100vh;
 }
 
 /* ── outer shell ──────────────────────────────────────────── */
 main {
   max-width: 1600px;
   margin: 0 auto;
-  min-height: 100vh;
+  height: 100vh;
   display: grid;
   grid-template-rows: auto 1fr;
   gap: 10px;
   padding: 16px 20px;
+  overflow: hidden;
 }
 
 /* ── header ───────────────────────────────────────────────── */
@@ -42,6 +47,7 @@ header {
   gap:             12px;
   padding-bottom:  10px;
   border-bottom:   1px solid rgba(232, 112, 48, 0.12);
+  flex-shrink: 0;
 }
 
 h1 {
@@ -79,27 +85,27 @@ button:hover:not(:disabled) {
 button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* ═══════════════════════════════════════════════════════════
-   THREE-COLUMN LAYOUT
+   THREE-COLUMN LAYOUT  (fixed height — each column scrolls)
    Left: chat  |  Centre: Brain  |  Right: KnowledgeGraph
    ═══════════════════════════════════════════════════════════ */
 
 .content-area {
   display:   grid;
-  /* chat柱固定260px，Brain自適應佔中間大空間，graph柱固定480px */
   grid-template-columns: 260px 1fr 480px;
   gap:       14px;
+  /* fill remaining viewport after header */
   min-height: 0;
-  height:    calc(100vh - 90px);
-  align-items: stretch;
+  overflow: hidden;
 }
 
-/* ── chat column（左側） ──────────────────────────────────── */
+/* ── chat column（左側）──────────────────────────────────── */
 .chat-column {
   display:        flex;
   flex-direction: column;
   gap:            10px;
   min-width:      0;
-  /* 降低存在感，作為輔助工具 */
+  min-height:     0;        /* allow flex child to shrink */
+  overflow:       hidden;
   opacity: 0.92;
 }
 
@@ -109,11 +115,12 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   padding:        14px;
   background:     rgba(13, 18, 32, 0.7);
   backdrop-filter: blur(8px);
-  overflow-y:     auto;
+  overflow-y:     auto;     /* only chat-box scrolls */
   display:        flex;
   flex-direction: column;
   gap:            10px;
-  flex:           1;
+  flex:           1;        /* fill available vertical space */
+  min-height:     0;        /* required for flex+overflow to work */
 }
 
 /* scrollbar */
@@ -143,6 +150,11 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .meta   { color: var(--muted); font-size: 0.72rem; margin-top: 3px; opacity: 0.6; }
 .status { color: var(--orange); font-size: 0.75rem; }
+
+/* input area — fixed at bottom of chat-column, no flex growth */
+.chat-input-area {
+  flex-shrink: 0;
+}
 
 form {
   display:               grid;
@@ -174,9 +186,10 @@ textarea:focus {
   justify-content: center;
   gap:            8px;
   position:       relative;
-  min-height:      0;        /* ← 新增：允許 flex 子元素縮小 */
-  overflow:        hidden;   /* ← 新增：防止超出父容器 */  
-  /* 橘色光暈背景 */
+  /* Fixed height — does NOT grow with chat */
+  height:         100%;
+  min-height:     0;
+  overflow:       hidden;
   background: radial-gradient(
     ellipse at 50% 50%,
     rgba(232, 112, 48, 0.04) 0%,
@@ -193,6 +206,7 @@ textarea:focus {
   text-transform: uppercase;
   font-family:    "IBM Plex Mono", monospace;
   text-align:     center;
+  flex-shrink:    0;
 }
 
 /* ── graph panel（右側） ──────────────────────────────────── */
@@ -206,7 +220,7 @@ textarea:focus {
   background:     rgba(13, 18, 32, 0.7);
   backdrop-filter: blur(8px);
   overflow:       hidden;
-  /* 降低存在感，作為輔助工具 */
+  min-height:     0;
   opacity: 0.92;
 }
 
@@ -264,6 +278,7 @@ textarea:focus {
   cursor:        pointer;
   transition:    background 0.2s, box-shadow 0.2s;
   letter-spacing: 0.04em;
+  flex-shrink:   0;
 }
 .confirm-btn:hover {
   background:  linear-gradient(135deg, rgba(20, 56, 120, 0.9), rgba(13, 90, 70, 0.9));
@@ -316,13 +331,11 @@ textarea:focus {
 }
 .foundation-chip::before { content: "◈"; font-size: 0.65rem; color: #6a5acd; }
 
-/* ── responsive fallback（小螢幕退回兩欄）──────────────────
-   < 1100px：graph 面板隱藏或折疊
-   ────────────────────────────────────────────────────────── */
+/* ── responsive fallback ─────────────────────────────────── */
 @media (max-width: 1100px) {
   .content-area {
     grid-template-columns: 1fr 1fr;
-    grid-template-rows: auto 1fr;
+    grid-template-rows: 360px 1fr;
   }
   .brain-panel {
     grid-column: 1 / -1;
@@ -331,14 +344,14 @@ textarea:focus {
 }
 
 @media (max-width: 720px) {
+  html, body { overflow: auto; }
+  main { height: auto; overflow: visible; }
   .content-area {
     grid-template-columns: 1fr;
     height: auto;
+    overflow: visible;
   }
-  .brain-panel {
-    height: 300px;
-  }
-  .graph-panel {
-    display: none;
-  }
+  .chat-box { min-height: 300px; max-height: 60vh; }
+  .brain-panel { height: 300px; }
+  .graph-panel { display: none; }
 }
