@@ -343,9 +343,13 @@ class Neo4jReasoningRetriever:
     def retrieve_foundations(
         self,
         start_eid: str,
-        max_depth: int = 3,
+        max_depth: int = 10,
+        max_branches: int = 4,
     ) -> Dict[str, Any]:
-        """走上游 BFS（max_depth=3），回傳兩份資料：
+        """走上游 BFS（max_depth=3），回傳兩份資料。
+        
+        以 _select_diverse_deep_paths() 選出兼顧深度與多樣性的
+        top max_branches 條路徑，再從中組裝結果。
 
         - final_foundations : 每條路徑最末端 leaf（給 KnowledgeGraph diamond 節點）
         - foundation_tree   : 所有上游中間節點 + 邊（給 GlobalBrain 樹狀線段）
@@ -365,13 +369,15 @@ class Neo4jReasoningRetriever:
                 self._walk_upstream, start_eid, max_depth
             )
 
+       # ── 選出兼顧深度與多樣性的路徑 ──────────────────────
+        selected_paths = _select_diverse_deep_paths(raw_paths, max_branches)
+
         seen_leaf_eids: set = set()
         final_foundations: List[Dict[str, Any]] = []
-
         tree_nodes: Dict[str, Dict[str, Any]] = {}
         tree_edges: Dict[str, Dict[str, Any]] = {}
 
-        for path in raw_paths:
+        for path in selected_paths:
             steps = path.get("steps") or []
             if not steps:
                 continue
@@ -1262,9 +1268,106 @@ class Neo4jReasoningRetriever:
                            type=rc.get("type"))
 
 
+
+
+
+
+
+
 # ----------------------------------------------------------------
 # Module-level helper
 # ----------------------------------------------------------------
+
+
+# ----------------------------------------------------------------
+# Foundation path selection — 可獨立替換的選路模組
+# ----------------------------------------------------------------
+
+def _path_node_set(path: Dict[str, Any]) -> set:
+    """提取一條 foundation path 中所有 concept element_id 的集合。"""
+    nodes: set = set()
+    for step in path.get("steps", []):
+        fc = step.get("from_concept")
+        tc = step.get("to_concept")
+        if fc:
+            nodes.add(fc["element_id"])
+        if tc:
+            nodes.add(tc["element_id"])
+    return nodes
+
+
+def _jaccard_distance(set_a: set, set_b: set) -> float:
+    """兩個集合的 Jaccard distance（越大代表越不重疊）。"""
+    union = len(set_a | set_b)
+    if union == 0:
+        return 0.0
+    return 1.0 - len(set_a & set_b) / union
+
+
+def _select_diverse_deep_paths(
+    paths: List[Dict[str, Any]],
+    max_branches: int = 3,
+) -> List[Dict[str, Any]]:
+    """從 foundation raw_paths 中選出兼顧深度與多樣性的 top-N 條路徑。
+
+    演算法：
+      1. 以路徑步數的中位數為深度門檻，過濾太短的路徑。
+      2. 貪婪選取：第一條取最深的；後續每輪選與已選路徑
+         node set 的最小 Jaccard distance 最大的那條
+         （即「與現有選擇最不重疊」）。
+
+    若過濾後候選為空，fallback 到全部路徑再跑一次。
+    若 paths 為空，回傳空列表。
+
+    替換此函數即可切換選路策略，不需動 retrieve_foundations()。
+    """
+    if not paths:
+        return []
+
+    if max_branches <= 0:
+        return []
+
+    # ── 1. 裝飾：計算每條路徑的深度與 node set ──────────────
+    decorated = [
+        {
+            "path":     p,
+            "depth":    len(p.get("steps", [])),
+            "node_set": _path_node_set(p),
+        }
+        for p in paths
+    ]
+
+    # ── 2. 深度門檻（中位數）────────────────────────────────
+    depths   = sorted(d["depth"] for d in decorated)
+    median   = depths[len(depths) // 2]
+    candidates = [d for d in decorated if d["depth"] >= median]
+
+    # fallback：若全被過濾（理論上不會，但防呆）
+    if not candidates:
+        candidates = list(decorated)
+
+    # ── 3. 貪婪選取 ──────────────────────────────────────────
+    candidates.sort(key=lambda d: d["depth"], reverse=True)
+
+    selected:            List[Dict[str, Any]] = [candidates[0]]
+    selected_node_sets:  List[set]            = [candidates[0]["node_set"]]
+    remaining = candidates[1:]
+
+    while len(selected) < max_branches and remaining:
+        # 對每條候選算它與所有已選路徑的最小 Jaccard distance
+        def _min_dist(d: Dict[str, Any]) -> float:
+            return min(
+                _jaccard_distance(d["node_set"], s)
+                for s in selected_node_sets
+            )
+
+        remaining.sort(key=_min_dist, reverse=True)
+        best = remaining.pop(0)
+        selected.append(best)
+        selected_node_sets.append(best["node_set"])
+
+    return [d["path"] for d in selected]
+
 
 def _fallback_paper(tx, eid: str) -> Optional[dict]:
     rec = tx.run(
