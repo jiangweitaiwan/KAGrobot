@@ -2,7 +2,7 @@ name: Auto Deploy Backend
 
 on:
   push:
-    branches: [ "main", "KAGrobot/v2" ]
+    branches: [ "main", "KAGrobot/v2", "KAGrobot/v3" ]
     paths:
       - 'backend/**'
   workflow_dispatch:

@@ -1,19 +1,27 @@
-"""
-core/registry.py
-─────────────────────────────────────────────────────────────
-全域 Registry：AgentType、AGENTS_REGISTRY、TOOLS_REGISTRY、CONCEPT_TO_AGENT。
+# -*- coding: utf-8 -*-
+"""core/registry.py — 全域 Registry 與工具解析函數。
 
-新增工具時的對應步驟：
+AgentType           : Agent 類型枚舉
+AGENTS_REGISTRY     : AgentType → 工具清單
+TOOLS_REGISTRY      : tool_name → 工具元描述
+CONCEPT_TO_AGENT    : Resulting Concept 名稱 → AgentType
+
+工具解析函數（從 socrates_bot.py 遷移）：
+    collect_tools_with_deps()      : 遞迴展開工具依賴
+    resolve_agent_type()           : concept 名稱 → AgentType
+    resolve_tools_from_candidates(): 候選清單 → (tools, parameters)
+
+新增工具時的步驟：
   1. 在 tools/ 下實作並完成 register_langchain_tool 或 @register_tool
-  2. 在本檔 TOOLS_REGISTRY 補充工具描述（parameters 供 prompt builder 使用）
-  3. 如需對應到新 AgentType，在 AGENTS_REGISTRY 加入條目
+  2. 在本檔 TOOLS_REGISTRY 補充工具描述
+  3. 如需對應新 AgentType，在 AGENTS_REGISTRY 加入條目
   4. 如需從 Resulting Concept 名稱自動路由，在 CONCEPT_TO_AGENT 加入映射
 """
 
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -21,15 +29,15 @@ from typing import Any, Dict, List
 # ═══════════════════════════════════════════════════════════════
 
 class AgentType(Enum):
-    GROWTH_SELECT          = "growth_select"
-    DCF                    = "dcf"
-    COORDINATOR            = "coordinator"
-    DSGE_ANALYSIS          = "dsge_analysis"
+    GROWTH_SELECT             = "growth_select"
+    DCF                       = "dcf"
+    COORDINATOR               = "coordinator"
+    DSGE_ANALYSIS             = "dsge_analysis"
     NK_BAYESIAN_DSGE_ANALYSIS = "nk_bayesian_dsge_analysis"
 
 
 # ═══════════════════════════════════════════════════════════════
-# CONCEPT_TO_AGENT — Resulting Concept 名稱 → AgentType
+# CONCEPT_TO_AGENT
 # ═══════════════════════════════════════════════════════════════
 
 CONCEPT_TO_AGENT: Dict[str, AgentType] = {
@@ -37,14 +45,13 @@ CONCEPT_TO_AGENT: Dict[str, AgentType] = {
     "growth stock selection": AgentType.GROWTH_SELECT,
     "dcf":                    AgentType.DCF,
     "discounted cash flow":   AgentType.DCF,
-    # DSGE 宏觀經濟分析
     "Extended New Keynesian DSGE Model with Bayesian Estimation":
         AgentType.NK_BAYESIAN_DSGE_ANALYSIS,
 }
 
 
 # ═══════════════════════════════════════════════════════════════
-# AGENTS_REGISTRY — AgentType → 該 agent 的工具清單
+# AGENTS_REGISTRY
 # ═══════════════════════════════════════════════════════════════
 
 AGENTS_REGISTRY: Dict[AgentType, Dict[str, Any]] = {
@@ -71,8 +78,7 @@ AGENTS_REGISTRY: Dict[AgentType, Dict[str, Any]] = {
 
 
 # ═══════════════════════════════════════════════════════════════
-# TOOLS_REGISTRY — tool_name → 工具元描述
-#   dependencies: 依賴的其他 tool name（會被遞迴展開）
+# TOOLS_REGISTRY
 # ═══════════════════════════════════════════════════════════════
 
 TOOLS_REGISTRY: Dict[str, Dict[str, Any]] = {
@@ -196,15 +202,15 @@ TOOLS_REGISTRY: Dict[str, Dict[str, Any]] = {
         "parameters": {
             "type": "object",
             "properties": {
-                "gdp_growth":    {"type": "number", "description": "實質 GDP 季成長率 (%)"},
-                "inflation":     {"type": "number", "description": "通貨膨脹率 (%)"},
-                "interest_rate": {"type": "number", "description": "政策利率 (%)"},
-                "investment":    {"type": "number", "description": "投資成長率 (%, 預設 2.0)"},
-                "wage_growth":   {"type": "number", "description": "薪資年增率 (%, 預設 3.0)"},
-                "employment":    {"type": "number", "description": "就業率 (%, 預設 96.0)"},
-                "consumption":   {"type": "number", "description": "消費成長率 (%, 預設 1.8)"},
-                "horizon":       {"type": "integer", "description": "預測期距（季），建議 4-16（預設 8）"},
-                "generate_chart":{"type": "boolean", "description": "是否生成圖表（預設 True）"},
+                "gdp_growth":     {"type": "number", "description": "實質 GDP 季成長率 (%)"},
+                "inflation":      {"type": "number", "description": "通貨膨脹率 (%)"},
+                "interest_rate":  {"type": "number", "description": "政策利率 (%)"},
+                "investment":     {"type": "number", "description": "投資成長率 (%, 預設 2.0)"},
+                "wage_growth":    {"type": "number", "description": "薪資年增率 (%, 預設 3.0)"},
+                "employment":     {"type": "number", "description": "就業率 (%, 預設 96.0)"},
+                "consumption":    {"type": "number", "description": "消費成長率 (%, 預設 1.8)"},
+                "horizon":        {"type": "integer", "description": "預測期距（季），建議 4-16（預設 8）"},
+                "generate_chart": {"type": "boolean", "description": "是否生成圖表（預設 True）"},
             },
             "required": ["gdp_growth", "inflation", "interest_rate"],
         },
@@ -268,3 +274,95 @@ TOOLS_REGISTRY: Dict[str, Dict[str, Any]] = {
         },
     },
 }
+
+
+# ═══════════════════════════════════════════════════════════════
+# 工具解析函數（從 socrates_bot.py 遷移）
+# ═══════════════════════════════════════════════════════════════
+
+def collect_tools_with_deps(tool_names: List[str]) -> List[str]:
+    """遞迴展開工具依賴，回傳依賴優先的有序清單。"""
+    visited: set       = set()
+    ordered: List[str] = []
+
+    def _walk(name: str) -> None:
+        if name in visited:
+            return
+        visited.add(name)
+        for dep in TOOLS_REGISTRY.get(name, {}).get("dependencies", []):
+            _walk(dep)
+        ordered.append(name)
+
+    for tn in tool_names:
+        _walk(tn)
+    return ordered
+
+
+def resolve_agent_type(
+    rc_name:          str,
+    concept_to_agent: Optional[Dict[str, AgentType]] = None,
+) -> Optional[AgentType]:
+    """從 Resulting Concept 名稱解析對應的 AgentType。
+
+    先做精確匹配，再做子字串模糊匹配。
+    """
+    mapping = concept_to_agent or CONCEPT_TO_AGENT
+    name    = rc_name.lower().strip()
+
+    if name in mapping:
+        return mapping[name]
+    for key, agent in mapping.items():
+        if key.lower().strip() in name or name in key.lower().strip():
+            return agent
+    return None
+
+
+def resolve_tools_from_candidates(
+    candidates:       List[dict],
+    concept_to_agent: Optional[Dict[str, AgentType]] = None,
+) -> Tuple[List[dict], List[dict]]:
+    """將候選清單解析為 (tools, parameters) 兩份清單。
+
+    Returns
+    -------
+    resolved_tools   : List[dict]  工具描述清單
+    resolved_params  : List[dict]  工具參數 schema 清單
+    """
+    seen_tools:     set        = set()
+    resolved_tools: List[dict] = []
+    resolved_params: List[dict] = []
+
+    for cand in candidates:
+        rc_name = cand.get("rc_name") or ""
+        agent_t = resolve_agent_type(rc_name, concept_to_agent)
+        if agent_t is None:
+            continue
+
+        base_tools = AGENTS_REGISTRY.get(agent_t, {}).get("tools", [])
+        all_tools  = collect_tools_with_deps(base_tools)
+
+        for tname in all_tools:
+            if tname in seen_tools:
+                continue
+            seen_tools.add(tname)
+
+            entry = TOOLS_REGISTRY.get(tname)
+            if entry is None:
+                continue
+
+            is_dep = tname not in base_tools
+            resolved_tools.append({
+                "tool_name":       tname,
+                "description":     entry["description"],
+                "skills":          entry["skills"],
+                "from_agent":      agent_t.value,
+                "matched_concept": rc_name,
+                "is_dependency":   is_dep,
+            })
+            if entry.get("parameters"):
+                resolved_params.append({
+                    "tool_name":  tname,
+                    "parameters": entry["parameters"],
+                })
+
+    return resolved_tools, resolved_params
