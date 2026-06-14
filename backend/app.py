@@ -46,7 +46,7 @@ from api.routes        import chat_router, graph_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     s        = get_settings()
-    base_dir = Path(__file__).resolve().parent.parent
+    base_dir = Path(__file__).resolve().parent
 
     # ── Neo4j driver ──────────────────────────────────────────
     driver = GraphDatabase.driver(

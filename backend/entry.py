@@ -2,7 +2,7 @@
 """entry.py — 服務啟動點。"""
 
 import uvicorn
-from api.app import create_app
+from app import create_app
 
 app = create_app()
 
