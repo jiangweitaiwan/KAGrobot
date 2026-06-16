@@ -50,10 +50,10 @@ class Settings(BaseSettings):
     )
 
     # --- LangSmith / LangChain tracing ---
-    langchain_tracing_v2: Optional[str] = Field(default=None, alias="LANGCHAIN_TRACING_V2")
-    langchain_endpoint: Optional[str] = Field(default=None, alias="LANGCHAIN_ENDPOINT")
+    langchain_tracing_v2: Optional[str] = Field(default="true", alias="LANGCHAIN_TRACING_V2")
+    langchain_endpoint: Optional[str] = Field(default="https://api.smith.langchain.com", alias="LANGCHAIN_ENDPOINT")
     langchain_api_key: Optional[str] = Field(default=None, alias="LANGCHAIN_API_KEY")
-    langchain_project: Optional[str] = Field(default=None, alias="LANGCHAIN_PROJECT")
+    langchain_project: Optional[str] = Field(default="main", alias="LANGCHAIN_PROJECT")
 
     # --- Optional external data ---
     fred_api_key: str = Field(default="", alias="FRED_API_KEY")
