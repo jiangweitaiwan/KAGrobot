@@ -20,3 +20,4 @@ onnxruntime>=1.18
 typing-extensions>=4.10
 fredapi>=0.5
 scikit-learn>=1.3
+google-cloud-firestore>=2.16.0

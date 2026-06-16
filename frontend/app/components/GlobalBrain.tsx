@@ -3,16 +3,14 @@
 /**
  * GlobalBrain.tsx — 全局知識圖譜 3D 密度雲視覺化
  *
- * 顏色語意：
- *   results RC    → 橘色圓形粒子  (#ff6010)
- *   results other → 橘色菱形粒子  (#c04808, 較暗但形狀區別)
- *   chapter RC    → 紫色圓形粒子  (#c060ff)
- *   chapter other → 紫色菱形粒子  (#8030c0)
+ * 顏色層次：
+ *   Layer 1 base    → 橘/紫粒子雲（恆定背景）
+ *   Layer 2 personal→ 紫色 fMRI 熱點疊加（依 weight 決定 sprite scale）
+ *   Layer 3 query   → 青綠光暈（每次查詢重置）
  *
- * 激活邏輯（selected path）：
- *   foundation_tree nodes/edges → 青綠線段（上游樹枝）
- *   candidate node              → 青綠光暈
- *   path node/edges             → 藍色線段（下游路徑）
+ * 新增 props：
+ *   personalBrainEids  → fMRI 疊加層資料
+ *   onNodeClick        → 點擊節點時通知外部（供 Detail Panel 使用）
  */
 
 import { useEffect, useRef, useMemo } from "react";
@@ -29,7 +27,7 @@ export type GlobalLayoutNode = {
   id:      string;
   name:    string;
   type:    string;
-  source?: string;   // "results" | "chapter"
+  source?: string;
   x:       number;
   y:       number;
   z:       number;
@@ -56,6 +54,10 @@ type Props = {
   activePathNodeEids:   string[];
   activePathEdges:      { source: string; target: string }[];
   activeFoundationTree: FoundationTree;
+  // ── 新增 ──
+  personalBrainEids:    { eid: string; weight: number }[];
+  onNodeClick?:         (node: GlobalLayoutNode) => void;
+  // ──────────
   width?:               number;
   height?:              number;
 };
@@ -68,27 +70,22 @@ const C = {
   bg:     0x000000,
   bg_css: "#000000",
 
-  // results RC → 橘色圓形
   cloud_results_rc:    new THREE.Color(0xff6010),
-  // results other → 較暗橘，菱形
   cloud_results_other: new THREE.Color(0xb03800),
-
-  // chapter RC → 紫色圓形
   cloud_chapter_rc:    new THREE.Color(0xc060ff),
-  // chapter other → 較暗紫，菱形
   cloud_chapter_other: new THREE.Color(0x7020b0),
 
-  // 激活色
-  active_candidate:   new THREE.Color(0x00d4aa),
-  active_path:        new THREE.Color(0x4f8ef7),
-  active_foundation:  new THREE.Color(0x00d4aa),
+  active_candidate:  new THREE.Color(0x00d4aa),
+  active_path:       new THREE.Color(0x4f8ef7),
+  active_foundation: new THREE.Color(0x00d4aa),
+  // Layer 2: personal brain fMRI colour
+  personal_brain:    new THREE.Color(0x7f77dd),
 
   bloom_strength:  2.4,
   bloom_radius:    0.5,
   bloom_threshold: 0.20,
 };
 
-// 密度雲參數
 const CLOUD = {
   particles_per_rc:    600,
   particles_per_other: 200,
@@ -103,8 +100,12 @@ const BG_SPREAD         = 3.5;
 const WORLD_SCALE       = 2.2;
 const PROXY_THRESHOLD   = 0.12;
 
+// fMRI sprite config
+const FMRI_BASE_SCALE  = 0.45;   // scale at weight=1.0
+const FMRI_BASE_OPACITY = 0.55;
+
 // ─────────────────────────────────────────────────────────────
-// Helpers
+// Helpers (unchanged from original)
 // ─────────────────────────────────────────────────────────────
 
 function nodeToWorld(n: GlobalLayoutNode): THREE.Vector3 {
@@ -121,9 +122,7 @@ function isRC(node: GlobalLayoutNode): boolean {
 
 function getNodeColors(node: GlobalLayoutNode): { rc: THREE.Color; other: THREE.Color } {
   const src = (node.source || "results").toLowerCase();
-  if (src === "chapter") {
-    return { rc: C.cloud_chapter_rc, other: C.cloud_chapter_other };
-  }
+  if (src === "chapter") return { rc: C.cloud_chapter_rc, other: C.cloud_chapter_other };
   return { rc: C.cloud_results_rc, other: C.cloud_results_other };
 }
 
@@ -134,11 +133,6 @@ function seededRand(seed: number): () => number {
     return (s >>> 0) / 0xffffffff;
   };
 }
-
-// ─────────────────────────────────────────────────────────────
-// Build density cloud geometry
-// isRC flag stored as attribute for shape shader
-// ─────────────────────────────────────────────────────────────
 
 function buildDensityCloud(nodes: GlobalLayoutNode[]): {
   positions: Float32Array;
@@ -151,7 +145,6 @@ function buildDensityCloud(nodes: GlobalLayoutNode[]): {
     (acc, n) => acc + (isRC(n) ? CLOUD.particles_per_rc : CLOUD.particles_per_other),
     0,
   );
-
   const positions = new Float32Array(totalParticles * 3);
   const colors    = new Float32Array(totalParticles * 3);
   const sizes     = new Float32Array(totalParticles);
@@ -173,28 +166,20 @@ function buildDensityCloud(nodes: GlobalLayoutNode[]): {
       const theta = rand() * Math.PI * 2;
       const phi   = Math.acos(2 * rand() - 1);
       const r     = spread * Math.cbrt(rand());
-
       positions[ptr * 3 + 0] = center.x + r * Math.sin(phi) * Math.cos(theta);
       positions[ptr * 3 + 1] = center.y + r * Math.sin(phi) * Math.sin(theta);
       positions[ptr * 3 + 2] = center.z + r * Math.cos(phi);
-
       colors[ptr * 3 + 0] = baseColor.r;
       colors[ptr * 3 + 1] = baseColor.g;
       colors[ptr * 3 + 2] = baseColor.b;
-
       sizes[ptr]     = baseSize * (0.5 + rand() * 0.8);
       isRCArr[ptr]   = rc ? 1.0 : 0.0;
       nodeIndex[ptr] = ni;
       ptr++;
     }
   });
-
   return { positions, colors, sizes, isRCArr, nodeIndex };
 }
-
-// ─────────────────────────────────────────────────────────────
-// Build background particle geometry
-// ─────────────────────────────────────────────────────────────
 
 function buildBgParticles(): Float32Array {
   const pos  = new Float32Array(BG_PARTICLE_COUNT * 3);
@@ -206,11 +191,6 @@ function buildBgParticles(): Float32Array {
   }
   return pos;
 }
-
-// ─────────────────────────────────────────────────────────────
-// Build LineSegments geometry from a list of {source,target} EID pairs
-// Returns null if no valid pairs found
-// ─────────────────────────────────────────────────────────────
 
 function buildLineSegments(
   edges: { source: string; target: string }[],
@@ -229,8 +209,23 @@ function buildLineSegments(
   return new Float32Array(pts);
 }
 
+// Build a purple radial-gradient canvas texture for fMRI sprites
+function buildFMRITexture(): THREE.CanvasTexture {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 64;
+  const ctx  = canvas.getContext("2d")!;
+  const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grad.addColorStop(0,   "rgba(127, 119, 221, 0.95)");
+  grad.addColorStop(0.35, "rgba(83, 74, 183, 0.55)");
+  grad.addColorStop(0.7,  "rgba(38, 33, 92, 0.20)");
+  grad.addColorStop(1,    "rgba(38, 33, 92, 0.0)");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(canvas);
+}
+
 // ─────────────────────────────────────────────────────────────
-// GlobalBrain component
+// GlobalBrain
 // ─────────────────────────────────────────────────────────────
 
 export default function GlobalBrain({
@@ -239,6 +234,8 @@ export default function GlobalBrain({
   activePathNodeEids,
   activePathEdges,
   activeFoundationTree,
+  personalBrainEids,
+  onNodeClick,
   width  = 480,
   height = 480,
 }: Props) {
@@ -251,12 +248,13 @@ export default function GlobalBrain({
   const cameraRef     = useRef<THREE.PerspectiveCamera | null>(null);
   const cloudMeshRef  = useRef<THREE.Points | null>(null);
   const glowGroupRef  = useRef<THREE.Group | null>(null);
+  // Layer 2: personal brain fMRI group
+  const fmriGroupRef  = useRef<THREE.Group | null>(null);
   const animFrameRef  = useRef<number>(0);
   const isDragging    = useRef(false);
   const prevMouse     = useRef({ x: 0, y: 0 });
   const rotGroup      = useRef<THREE.Group | null>(null);
 
-  // Line segment refs (updated on activation)
   const foundationLinesRef = useRef<THREE.LineSegments | null>(null);
   const pathLinesRef       = useRef<THREE.LineSegments | null>(null);
 
@@ -264,7 +262,9 @@ export default function GlobalBrain({
   const raycasterRef   = useRef<THREE.Raycaster | null>(null);
   const mouseNDCRef    = useRef(new THREE.Vector2(-9999, -9999));
 
-  // nodeById map built once per layout
+  // Cached fMRI texture (built once)
+  const fmriTextureRef = useRef<THREE.CanvasTexture | null>(null);
+
   const nodeById = useMemo(() => {
     if (!layout) return new Map<string, GlobalLayoutNode>();
     return new Map(layout.nodes.map((n) => [n.id, n]));
@@ -279,11 +279,7 @@ export default function GlobalBrain({
   useEffect(() => {
     if (!canvasRef.current || !layout || layout.nodes.length === 0) return;
 
-    const renderer = new THREE.WebGLRenderer({
-      canvas:    canvasRef.current,
-      antialias: true,
-      alpha:     false,
-    });
+    const renderer = new THREE.WebGLRenderer({ canvas: canvasRef.current, antialias: true, alpha: false });
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setClearColor(C.bg, 1);
@@ -304,27 +300,19 @@ export default function GlobalBrain({
     composer.addPass(new RenderPass(scene, camera));
     const bloomPass = new UnrealBloomPass(
       new THREE.Vector2(width, height),
-      C.bloom_strength,
-      C.bloom_radius,
-      C.bloom_threshold,
+      C.bloom_strength, C.bloom_radius, C.bloom_threshold,
     );
     composer.addPass(bloomPass);
     composerRef.current = composer;
 
-    // ── 背景粒子 ──────────────────────────────────────────
+    // bg particles
     const bgPos = buildBgParticles();
     const bgGeo = new THREE.BufferGeometry();
     bgGeo.setAttribute("position", new THREE.BufferAttribute(bgPos, 3));
-    const bgMat = new THREE.PointsMaterial({
-      color:       0x111111,
-      size:        0.005,
-      transparent: true,
-      opacity:     0.25,
-      depthWrite:  false,
-    });
+    const bgMat = new THREE.PointsMaterial({ color: 0x111111, size: 0.005, transparent: true, opacity: 0.25, depthWrite: false });
     scene.add(new THREE.Points(bgGeo, bgMat));
 
-    // ── 密度雲（RC=圓形, other=菱形，via shader）─────────
+    // density cloud
     const { positions, colors, sizes, isRCArr, nodeIndex } = buildDensityCloud(layout.nodes);
     const cloudGeo = new THREE.BufferGeometry();
     cloudGeo.setAttribute("position",  new THREE.BufferAttribute(positions.slice(), 3));
@@ -342,8 +330,7 @@ export default function GlobalBrain({
         varying vec3    vColor;
         varying float   vIsRC;
         void main() {
-          vColor = color;
-          vIsRC  = isRC;
+          vColor = color; vIsRC = isRC;
           vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
           gl_PointSize = size * (300.0 / -mvPosition.z);
           gl_Position  = projectionMatrix * mvPosition;
@@ -356,12 +343,10 @@ export default function GlobalBrain({
           vec2 uv = gl_PointCoord - vec2(0.5);
           float alpha;
           if (vIsRC > 0.5) {
-            /* RC: soft circle */
             float d = length(uv);
             if (d > 0.5) discard;
             alpha = smoothstep(0.5, 0.1, d) * 0.85;
           } else {
-            /* other: diamond (rotated square) */
             float d = abs(uv.x) + abs(uv.y);
             if (d > 0.48) discard;
             alpha = smoothstep(0.48, 0.12, d) * 0.70;
@@ -369,9 +354,7 @@ export default function GlobalBrain({
           gl_FragColor = vec4(vColor, alpha);
         }
       `,
-      transparent: true,
-      depthWrite:  false,
-      blending:    THREE.AdditiveBlending,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
     });
 
     const cloudMesh = new THREE.Points(cloudGeo, cloudMat);
@@ -380,40 +363,36 @@ export default function GlobalBrain({
     rg.add(cloudMesh);
     cloudMeshRef.current = cloudMesh;
 
-    // ── 激活光暈群組 ──────────────────────────────────────
+    // Layer 3: query glow group
     const glowGroup = new THREE.Group();
     rg.add(glowGroup);
     glowGroupRef.current = glowGroup;
 
-    // ── Foundation tree lines（初始不可見）────────────────
+    // Layer 2: personal brain fMRI group
+    const fmriGroup = new THREE.Group();
+    rg.add(fmriGroup);
+    fmriGroupRef.current = fmriGroup;
+
+    // Build and cache fMRI texture
+    fmriTextureRef.current = buildFMRITexture();
+
+    // Foundation lines
     const ftGeo = new THREE.BufferGeometry();
     ftGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(0), 3));
-    const ftMat = new THREE.LineBasicMaterial({
-      color:       C.active_foundation,
-      transparent: true,
-      opacity:     0.0,
-      depthWrite:  false,
-      blending:    THREE.AdditiveBlending,
-    });
+    const ftMat = new THREE.LineBasicMaterial({ color: C.active_foundation, transparent: true, opacity: 0.0, depthWrite: false, blending: THREE.AdditiveBlending });
     const ftLines = new THREE.LineSegments(ftGeo, ftMat);
     rg.add(ftLines);
     foundationLinesRef.current = ftLines;
 
-    // ── Path lines（初始不可見）───────────────────────────
+    // Path lines
     const plGeo = new THREE.BufferGeometry();
     plGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(0), 3));
-    const plMat = new THREE.LineBasicMaterial({
-      color:       C.active_path,
-      transparent: true,
-      opacity:     0.0,
-      depthWrite:  false,
-      blending:    THREE.AdditiveBlending,
-    });
+    const plMat = new THREE.LineBasicMaterial({ color: C.active_path, transparent: true, opacity: 0.0, depthWrite: false, blending: THREE.AdditiveBlending });
     const plLines = new THREE.LineSegments(plGeo, plMat);
     rg.add(plLines);
     pathLinesRef.current = plLines;
 
-    // ── 不可見代理 Mesh（Raycasting）─────────────────────
+    // Invisible proxy meshes for raycasting
     const proxyGeo = new THREE.SphereGeometry(PROXY_THRESHOLD, 6, 6);
     const proxyMat = new THREE.MeshBasicMaterial({ visible: false, transparent: true, opacity: 0 });
     const proxies: THREE.Mesh[] = [];
@@ -425,11 +404,10 @@ export default function GlobalBrain({
       proxies.push(proxy);
     });
     proxyMeshesRef.current = proxies;
-
     raycasterRef.current = new THREE.Raycaster();
     scene.add(new THREE.AmbientLight(0x110800, 2));
 
-    // ── Animation loop ─────────────────────────────────────
+    // Animation loop
     let frameCount = 0;
     function animate() {
       animFrameRef.current = requestAnimationFrame(animate);
@@ -440,26 +418,28 @@ export default function GlobalBrain({
         rotGroup.current.rotation.x += 0.0002;
       }
 
-      // Pulse glow sprites
+      // Pulse query glow sprites
       if (frameCount % 2 === 0 && glowGroupRef.current) {
-        const t = frameCount * 0.02;
+        const t     = frameCount * 0.02;
         const pulse = 0.85 + 0.15 * Math.sin(t);
         glowGroupRef.current.children.forEach((child) => {
-          if (child instanceof THREE.Sprite) {
+          if (child instanceof THREE.Sprite)
             child.material.opacity = child.userData.baseOpacity * pulse;
-          }
         });
       }
 
-      // Tooltip raycasting
-      if (
-        !isDragging.current &&
-        layout &&
-        raycasterRef.current &&
-        cameraRef.current &&
-        proxyMeshesRef.current.length > 0 &&
-        tooltipRef.current
-      ) {
+      // Gently pulse fMRI sprites (slower, subtler)
+      if (frameCount % 3 === 0 && fmriGroupRef.current) {
+        const t     = frameCount * 0.008;
+        const pulse = 0.88 + 0.12 * Math.sin(t);
+        fmriGroupRef.current.children.forEach((child) => {
+          if (child instanceof THREE.Sprite)
+            child.material.opacity = child.userData.baseOpacity * pulse;
+        });
+      }
+
+      // Tooltip raycasting (hover)
+      if (!isDragging.current && layout && raycasterRef.current && cameraRef.current && proxyMeshesRef.current.length > 0 && tooltipRef.current) {
         raycasterRef.current.setFromCamera(mouseNDCRef.current, cameraRef.current);
         const hits = raycasterRef.current.intersectObjects(proxyMeshesRef.current, false);
         if (hits.length > 0) {
@@ -476,7 +456,7 @@ export default function GlobalBrain({
     }
     animate();
 
-    // ── Mouse / touch events ──────────────────────────────
+    // Mouse / touch events
     const canvas = canvasRef.current;
 
     function updateNDC(clientX: number, clientY: number) {
@@ -484,6 +464,18 @@ export default function GlobalBrain({
       if (!r) return;
       mouseNDCRef.current.x =  ((clientX - r.left) / r.width)  * 2 - 1;
       mouseNDCRef.current.y = -((clientY - r.top)  / r.height) * 2 + 1;
+    }
+
+    // ── Click handler (new) — fires onNodeClick ────────────
+    function onCanvasClick(e: MouseEvent) {
+      if (!layout || !raycasterRef.current || !cameraRef.current) return;
+      updateNDC(e.clientX, e.clientY);
+      raycasterRef.current.setFromCamera(mouseNDCRef.current, cameraRef.current);
+      const hits = raycasterRef.current.intersectObjects(proxyMeshesRef.current, false);
+      if (hits.length > 0 && onNodeClick) {
+        const ni   = hits[0].object.userData.nodeIndex as number;
+        onNodeClick(layout.nodes[ni]);
+      }
     }
 
     function onMouseDown(e: MouseEvent) {
@@ -500,7 +492,15 @@ export default function GlobalBrain({
       rotGroup.current.rotation.x += dy * 0.008;
       prevMouse.current = { x: e.clientX, y: e.clientY };
     }
-    function onMouseUp() { isDragging.current = false; }
+    // Distinguish drag vs click: only fire click if mouse barely moved
+    let mouseDownPos = { x: 0, y: 0 };
+    function onMouseDownCapture(e: MouseEvent) { mouseDownPos = { x: e.clientX, y: e.clientY }; }
+    function onMouseUpCapture(e: MouseEvent) {
+      const dx = Math.abs(e.clientX - mouseDownPos.x);
+      const dy = Math.abs(e.clientY - mouseDownPos.y);
+      if (dx < 4 && dy < 4) onCanvasClick(e);
+      isDragging.current = false;
+    }
     function onMouseLeave() {
       isDragging.current = false;
       mouseNDCRef.current.set(-9999, -9999);
@@ -520,29 +520,73 @@ export default function GlobalBrain({
     }
 
     canvas.addEventListener("mousedown",  onMouseDown);
+    canvas.addEventListener("mousedown",  onMouseDownCapture);
     canvas.addEventListener("mouseleave", onMouseLeave);
+    canvas.addEventListener("mouseup",    onMouseUpCapture);
     window.addEventListener("mousemove",  onMouseMove);
-    window.addEventListener("mouseup",    onMouseUp);
     canvas.addEventListener("touchstart", onTouchStart, { passive: true });
     window.addEventListener("touchmove",  onTouchMove,  { passive: true });
-    window.addEventListener("touchend",   onMouseUp);
+    window.addEventListener("touchend",   () => { isDragging.current = false; });
 
     return () => {
       cancelAnimationFrame(animFrameRef.current);
       canvas.removeEventListener("mousedown",  onMouseDown);
+      canvas.removeEventListener("mousedown",  onMouseDownCapture);
       canvas.removeEventListener("mouseleave", onMouseLeave);
+      canvas.removeEventListener("mouseup",    onMouseUpCapture);
       window.removeEventListener("mousemove",  onMouseMove);
-      window.removeEventListener("mouseup",    onMouseUp);
       canvas.removeEventListener("touchstart", onTouchStart);
       window.removeEventListener("touchmove",  onTouchMove);
-      window.removeEventListener("touchend",   onMouseUp);
       renderer.dispose();
       composer.dispose();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layout, width, height]);
 
-  // ── 激活 candidate 節點（雲端著色 + 光暈）────────────────
+  // ── Layer 2: personal brain fMRI sprites ─────────────────
+  useEffect(() => {
+    if (!fmriGroupRef.current || !layout) return;
+
+    const group = fmriGroupRef.current;
+    // Dispose old sprites
+    group.children.slice().forEach((child) => {
+      if (child instanceof THREE.Sprite) {
+        child.material.dispose();
+        group.remove(child);
+      }
+    });
+
+    if (personalBrainEids.length === 0) return;
+
+    const tex = fmriTextureRef.current;
+    if (!tex) return;
+
+    personalBrainEids.forEach(({ eid, weight }) => {
+      const node = nodeById.get(eid);
+      if (!node) return;
+
+      const pos        = nodeToWorld(node);
+      const clampW     = Math.max(0.1, Math.min(1.0, weight));
+      const spriteScale = FMRI_BASE_SCALE * (0.5 + clampW * 0.5) * (isRC(node) ? 1.2 : 0.9);
+      const opacity    = FMRI_BASE_OPACITY * (0.6 + clampW * 0.4);
+
+      const mat = new THREE.SpriteMaterial({
+        map:         tex,
+        transparent: true,
+        opacity,
+        blending:    THREE.AdditiveBlending,
+        depthWrite:  false,
+      });
+      const sprite = new THREE.Sprite(mat);
+      sprite.position.copy(pos);
+      sprite.scale.setScalar(spriteScale);
+      sprite.userData.baseOpacity = opacity;
+      group.add(sprite);
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [personalBrainEids, layout, nodeById]);
+
+  // ── Layer 3: query candidate glow ─────────────────────────
   useEffect(() => {
     if (!cloudMeshRef.current || !layout || !glowGroupRef.current) return;
 
@@ -553,13 +597,10 @@ export default function GlobalBrain({
     const niArr      = cloudMeshRef.current.userData.nodeIndex as Int32Array;
 
     const activeIdxSet = new Set(
-      activeCandidateEids
-        .map((eid) => nodeIdxMap.get(eid))
-        .filter((i): i is number => i !== undefined),
+      activeCandidateEids.map((eid) => nodeIdxMap.get(eid)).filter((i): i is number => i !== undefined),
     );
 
     colorArr.set(baseColors);
-
     const ac = C.active_candidate;
     for (let i = 0; i < niArr.length; i++) {
       if (activeIdxSet.has(niArr[i])) {
@@ -574,7 +615,6 @@ export default function GlobalBrain({
     glowGroup.clear();
     if (activeIdxSet.size === 0) return;
 
-    // Build glow texture
     const canvas2d = document.createElement("canvas");
     canvas2d.width = canvas2d.height = 64;
     const ctx  = canvas2d.getContext("2d")!;
@@ -589,14 +629,8 @@ export default function GlobalBrain({
     activeIdxSet.forEach((ni) => {
       const node      = layout.nodes[ni];
       const pos       = nodeToWorld(node);
-      const spriteMat = new THREE.SpriteMaterial({
-        map:         glowTex,
-        transparent: true,
-        opacity:     0.75,
-        blending:    THREE.AdditiveBlending,
-        depthWrite:  false,
-      });
-      const sprite = new THREE.Sprite(spriteMat);
+      const spriteMat = new THREE.SpriteMaterial({ map: glowTex, transparent: true, opacity: 0.75, blending: THREE.AdditiveBlending, depthWrite: false });
+      const sprite    = new THREE.Sprite(spriteMat);
       sprite.position.copy(pos);
       sprite.scale.setScalar(isRC(node) ? 0.55 : 0.35);
       sprite.userData.baseOpacity = 0.75;
@@ -610,33 +644,14 @@ export default function GlobalBrain({
     const lines = foundationLinesRef.current;
     if (!lines || !layout) return;
     const mat = lines.material as THREE.LineBasicMaterial;
-
     if (activeFoundationTree.edges.length === 0) {
       mat.opacity = 0;
-      lines.geometry.setAttribute(
-        "position",
-        new THREE.BufferAttribute(new Float32Array(0), 3),
-      );
+      lines.geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(0), 3));
       return;
     }
-
-    // Build edge list from foundation_tree using element_id → globalLayout node lookup
-    // foundation_tree nodes have element_id; globalLayout nodes have id (same value)
-    const ftEdges = activeFoundationTree.edges.map((e) => ({
-      source: e.source,
-      target: e.target,
-    }));
-
-    const posArr = buildLineSegments(ftEdges, nodeById);
-    if (!posArr) {
-      mat.opacity = 0;
-      return;
-    }
-
-    lines.geometry.setAttribute(
-      "position",
-      new THREE.BufferAttribute(posArr, 3),
-    );
+    const posArr = buildLineSegments(activeFoundationTree.edges, nodeById);
+    if (!posArr) { mat.opacity = 0; return; }
+    lines.geometry.setAttribute("position", new THREE.BufferAttribute(posArr, 3));
     (lines.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
     mat.color.copy(C.active_foundation);
     mat.opacity = 0.65;
@@ -648,26 +663,14 @@ export default function GlobalBrain({
     const lines = pathLinesRef.current;
     if (!lines || !layout) return;
     const mat = lines.material as THREE.LineBasicMaterial;
-
     if (activePathEdges.length === 0) {
       mat.opacity = 0;
-      lines.geometry.setAttribute(
-        "position",
-        new THREE.BufferAttribute(new Float32Array(0), 3),
-      );
+      lines.geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(0), 3));
       return;
     }
-
     const posArr = buildLineSegments(activePathEdges, nodeById);
-    if (!posArr) {
-      mat.opacity = 0;
-      return;
-    }
-
-    lines.geometry.setAttribute(
-      "position",
-      new THREE.BufferAttribute(posArr, 3),
-    );
+    if (!posArr) { mat.opacity = 0; return; }
+    lines.geometry.setAttribute("position", new THREE.BufferAttribute(posArr, 3));
     (lines.geometry.attributes.position as THREE.BufferAttribute).needsUpdate = true;
     mat.color.copy(C.active_path);
     mat.opacity = 0.75;
@@ -677,22 +680,15 @@ export default function GlobalBrain({
   // ── Path node cloud highlight ─────────────────────────────
   useEffect(() => {
     if (!cloudMeshRef.current || !layout) return;
-
     const geo        = cloudMeshRef.current.geometry;
     const colorAttr  = geo.attributes.color as THREE.BufferAttribute;
     const colorArr   = colorAttr.array as Float32Array;
     const baseColors = cloudMeshRef.current.userData.baseColors as Float32Array;
     const niArr      = cloudMeshRef.current.userData.nodeIndex as Int32Array;
 
-    // Reset to base
     colorArr.set(baseColors);
 
-    // Re-apply candidate glow first
-    const candidateIdxSet = new Set(
-      activeCandidateEids
-        .map((eid) => nodeIdxMap.get(eid))
-        .filter((i): i is number => i !== undefined),
-    );
+    const candidateIdxSet = new Set(activeCandidateEids.map((eid) => nodeIdxMap.get(eid)).filter((i): i is number => i !== undefined));
     const ac = C.active_candidate;
     for (let i = 0; i < niArr.length; i++) {
       if (candidateIdxSet.has(niArr[i])) {
@@ -702,12 +698,7 @@ export default function GlobalBrain({
       }
     }
 
-    // Apply path node highlight (blue)
-    const pathIdxSet = new Set(
-      activePathNodeEids
-        .map((eid) => nodeIdxMap.get(eid))
-        .filter((i): i is number => i !== undefined),
-    );
+    const pathIdxSet = new Set(activePathNodeEids.map((eid) => nodeIdxMap.get(eid)).filter((i): i is number => i !== undefined));
     const ap = C.active_path;
     for (let i = 0; i < niArr.length; i++) {
       if (pathIdxSet.has(niArr[i])) {
@@ -717,11 +708,8 @@ export default function GlobalBrain({
       }
     }
 
-    // Apply foundation tree node highlight (teal, lighter)
     const ftNodeSet = new Set(
-      (activeFoundationTree.nodes ?? [])
-        .map((n) => nodeIdxMap.get(n.element_id))
-        .filter((i): i is number => i !== undefined),
+      (activeFoundationTree.nodes ?? []).map((n) => nodeIdxMap.get(n.element_id)).filter((i): i is number => i !== undefined),
     );
     for (let i = 0; i < niArr.length; i++) {
       if (ftNodeSet.has(niArr[i]) && !candidateIdxSet.has(niArr[i])) {
@@ -735,195 +723,74 @@ export default function GlobalBrain({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePathNodeEids, activeFoundationTree, activeCandidateEids, layout, nodeIdxMap]);
 
-  // ─────────────────────────────────────────────────────────
-  // Render
-  // ─────────────────────────────────────────────────────────
-
+  // ── Render ────────────────────────────────────────────────
   const hasActiveSelection = activePathNodeEids.length > 0 || activeFoundationTree.edges.length > 0;
 
   return (
-    <div
-      style={{
-        position:     "relative",
-        width,
-        height,
-        borderRadius: "20px",
-        overflow:     "hidden",
-        background:   C.bg_css,
-        cursor:       "grab",
-        flexShrink:   0,
-      }}
-    >
-      <canvas
-        ref={canvasRef}
-        style={{ display: "block", width: "100%", height: "100%" }}
-      />
+    <div style={{ position: "relative", width, height, borderRadius: "20px", overflow: "hidden", background: C.bg_css, cursor: "crosshair", flexShrink: 0 }}>
+      <canvas ref={canvasRef} style={{ display: "block", width: "100%", height: "100%" }} />
 
-      {/* Tooltip */}
-      <div
-        ref={tooltipRef}
-        style={{
-          position:      "absolute",
-          bottom:        40,
-          left:          "50%",
-          transform:     "translateX(-50%)",
-          background:    "rgba(0,0,0,0.88)",
-          border:        "1px solid rgba(255,96,16,0.4)",
-          borderRadius:  "6px",
-          padding:       "5px 12px",
-          fontSize:      "0.72rem",
-          color:         "#f0c090",
-          fontFamily:    "monospace",
-          letterSpacing: "0.06em",
-          pointerEvents: "none",
-          opacity:       0,
-          transition:    "opacity 0.15s ease",
-          whiteSpace:    "nowrap",
-          maxWidth:      "80%",
-          overflow:      "hidden",
-          textOverflow:  "ellipsis",
-          zIndex:        10,
-        }}
-      />
+      <div ref={tooltipRef} style={{ position: "absolute", bottom: 40, left: "50%", transform: "translateX(-50%)", background: "rgba(0,0,0,0.88)", border: "1px solid rgba(255,96,16,0.4)", borderRadius: "6px", padding: "5px 12px", fontSize: "0.72rem", color: "#f0c090", fontFamily: "monospace", letterSpacing: "0.06em", pointerEvents: "none", opacity: 0, transition: "opacity 0.15s ease", whiteSpace: "nowrap", maxWidth: "80%", overflow: "hidden", textOverflow: "ellipsis", zIndex: 10 }} />
 
-      {/* 空狀態 */}
       {!layout && (
-        <div style={{
-          position:       "absolute",
-          inset:          0,
-          display:        "flex",
-          alignItems:     "center",
-          justifyContent: "center",
-          color:          "#3a1a00",
-          fontSize:       "0.8rem",
-          letterSpacing:  "0.12em",
-          textTransform:  "uppercase",
-          fontFamily:     "monospace",
-          pointerEvents:  "none",
-        }}>
+        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#3a1a00", fontSize: "0.8rem", letterSpacing: "0.12em", textTransform: "uppercase", fontFamily: "monospace", pointerEvents: "none" }}>
           知識場域載入中…
         </div>
       )}
 
-      {/* 角落標籤 */}
-      <div style={{
-        position:      "absolute",
-        top:           10,
-        left:          12,
-        fontSize:      "0.6rem",
-        color:         "#3a1800",
-        letterSpacing: "0.15em",
-        textTransform: "uppercase",
-        fontFamily:    "monospace",
-        pointerEvents: "none",
-        userSelect:    "none",
-      }}>
+      <div style={{ position: "absolute", top: 10, left: 12, fontSize: "0.6rem", color: "#3a1800", letterSpacing: "0.15em", textTransform: "uppercase", fontFamily: "monospace", pointerEvents: "none", userSelect: "none" }}>
         Global Knowledge Field
       </div>
 
-      {/* 圖例 */}
-      <div style={{
-        position:      "absolute",
-        top:           10,
-        right:         12,
-        display:       "flex",
-        flexDirection: "column",
-        gap:           "4px",
-        pointerEvents: "none",
-        userSelect:    "none",
-      }}>
-        {/* results: circle */}
+      {/* Legend */}
+      <div style={{ position: "absolute", top: 10, right: 12, display: "flex", flexDirection: "column", gap: "4px", pointerEvents: "none", userSelect: "none" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-          <svg width="9" height="9" viewBox="0 0 9 9">
-            <circle cx="4.5" cy="4.5" r="4" fill="#ff6010" />
-          </svg>
+          <svg width="9" height="9" viewBox="0 0 9 9"><circle cx="4.5" cy="4.5" r="4" fill="#ff6010" /></svg>
           <span style={{ fontSize: "0.58rem", color: "#ff6010", fontFamily: "monospace", letterSpacing: "0.1em" }}>RESEARCH·RC</span>
         </div>
-        {/* results other: diamond */}
         <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-          <svg width="9" height="9" viewBox="0 0 9 9">
-            <polygon points="4.5,0.5 8.5,4.5 4.5,8.5 0.5,4.5" fill="#b03800" />
-          </svg>
+          <svg width="9" height="9" viewBox="0 0 9 9"><polygon points="4.5,0.5 8.5,4.5 4.5,8.5 0.5,4.5" fill="#b03800" /></svg>
           <span style={{ fontSize: "0.58rem", color: "#b03800", fontFamily: "monospace", letterSpacing: "0.1em" }}>RESEARCH</span>
         </div>
-        {/* chapter RC: circle purple */}
         <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-          <svg width="9" height="9" viewBox="0 0 9 9">
-            <circle cx="4.5" cy="4.5" r="4" fill="#c060ff" />
-          </svg>
+          <svg width="9" height="9" viewBox="0 0 9 9"><circle cx="4.5" cy="4.5" r="4" fill="#c060ff" /></svg>
           <span style={{ fontSize: "0.58rem", color: "#c060ff", fontFamily: "monospace", letterSpacing: "0.1em" }}>TEXTBOOK·RC</span>
         </div>
-        {/* chapter other: diamond purple */}
         <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
-          <svg width="9" height="9" viewBox="0 0 9 9">
-            <polygon points="4.5,0.5 8.5,4.5 4.5,8.5 0.5,4.5" fill="#7020b0" />
-          </svg>
+          <svg width="9" height="9" viewBox="0 0 9 9"><polygon points="4.5,0.5 8.5,4.5 4.5,8.5 0.5,4.5" fill="#7020b0" /></svg>
           <span style={{ fontSize: "0.58rem", color: "#7020b0", fontFamily: "monospace", letterSpacing: "0.1em" }}>TEXTBOOK</span>
         </div>
+        {personalBrainEids.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 2 }}>
+            <svg width="9" height="9" viewBox="0 0 9 9"><circle cx="4.5" cy="4.5" r="4" fill="#7f77dd" opacity="0.8" /></svg>
+            <span style={{ fontSize: "0.58rem", color: "#7f77dd", fontFamily: "monospace", letterSpacing: "0.1em" }}>PERSONAL</span>
+          </div>
+        )}
       </div>
 
-      {/* 激活候選狀態 */}
       {activeCandidateEids.length > 0 && (
-        <div style={{
-          position:      "absolute",
-          bottom:        hasActiveSelection ? 32 : 10,
-          left:          12,
-          fontSize:      "0.65rem",
-          color:         "#00d4aa",
-          letterSpacing: "0.1em",
-          fontFamily:    "monospace",
-          pointerEvents: "none",
-          userSelect:    "none",
-          display:       "flex",
-          alignItems:    "center",
-          gap:           "6px",
-          transition:    "bottom 0.2s ease",
-        }}>
-          <span style={{
-            display:      "inline-block",
-            width:        6,
-            height:       6,
-            borderRadius: "50%",
-            background:   "#00d4aa",
-            boxShadow:    "0 0 6px #00d4aa",
-            animation:    "brain-pulse 1.8s ease-in-out infinite",
-          }} />
+        <div style={{ position: "absolute", bottom: hasActiveSelection ? 32 : 10, left: 12, fontSize: "0.65rem", color: "#00d4aa", letterSpacing: "0.1em", fontFamily: "monospace", pointerEvents: "none", userSelect: "none", display: "flex", alignItems: "center", gap: "6px", transition: "bottom 0.2s ease" }}>
+          <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "#00d4aa", animation: "brain-pulse 1.8s ease-in-out infinite" }} />
           {activeCandidateEids.length} region{activeCandidateEids.length > 1 ? "s" : ""} activated
         </div>
       )}
 
-      {/* 激活路徑狀態 */}
       {hasActiveSelection && (
-        <div style={{
-          position:      "absolute",
-          bottom:        10,
-          left:          12,
-          fontSize:      "0.65rem",
-          color:         "#4f8ef7",
-          letterSpacing: "0.1em",
-          fontFamily:    "monospace",
-          pointerEvents: "none",
-          userSelect:    "none",
-          display:       "flex",
-          alignItems:    "center",
-          gap:           "6px",
-        }}>
-          <span style={{
-            display:      "inline-block",
-            width:        20,
-            height:       1,
-            background:   "linear-gradient(90deg, #00d4aa, #4f8ef7)",
-            boxShadow:    "0 0 4px #4f8ef7",
-          }} />
+        <div style={{ position: "absolute", bottom: 10, left: 12, fontSize: "0.65rem", color: "#4f8ef7", letterSpacing: "0.1em", fontFamily: "monospace", pointerEvents: "none", userSelect: "none", display: "flex", alignItems: "center", gap: "6px" }}>
+          <span style={{ display: "inline-block", width: 20, height: 1, background: "linear-gradient(90deg, #00d4aa, #4f8ef7)" }} />
           path active
         </div>
       )}
 
+      {personalBrainEids.length > 0 && (
+        <div style={{ position: "absolute", bottom: hasActiveSelection ? 52 : 10, right: 12, fontSize: "0.62rem", color: "#7f77dd", letterSpacing: "0.1em", fontFamily: "monospace", pointerEvents: "none", userSelect: "none", display: "flex", alignItems: "center", gap: "5px" }}>
+          <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "#7f77dd", opacity: 0.8 }} />
+          {personalBrainEids.length} personal
+        </div>
+      )}
+
       <style>{`
-        @keyframes brain-pulse {
-          0%, 100% { opacity: 1; }
-          50%       { opacity: 0.3; }
-        }
+        @keyframes brain-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
       `}</style>
     </div>
   );

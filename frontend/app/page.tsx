@@ -1,12 +1,22 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  FormEvent, useCallback, useEffect, useMemo, useRef, useState,
+} from "react";
 import dynamic from "next/dynamic";
 import type { GraphData } from "./components/KnowledgeGraph";
 import type { GlobalLayout, FoundationTree } from "./components/GlobalBrain";
+import type {
+  PersonalBrainConcept,
+  ConceptDetail,
+  LLMSuggestion,
+  RCScore,
+} from "./components/DetailPanel";
+import type { GlobalLayoutNode } from "./components/GlobalBrain";
 
 const KnowledgeGraph = dynamic(() => import("./components/KnowledgeGraph"), { ssr: false });
 const GlobalBrain    = dynamic(() => import("./components/GlobalBrain"),    { ssr: false });
+const DetailPanel    = dynamic(() => import("./components/DetailPanel"),    { ssr: false });
 
 // ─────────────────────────────────────────────────────────────
 // Types
@@ -21,20 +31,21 @@ type ChatMessage = {
 };
 
 type ChatResponse = {
-  reply:          string;
-  phase:          string;
+  reply:           string;
+  phase:           string;
   socrates_phase?: string | null;
-  all_graphs?:    Record<string, GraphData | null> | null;
+  all_graphs?:     Record<string, GraphData | null> | null;
 };
 
 // ─────────────────────────────────────────────────────────────
 // Constants
 // ─────────────────────────────────────────────────────────────
 
-const SESSION_KEY = "kagrobot_session_id";
-const HISTORY_KEY = "kagrobot_history";
-const PHASE_KEY   = "kagrobot_phase";
-const MAX_HISTORY = 60;
+const SESSION_KEY  = "kagrobot_session_id";
+const HISTORY_KEY  = "kagrobot_history";
+const PHASE_KEY    = "kagrobot_phase";
+const USER_ID_KEY  = "kagrobot_user_id";
+const MAX_HISTORY  = 60;
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 
@@ -42,23 +53,19 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 // Helpers
 // ─────────────────────────────────────────────────────────────
 
-function createSessionId(): string {
+function createId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
-  return `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `id-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 function saveHistory(msgs: ChatMessage[]): void {
   const trimmed = msgs.slice(-MAX_HISTORY);
-  try {
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(trimmed));
-  } catch {
-    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(trimmed.slice(-20))); }
-    catch { localStorage.removeItem(HISTORY_KEY); }
-  }
+  try { localStorage.setItem(HISTORY_KEY, JSON.stringify(trimmed)); }
+  catch { localStorage.removeItem(HISTORY_KEY); }
 }
 
 function extractCandidateEids(parsed: Record<number, GraphData | null>): string[] {
@@ -74,28 +81,77 @@ function extractCandidateEids(parsed: Record<number, GraphData | null>): string[
   return eids;
 }
 
+/**
+ * 計算 Personal Brain 對每個 RC 路徑的加分。
+ *
+ * personal_score(RC) =
+ *   Σ brain_concept.weight  ∀ concept ∈ (RC_concepts ∩ PersonalBrain)
+ *   ─────────────────────────────────────────────────────────────────
+ *   |RC_concepts| + k          (Laplace smoothing, k=5)
+ *
+ * base_score = |intersection| / (|RC_concepts| + k)  (weight=1 for all)
+ */
+function computeRCScores(
+  allGraphs:     Record<number, GraphData | null>,
+  personalBrain: PersonalBrainConcept[],
+): RCScore[] {
+  const K = 5;
+  const brainMap = new Map(personalBrain.map((c) => [c.eid, c.weight]));
+  const scores: RCScore[] = [];
+  const seen = new Set<string>();
+
+  for (const g of Object.values(allGraphs)) {
+    if (!g) continue;
+    for (const path of g.paths ?? []) {
+      const finalEid   = path.final_concept;
+      const finalLabel = path.final_label || finalEid;
+      if (!finalEid || seen.has(finalEid)) continue;
+      seen.add(finalEid);
+
+      const conceptEids = (path.node_ids ?? []).filter((nid) => {
+        const node = g.nodes?.find((n) => n.id === nid);
+        return node?.node_type === "concept";
+      });
+      const n = conceptEids.length;
+
+      let weightedHits = 0;
+      let hits         = 0;
+      for (const eid of conceptEids) {
+        const w = brainMap.get(eid);
+        if (w !== undefined) {
+          weightedHits += w;
+          hits++;
+        }
+      }
+
+      scores.push({
+        eid:           finalEid,
+        label:         finalLabel,
+        base_score:    hits         / (n + K),
+        personal_score: weightedHits / (n + K),
+      });
+    }
+  }
+  return scores.sort((a, b) => b.personal_score - a.personal_score);
+}
+
 // ─────────────────────────────────────────────────────────────
 // useBrainSize
 // ─────────────────────────────────────────────────────────────
 
 function useBrainSize(ref: React.RefObject<HTMLDivElement>) {
-  const [size, setSize] = useState({ w: 560, h: 560 });
-
+  const [size, setSize] = useState({ w: 460, h: 460 });
   useEffect(() => {
     if (!ref.current) return;
     const ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const { width, height } = entry.contentRect;
-        setSize({
-          w: Math.floor(width)  || 560,
-          h: Math.floor(height) || 560,
-        });
+        setSize({ w: Math.floor(width) || 460, h: Math.floor(height) || 460 });
       }
     });
     ro.observe(ref.current);
     return () => ro.disconnect();
   }, [ref]);
-
   return size;
 }
 
@@ -104,52 +160,84 @@ function useBrainSize(ref: React.RefObject<HTMLDivElement>) {
 // ─────────────────────────────────────────────────────────────
 
 export default function Page() {
+  // ── Identity ───────────────────────────────────────────────
   const [sessionId, setSessionId] = useState("");
+  const [userId,    setUserId]    = useState("");
   const [phase,     setPhase]     = useState("socratic");
+
+  // ── Chat ───────────────────────────────────────────────────
   const [messages,  setMessages]  = useState<ChatMessage[]>([]);
   const [input,     setInput]     = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error,     setError]     = useState("");
 
-  // ── KnowledgeGraph state ───────────────────────────────────
+  // ── KnowledgeGraph ─────────────────────────────────────────
   const [graphData,       setGraphData]       = useState<GraphData | null>(null);
   const [activeChipIndex, setActiveChipIndex] = useState<number | null>(null);
   const [selectedPathId,  setSelectedPathId]  = useState<number | null>(null);
   const [selectedLabel,   setSelectedLabel]   = useState<string | null>(null);
   const [confirmedPathId, setConfirmedPathId] = useState<number | null>(null);
   const [graphVisible,    setGraphVisible]    = useState(false);
-  const [chipList, setChipList] = useState<
-    { index: number; label: string; hasData: boolean }[]
-  >([]);
+  const [chipList, setChipList] = useState<{ index: number; label: string; hasData: boolean }[]>([]);
 
-  // ── GlobalBrain state ──────────────────────────────────────
+  // ── GlobalBrain ────────────────────────────────────────────
   const [globalLayout,        setGlobalLayout]        = useState<GlobalLayout | null>(null);
   const [globalLayoutFetched, setGlobalLayoutFetched] = useState(false);
   const [activeCandidateEids, setActiveCandidateEids] = useState<string[]>([]);
-  // selected-path activation
   const [activePathNodeEids,  setActivePathNodeEids]  = useState<string[]>([]);
-  const [activePathEdges,     setActivePathEdges]     = useState<{source:string;target:string}[]>([]);
+  const [activePathEdges,     setActivePathEdges]     = useState<{ source: string; target: string }[]>([]);
   const [activeFoundationTree, setActiveFoundationTree] = useState<FoundationTree>({ nodes: [], edges: [] });
 
-  const allGraphsRef = useRef<Record<number, GraphData | null>>({});
-  const isTypingRef  = useRef(false);
-  const messagesRef  = useRef<ChatMessage[]>([]);
-  const boxRef       = useRef<HTMLDivElement | null>(null);
+  // ── Personal Brain ─────────────────────────────────────────
+  const [personalBrain,   setPersonalBrain]   = useState<PersonalBrainConcept[]>([]);
+  const [brainLoaded,     setBrainLoaded]     = useState(false);
 
-  const brainColRef = useRef<HTMLDivElement>(null);
-  const brainSize   = useBrainSize(brainColRef as React.RefObject<HTMLDivElement>);
+  // ── Detail Panel ───────────────────────────────────────────
+  const [selectedNode,    setSelectedNode]    = useState<GlobalLayoutNode | null>(null);
+  const [detailData,      setDetailData]      = useState<ConceptDetail | null>(null);
+  const [detailLoading,   setDetailLoading]   = useState(false);
+  const [llmSuggestions,  setLlmSuggestions]  = useState<LLMSuggestion[]>([]);
 
-  // ── init from localStorage ────────────────────────────────
+  // ── Refs ───────────────────────────────────────────────────
+  const allGraphsRef  = useRef<Record<number, GraphData | null>>({});
+  const isTypingRef   = useRef(false);
+  const messagesRef   = useRef<ChatMessage[]>([]);
+  const boxRef        = useRef<HTMLDivElement | null>(null);
+  const brainColRef   = useRef<HTMLDivElement>(null);
+  const brainSize     = useBrainSize(brainColRef as React.RefObject<HTMLDivElement>);
+
+  // ── RC scores (derived) ────────────────────────────────────
+  const rcScores = useMemo(
+    () => computeRCScores(allGraphsRef.current, personalBrain),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [personalBrain, graphData],
+  );
+
+  // ── personalBrainEids for GlobalBrain fMRI layer ──────────
+  const personalBrainEids = useMemo(
+    () => personalBrain.map((c) => ({ eid: c.eid, weight: c.weight })),
+    [personalBrain],
+  );
+
+  // ─────────────────────────────────────────────────────────
+  // Init from localStorage
+  // ─────────────────────────────────────────────────────────
+
   useEffect(() => {
+    // user_id — permanent across sessions
+    let uid = localStorage.getItem(USER_ID_KEY);
+    if (!uid) { uid = createId(); localStorage.setItem(USER_ID_KEY, uid); }
+    setUserId(uid);
+
+    // session_id — per conversation
     const storedSession = localStorage.getItem(SESSION_KEY);
-    const sid           = storedSession || createSessionId();
+    const sid           = storedSession || createId();
     if (!storedSession) localStorage.setItem(SESSION_KEY, sid);
+    setSessionId(sid);
 
     const storedPhase = localStorage.getItem(PHASE_KEY) || "socratic";
     const rawHistory  = localStorage.getItem(HISTORY_KEY);
     const history     = rawHistory ? (JSON.parse(rawHistory) as ChatMessage[]) : [];
-
-    setSessionId(sid);
     setPhase(storedPhase);
     setMessages(history);
   }, []);
@@ -161,7 +249,17 @@ export default function Page() {
     boxRef.current.scrollTop = boxRef.current.scrollHeight;
   }, [messages, isLoading]);
 
-  // ── fetch global layout ────────────────────────────────────
+  // ── Load Personal Brain from backend ──────────────────────
+  useEffect(() => {
+    if (!userId || !API_BASE || brainLoaded) return;
+    setBrainLoaded(true);
+    fetch(`${API_BASE.replace(/\/$/, "")}/user/${userId}/brain`)
+      .then((r) => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); })
+      .then((d) => { if (d.concepts?.length) setPersonalBrain(d.concepts); })
+      .catch((err) => console.warn("[PersonalBrain] load failed:", err));
+  }, [userId, brainLoaded]);
+
+  // ── Fetch global layout ────────────────────────────────────
   useEffect(() => {
     if (messages.length === 0 || globalLayoutFetched || !API_BASE) return;
     setGlobalLayoutFetched(true);
@@ -179,28 +277,17 @@ export default function Page() {
       setActiveFoundationTree({ nodes: [], edges: [] });
       return;
     }
-
     const path = graphData.paths?.find((p) => p.path_id === selectedPathId);
-    if (!path) {
-      setActivePathNodeEids([]);
-      setActivePathEdges([]);
-      setActiveFoundationTree({ nodes: [], edges: [] });
-      return;
-    }
+    if (!path) { setActivePathNodeEids([]); setActivePathEdges([]); setActiveFoundationTree({ nodes: [], edges: [] }); return; }
 
-    // Collect concept node eids for the selected downstream path
     const pathConceptEids = (path.node_ids ?? []).filter((nid) => {
       const node = graphData.nodes?.find((n) => n.id === nid);
       return node?.node_type === "concept";
     });
-
-    // Collect the edges for the selected path (source→target pairs from graphData.edges)
     const pathEdgeIdSet = new Set(path.edge_ids ?? []);
     const pathEdgePairs = (graphData.edges ?? [])
       .filter((e) => pathEdgeIdSet.has(e.id))
       .map((e) => ({ source: e.source as string, target: e.target as string }));
-
-    // Foundation tree from graphData (all upstream intermediate nodes + edges)
     const foundationTree: FoundationTree = (graphData as any).foundation_tree ?? { nodes: [], edges: [] };
 
     setActivePathNodeEids(pathConceptEids);
@@ -208,16 +295,115 @@ export default function Page() {
     setActiveFoundationTree(foundationTree);
   }, [selectedPathId, graphData]);
 
+  // ─────────────────────────────────────────────────────────
+  // Detail Panel: node click handler
+  // ─────────────────────────────────────────────────────────
+
+  const handleNodeClick = useCallback(async (node: GlobalLayoutNode) => {
+    setSelectedNode(node);
+    setDetailData(null);
+    setLlmSuggestions([]);
+    setDetailLoading(true);
+
+    if (!API_BASE) { setDetailLoading(false); return; }
+    const base = API_BASE.replace(/\/$/, "");
+
+    // 兩個請求並行，LLM suggest 的結果回來後才更新，不阻塞 detail
+    const recentText = messagesRef.current
+      .slice(-6)
+      .map((m) => m.content)
+      .join("\n");
+
+    const detailPromise = fetch(`${base}/concept/detail/${node.id}`)
+      .then((r) => r.json() as Promise<ConceptDetail>);
+
+    // fire-and-forget LLM suggest
+    fetch(`${base}/concept/suggest`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({
+        text:         recentText,
+        anchor_eid:   node.id,
+        anchor_label: node.name,
+        exclude_eids: personalBrain.map((c) => c.eid),
+      }),
+    })
+      .then((r) => r.json())
+      .then((d) => setLlmSuggestions(d.suggestions ?? []))
+      .catch((err) => console.warn("[concept/suggest]", err));
+
+    try {
+      const detail = await detailPromise;
+      setDetailData(detail);
+    } catch (err) {
+      console.warn("[concept/detail]", err);
+    } finally {
+      setDetailLoading(false);
+    }
+  }, [personalBrain]);
+
+  // ─────────────────────────────────────────────────────────
+  // Personal Brain CRUD
+  // ─────────────────────────────────────────────────────────
+
+  const addToBrain = useCallback(async (
+    eid:    string,
+    label:  string,
+    source: PersonalBrainConcept["source"],
+  ) => {
+    const existing = personalBrain.find((c) => c.eid === eid);
+    const entry: PersonalBrainConcept = existing
+      ? { ...existing, weight: Math.min(1.0, existing.weight + 0.1) }
+      : { eid, label, source, weight: 0.5, addedAt: Date.now() };
+
+    const updated = [...personalBrain.filter((c) => c.eid !== eid), entry];
+    setPersonalBrain(updated);
+
+    if (!API_BASE || !userId) return;
+    fetch(`${API_BASE.replace(/\/$/, "")}/user/${userId}/brain/concepts`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify(entry),
+    }).catch((err) => console.warn("[brain/add]", err));
+  }, [personalBrain, userId]);
+
+  const removeFromBrain = useCallback(async (eid: string) => {
+    setPersonalBrain((prev) => prev.filter((c) => c.eid !== eid));
+    if (!API_BASE || !userId) return;
+    fetch(`${API_BASE.replace(/\/$/, "")}/user/${userId}/brain/concepts/${eid}`, {
+      method: "DELETE",
+    }).catch((err) => console.warn("[brain/remove]", err));
+  }, [userId]);
+
+  const updateWeight = useCallback(async (eid: string, weight: number) => {
+    setPersonalBrain((prev) =>
+      prev.map((c) => c.eid === eid ? { ...c, weight } : c),
+    );
+    if (!API_BASE || !userId) return;
+    fetch(`${API_BASE.replace(/\/$/, "")}/user/${userId}/brain/concepts/${eid}`, {
+      method:  "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ weight }),
+    }).catch((err) => console.warn("[brain/weight]", err));
+  }, [userId]);
+
+  const handleSuggestionAdd = useCallback((s: LLMSuggestion) => {
+    addToBrain(s.eid, s.label, "llm_suggest");
+  }, [addToBrain]);
+
+  // ─────────────────────────────────────────────────────────
+  // Chat helpers (unchanged logic, unchanged API)
+  // ─────────────────────────────────────────────────────────
+
   const canSend = !!input.trim() && !isLoading && !!sessionId;
 
-  // ── typewriter ────────────────────────────────────────────
   async function typewriterAppend(fullText: string): Promise<void> {
     isTypingRef.current = true;
-    const aiId = createSessionId();
+    const aiId = createId();
     setMessages((prev) => [...prev, { id: aiId, role: "ai", content: "" }]);
     for (let i = 1; i <= fullText.length; i++) {
       setMessages((prev) =>
-        prev.map((msg) => msg.id === aiId ? { ...msg, content: fullText.slice(0, i) } : msg)
+        prev.map((msg) => msg.id === aiId ? { ...msg, content: fullText.slice(0, i) } : msg),
       );
       await wait(10);
     }
@@ -225,7 +411,6 @@ export default function Page() {
     saveHistory(messagesRef.current);
   }
 
-  // ── chip 切換 ─────────────────────────────────────────────
   function handleChipClick(index: number) {
     if (isLoading) return;
     const g = allGraphsRef.current[index] ?? null;
@@ -251,12 +436,8 @@ export default function Page() {
     allGraphsRef.current = parsed;
     const keys     = Object.keys(parsed).map(Number).filter((k) => parsed[k]);
     const firstIdx = keys.length ? Math.min(...keys) : null;
-    const chips = Object.entries(parsed)
-      .map(([k, g]) => ({
-        index:   Number(k),
-        label:   g?.query_concepts?.[0]?.name ?? `選項 ${k}`,
-        hasData: !!g,
-      }))
+    const chips    = Object.entries(parsed)
+      .map(([k, g]) => ({ index: Number(k), label: g?.query_concepts?.[0]?.name ?? `選項 ${k}`, hasData: !!g }))
       .sort((a, b) => a.index - b.index);
     setChipList(chips);
 
@@ -266,23 +447,19 @@ export default function Page() {
       setGraphData(firstGraph ?? null);
       setGraphVisible(true);
       if (firstGraph) {
-        const defaultPathId = typeof firstGraph.selected_path_id === "number"
-          ? firstGraph.selected_path_id : null;
+        const defaultPathId = typeof firstGraph.selected_path_id === "number" ? firstGraph.selected_path_id : null;
         setSelectedPathId(defaultPathId);
         const defaultPath = firstGraph.paths?.find((p) => p.path_id === defaultPathId);
         setSelectedLabel(defaultPath?.final_label ?? null);
       }
     }
 
-    const candidateEids = extractCandidateEids(parsed);
-    setActiveCandidateEids(candidateEids);
-    // reset path highlights when new graphs arrive
+    setActiveCandidateEids(extractCandidateEids(parsed));
     setActivePathNodeEids([]);
     setActivePathEdges([]);
     setActiveFoundationTree({ nodes: [], edges: [] });
   }
 
-  // ── 送出訊息 ──────────────────────────────────────────────
   async function submitMessage(e: FormEvent) {
     e.preventDefault();
     if (!canSend) return;
@@ -293,7 +470,7 @@ export default function Page() {
     setError("");
     setIsLoading(true);
 
-    const userMsg: ChatMessage = { id: createSessionId(), role: "user", content: text };
+    const userMsg: ChatMessage = { id: createId(), role: "user", content: text };
     setMessages((prev) => [...prev, userMsg]);
 
     try {
@@ -322,10 +499,7 @@ export default function Page() {
       await typewriterAppend(data.reply || "");
     } catch (err) {
       setError(err instanceof Error ? err.message : "請求失敗，請稍後重試");
-      setMessages((prev) => [
-        ...prev,
-        { id: createSessionId(), role: "ai", content: "抱歉，連線失敗，請稍後再試。" },
-      ]);
+      setMessages((prev) => [...prev, { id: createId(), role: "ai", content: "抱歉，連線失敗，請稍後再試。" }]);
       saveHistory(messagesRef.current);
     } finally {
       setIsLoading(false);
@@ -333,7 +507,6 @@ export default function Page() {
     }
   }
 
-  // ── 確認路徑 ─────────────────────────────────────────────
   async function confirmPathSelection() {
     if (selectedPathId === null || !sessionId || isLoading) return;
     if (!API_BASE) { setError("尚未設定 NEXT_PUBLIC_API_BASE_URL。"); return; }
@@ -344,13 +517,21 @@ export default function Page() {
 
     const isReselect = phase === "main_agent" && confirmedPathId !== null;
     const confirmMsg: ChatMessage = {
-      id:      createSessionId(),
+      id:      createId(),
       role:    "user",
       content: isReselect
         ? `切換至路徑：${selectedLabel || `路徑 ${selectedPathId + 1}`}`
         : `確認選擇路徑：${selectedLabel || `路徑 ${selectedPathId + 1}`}`,
     };
     setMessages((prev) => [...prev, confirmMsg]);
+
+    // 路徑確認時，自動將路徑的 final concept 加入 Personal Brain
+    if (selectedLabel && graphData) {
+      const path = graphData.paths?.find((p) => p.path_id === selectedPathId);
+      if (path?.final_concept) {
+        addToBrain(path.final_concept, path.final_label || selectedLabel, "path_confirm");
+      }
+    }
 
     try {
       const response = await fetch(`${API_BASE.replace(/\/$/, "")}/chat`, {
@@ -374,10 +555,7 @@ export default function Page() {
       await typewriterAppend(data.reply || "");
     } catch (err) {
       setError(err instanceof Error ? err.message : "請求失敗，請稍後重試");
-      setMessages((prev) => [
-        ...prev,
-        { id: createSessionId(), role: "ai", content: "抱歉，連線失敗，請稍後再試。" },
-      ]);
+      setMessages((prev) => [...prev, { id: createId(), role: "ai", content: "抱歉，連線失敗，請稍後再試。" }]);
       saveHistory(messagesRef.current);
     } finally {
       setIsLoading(false);
@@ -385,13 +563,8 @@ export default function Page() {
     }
   }
 
-  useEffect(() => {
-    if (!sessionId) return;
-    localStorage.setItem(SESSION_KEY, sessionId);
-  }, [sessionId]);
-
   function resetConversation() {
-    const sid = createSessionId();
+    const sid = createId();
     setSessionId(sid);
     setPhase("socratic");
     setMessages([]);
@@ -408,6 +581,10 @@ export default function Page() {
     setActivePathNodeEids([]);
     setActivePathEdges([]);
     setActiveFoundationTree({ nodes: [], edges: [] });
+    // Note: personal brain persists across conversations intentionally
+    setSelectedNode(null);
+    setDetailData(null);
+    setLlmSuggestions([]);
     localStorage.setItem(SESSION_KEY, sid);
     localStorage.setItem(PHASE_KEY, "socratic");
     localStorage.removeItem(HISTORY_KEY);
@@ -448,7 +625,7 @@ export default function Page() {
 
   return (
     <main>
-      {/* ── header ── */}
+      {/* ── Header ── */}
       <header>
         <div>
           <h1>KAG Robot</h1>
@@ -456,6 +633,14 @@ export default function Page() {
             {sessionId ? `${sessionId.slice(0, 20)}…` : "初始化中…"}
             {" · "}
             <span style={{ color: "var(--orange)", opacity: 0.7 }}>{phase}</span>
+            {personalBrain.length > 0 && (
+              <>
+                {" · "}
+                <span style={{ color: "var(--purple)", opacity: 0.8 }}>
+                  ◉ {personalBrain.length} in brain
+                </span>
+              </>
+            )}
           </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -470,10 +655,10 @@ export default function Page() {
         </div>
       </header>
 
-      {/* ── three-column content area ── */}
+      {/* ── Four-column content area ── */}
       <div className="content-area">
 
-        {/* ══ LEFT: chat column ══ */}
+        {/* ══ LEFT: chat ══ */}
         <div className="chat-column">
           <div className="chat-box" ref={boxRef}>
             {messages.length === 0 ? (
@@ -482,9 +667,7 @@ export default function Page() {
               </div>
             ) : (
               messages.map((msg) => (
-                <div key={msg.id} className={`msg ${msg.role}`}>
-                  {msg.content}
-                </div>
+                <div key={msg.id} className={`msg ${msg.role}`}>{msg.content}</div>
               ))
             )}
             {isLoading && (
@@ -508,9 +691,7 @@ export default function Page() {
                 }}
                 disabled={isLoading}
               />
-              <button type="submit" disabled={!canSend}
-                style={{ alignSelf: "flex-end" }}
-              >
+              <button type="submit" disabled={!canSend} style={{ alignSelf: "flex-end" }}>
                 送出
               </button>
             </form>
@@ -518,7 +699,7 @@ export default function Page() {
           </div>
         </div>
 
-        {/* ══ CENTRE: Brain column ══ */}
+        {/* ══ CENTRE: GlobalBrain ══ */}
         <div className="brain-panel" ref={brainColRef}>
           <div className="brain-panel-label">Global Knowledge Field</div>
           <GlobalBrain
@@ -527,13 +708,15 @@ export default function Page() {
             activePathNodeEids={activePathNodeEids}
             activePathEdges={activePathEdges}
             activeFoundationTree={activeFoundationTree}
+            personalBrainEids={personalBrainEids}
+            onNodeClick={handleNodeClick}
             width={brainSize.w}
-            height={Math.max(brainSize.h - 32, 300)}
+            height={Math.max(brainSize.h - 32, 280)}
           />
         </div>
 
-        {/* ══ RIGHT: KnowledgeGraph panel ══ */}
-        {showGraph && (
+        {/* ══ RIGHT: KnowledgeGraph ══ */}
+        {showGraph ? (
           <div className="graph-panel">
             <div className="graph-header">
               <span className="graph-title">知識圖譜</span>
@@ -556,10 +739,8 @@ export default function Page() {
                     onClick={() => handleChipClick(chip.index)}
                     disabled={!chip.hasData || isLoading}
                     style={{
-                      borderColor: activeChipIndex === chip.index
-                        ? CHIP_COLORS[chip.index % CHIP_COLORS.length] : undefined,
-                      color: activeChipIndex === chip.index
-                        ? CHIP_COLORS[chip.index % CHIP_COLORS.length] : undefined,
+                      borderColor: activeChipIndex === chip.index ? CHIP_COLORS[chip.index % CHIP_COLORS.length] : undefined,
+                      color:       activeChipIndex === chip.index ? CHIP_COLORS[chip.index % CHIP_COLORS.length] : undefined,
                     }}
                   >
                     {chip.label}
@@ -574,18 +755,24 @@ export default function Page() {
                   const color       = PATH_COLORS[p.path_id % PATH_COLORS.length];
                   const isActive    = selectedPathId === p.path_id;
                   const isConfirmed = p.path_id === confirmedPathId;
+                  // show personal score delta if available
+                  const scoreEntry  = rcScores.find((s) => s.eid === p.final_concept);
+                  const delta       = scoreEntry ? scoreEntry.personal_score - scoreEntry.base_score : 0;
                   return (
                     <button
                       key={p.path_id}
                       className={`path-chip ${isActive ? "active" : ""}`}
                       onClick={() => handlePathSelect(p.path_id, p.final_label)}
-                      style={{
-                        borderColor: isActive ? color : undefined,
-                        color:       isActive ? color : undefined,
-                      }}
+                      style={{ borderColor: isActive ? color : undefined, color: isActive ? color : undefined }}
+                      title={delta > 0.01 ? `personal brain ▲ +${delta.toFixed(2)}` : undefined}
                     >
                       {isConfirmed ? "✓ " : "↓ "}
                       {p.final_label || `路徑 ${p.path_id + 1}`}
+                      {delta > 0.01 && (
+                        <span style={{ color: "var(--teal)", marginLeft: 4, fontSize: "0.6rem" }}>
+                          ▲
+                        </span>
+                      )}
                     </button>
                   );
                 })}
@@ -596,8 +783,8 @@ export default function Page() {
               data={graphData}
               selectedPathId={selectedPathId}
               onPathSelect={handlePathSelect}
-              width={456}
-              height={graphVisible && showConfirm ? 340 : 400}
+              width={336}
+              height={showConfirm ? 300 : 360}
             />
 
             {showConfirm && (
@@ -615,10 +802,7 @@ export default function Page() {
               </button>
             )}
           </div>
-        )}
-
-        {/* ── graph panel 佔位 ── */}
-        {!showGraph && (
+        ) : (
           <div style={{
             display:        "flex",
             alignItems:     "center",
@@ -634,6 +818,20 @@ export default function Page() {
             圖譜面板
           </div>
         )}
+
+        {/* ══ FAR RIGHT: Detail Panel ══ */}
+        <DetailPanel
+          node={selectedNode}
+          detail={detailData}
+          loading={detailLoading}
+          personalBrain={personalBrain}
+          suggestions={llmSuggestions}
+          rcScores={rcScores}
+          onAdd={addToBrain}
+          onRemove={removeFromBrain}
+          onUpdateWeight={updateWeight}
+          onSuggestionAdd={handleSuggestionAdd}
+        />
 
       </div>
     </main>

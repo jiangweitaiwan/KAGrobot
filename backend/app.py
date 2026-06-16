@@ -1,15 +1,47 @@
 # -*- coding: utf-8 -*-
-"""api/app.py — FastAPI application factory with lifespan。
-
-所有 singleton 的初始化與關閉集中在 lifespan context manager，
-掛載於 app.state，由 route handler 透過 request.app.state 取用。
-
-app.state 欄位清單：
-    orchestrator     — compiled LangGraph app
-    layout_builder   — GlobalLayoutBuilder
-    layout_cache     — Optional[dict]，全域佈局快取
-    settings         — Settings
+"""app.py の変更差分メモ（PR1）
+以下の箇所だけ変更する。ファイル全体は原本を維持。
 """
+
+# ─────────────────────────────────────────────────────────────
+# 変更 1: lifespan 内で app.state.driver と app.state.encoder を追加
+# ─────────────────────────────────────────────────────────────
+#
+# 既存コード（変更なし）：
+#   driver = GraphDatabase.driver(...)
+#   encoder = SbertOnnxEncoder(model_path, tokenizer_dir)
+#
+# 追加するコード（yield の直前、app.state.orchestrator の後に追記）：
+#
+#   app.state.driver  = driver   # ← concept/detail endpoint が直接使う
+#   app.state.encoder = encoder  # ← concept/suggest の SBERT prefilter が使う
+#
+# ─────────────────────────────────────────────────────────────
+# 変更 2: create_app() で新しいルーターを include する
+# ─────────────────────────────────────────────────────────────
+#
+# 既存コード：
+#   from api.routes import chat_router, graph_router
+#   app.include_router(chat_router)
+#   app.include_router(graph_router)
+#
+# 変更後：
+#   from api.routes import chat_router, graph_router, concept_router, user_brain_router
+#   app.include_router(chat_router)
+#   app.include_router(graph_router)
+#   app.include_router(concept_router)    # ← 追加
+#   app.include_router(user_brain_router) # ← 追加
+#
+# ─────────────────────────────────────────────────────────────
+# 変更 3: requirements.txt に google-cloud-firestore を追加
+# ─────────────────────────────────────────────────────────────
+#
+# google-cloud-firestore>=2.16.0
+
+# ─────────────────────────────────────────────────────────────
+# 下に「変更後の lifespan と create_app の完全版」を示す。
+# 原本の他の部分はそのままコピーすること。
+# ─────────────────────────────────────────────────────────────
 
 from __future__ import annotations
 
@@ -36,45 +68,34 @@ from core.socrates_bot import SocratesChatBot
 from core.main_agent   import MainAgent
 from core.skill_loader import SkillLoader
 from orchestrator      import OrchestratorNodes, build_orchestrator
-from api.routes        import chat_router, graph_router
+from api.routes        import chat_router, graph_router, concept_router, user_brain_router
 
-
-# ======================================================================
-# Lifespan（singleton 初始化 / 關閉）
-# ======================================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     s        = get_settings()
     base_dir = Path(__file__).resolve().parent
 
-    # ── Neo4j driver ──────────────────────────────────────────
     driver = GraphDatabase.driver(
         s.neo4j_uri, auth=("neo4j", s.neo4j_password)
     )
 
-    # ── SBERT encoder ─────────────────────────────────────────
     model_path, tokenizer_dir = s.resolved_sbert_paths(base_dir=base_dir)
     encoder = SbertOnnxEncoder(model_path, tokenizer_dir)
 
-    # ── Retrieval 層 ──────────────────────────────────────────
     candidate_retriever = CandidateRetriever(driver, encoder)
     candidate_retriever.load_embeddings()
 
     concept_retriever = ConceptDetailRetriever(driver)
+    path_selector     = PathSelector()
+    downstream_bfs    = DownstreamBFS(driver)
+    upstream_bfs      = UpstreamBFS(driver, path_selector)
+    layout_builder    = GlobalLayoutBuilder(driver, encoder, s)
 
-    path_selector  = PathSelector()
-    downstream_bfs = DownstreamBFS(driver)
-    upstream_bfs   = UpstreamBFS(driver, path_selector)
-
-    layout_builder = GlobalLayoutBuilder(driver, encoder, s)
-
-    # ── Graph service 層 ──────────────────────────────────────
     scorer          = PathScorer()
     graph_expander  = GraphExpander(downstream_bfs, upstream_bfs, scorer)
     context_builder = GraphContextBuilder()
 
-    # ── Core agents ───────────────────────────────────────────
     socrates_bot = SocratesChatBot(
         candidate_retriever=candidate_retriever,
         concept_retriever=concept_retriever,
@@ -86,7 +107,6 @@ async def lifespan(app: FastAPI):
         gcs_prefix="skills",
     )
 
-    # ── Orchestrator ──────────────────────────────────────────
     nodes        = OrchestratorNodes(
         socrates_bot    = socrates_bot,
         main_agent      = main_agent,
@@ -96,29 +116,24 @@ async def lifespan(app: FastAPI):
     )
     orchestrator = build_orchestrator(nodes)
 
-    # ── 掛上 app.state ────────────────────────────────────────
+    # ── app.state ─────────────────────────────────────────────
     app.state.orchestrator   = orchestrator
     app.state.layout_builder = layout_builder
-    app.state.layout_cache   = None          # 首次 GET /graph/global-layout 時填入
+    app.state.layout_cache   = None
     app.state.settings       = s
+    # ↓ PR1 で追加
+    app.state.driver         = driver
+    app.state.encoder        = encoder
 
-    yield  # ── 服務運行中 ──
+    yield
 
-    # ── Shutdown ──────────────────────────────────────────────
     driver.close()
 
 
-# ======================================================================
-# FastAPI app factory
-# ======================================================================
-
 def create_app() -> FastAPI:
-    """建立並回傳 FastAPI app（供 entry.py 與測試使用）。"""
-    s = get_settings()
-
+    s   = get_settings()
     app = FastAPI(lifespan=lifespan)
 
-    # CORS
     origins = [o.strip() for o in s.cors_allow_origins.split(",") if o.strip()]
     if origins:
         app.add_middleware(
@@ -129,7 +144,6 @@ def create_app() -> FastAPI:
             allow_headers=["*"],
         )
 
-    # LangSmith tracing
     if s.langchain_tracing_v2:
         os.environ["LANGCHAIN_TRACING_V2"] = s.langchain_tracing_v2
     if s.langchain_endpoint:
@@ -137,8 +151,10 @@ def create_app() -> FastAPI:
     if s.langchain_project:
         os.environ["LANGCHAIN_PROJECT"]    = s.langchain_project
 
-    # Routes
+    # ↓ PR1 で追加: concept_router, user_brain_router
     app.include_router(chat_router)
     app.include_router(graph_router)
+    app.include_router(concept_router)
+    app.include_router(user_brain_router)
 
     return app
