@@ -69,7 +69,7 @@ from core.main_agent   import MainAgent
 from core.skill_loader import SkillLoader
 from orchestrator      import OrchestratorNodes, build_orchestrator
 from api.routes        import chat_router, graph_router, concept_router, user_brain_router
-
+from api.routes.routes_brain import router as brain_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -124,7 +124,8 @@ async def lifespan(app: FastAPI):
     # ↓ PR1 で追加
     app.state.driver         = driver
     app.state.encoder        = encoder
-
+    app.state.upstream_bfs   = upstream_bfs    # ← 新增
+    app.state.downstream_bfs = downstream_bfs  # ← 新增
     yield
 
     driver.close()
@@ -156,5 +157,5 @@ def create_app() -> FastAPI:
     app.include_router(graph_router)
     app.include_router(concept_router)
     app.include_router(user_brain_router)
-
+    app.include_router(brain_router)
     return app
