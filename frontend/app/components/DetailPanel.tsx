@@ -50,8 +50,13 @@ export type RCSemanticScore = {
 };
 
 // RC foundation intersection data (pre-computed from all_graphs)
-export type RCFoundationMap = Map<string, { label: string; foundationEids: string[] }>;
 
+export type RCFoundationMap = Map<string, {
+  label:          string;
+  foundationEids: string[];
+  treeNodes?:     { element_id: string; label: string }[];
+  treeEdges?:     { source: string; target: string }[];
+}>;
 type Props = {
   node:              { id: string; name: string; type: string; source?: string } | null;
   detail:            ConceptDetail | null;

@@ -31,7 +31,7 @@ from api.routes        import (
     graph_router,
     concept_router,
     user_brain_router,
-    brain_router,          # ← 新增
+    brain_router,
 )
 
 
@@ -87,8 +87,14 @@ async def lifespan(app: FastAPI):
     app.state.settings       = s
     app.state.driver         = driver
     app.state.encoder        = encoder
-    app.state.upstream_bfs   = upstream_bfs    # ← 供 /graph/expand/{eid}
-    app.state.downstream_bfs = downstream_bfs  # ← 供 /graph/rc-paths/{eid}
+    app.state.upstream_bfs   = upstream_bfs
+    app.state.downstream_bfs = downstream_bfs
+
+    # ── 記憶體快取（process 生命週期，圖譜不常變動故不設 TTL）──
+    # eid(str) → ExpandResponse / RCPathsResponse / ConceptDetailResponse
+    app.state.expand_cache = {}
+    app.state.rcpath_cache = {}
+    app.state.detail_cache = {}
 
     yield
 
@@ -120,6 +126,6 @@ def create_app() -> FastAPI:
     app.include_router(graph_router)
     app.include_router(concept_router)
     app.include_router(user_brain_router)
-    app.include_router(brain_router)       # ← 新增
+    app.include_router(brain_router)
 
     return app

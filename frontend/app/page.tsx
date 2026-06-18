@@ -36,15 +36,12 @@ type ChatResponse = {
 type GraphDataLite = {
   query_concepts?: { id: string; name: string }[];
   nodes?:          { id: string; node_type: string; matched?: boolean }[];
-  paths?: {
-    path_id:       number;
-    node_ids:      string[];
-    edge_ids:      string[];
-    final_concept: string;
-    final_label:   string;
-    foundations?:  { element_id: string; label: string }[];
-  }[];
-  foundations?: { element_id: string; label: string }[];
+  paths?: { ... }[];           // 維持不變
+  foundations?:     { element_id: string; label: string }[];
+  foundation_tree?: {           // ← 新增這個
+    nodes: { element_id: string; label: string }[];
+    edges: { source: string; target: string }[];
+  };
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -108,8 +105,16 @@ function buildRCFoundationMap(allGraphs: Record<number, GraphDataLite | null>): 
         : (path.foundations ?? []).map((f) => f.element_id);
       if (!map.has(path.final_concept)) {
         map.set(path.final_concept, {
-          label:         path.final_label || path.final_concept,
+          label:          path.final_label || path.final_concept,
           foundationEids: fEids,
+          treeNodes:      (g.foundation_tree?.nodes ?? []).map((n: any) => ({
+            element_id: n.element_id,
+            label:      n.label,
+          })),
+          treeEdges:      (g.foundation_tree?.edges ?? []).map((e: any) => ({
+            source: e.source,
+            target: e.target,
+          })),
         });
       }
     }
@@ -578,6 +583,7 @@ export default function Page() {
           <GlobalBrainExplorer
             layout={globalLayout}
             activeCandidateEids={activeCandidateEids}
+            rcFoundationMap={rcFoundationMap}
             onNodeClick={handleNodeClick}
             width={explorerSize.w}
             height={Math.max(explorerSize.h - 32, 280)}

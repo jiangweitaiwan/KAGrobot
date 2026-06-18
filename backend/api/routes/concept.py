@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
 """api/routes/concept.py — Concept 相關 endpoints。
 
-GET  /concept/detail/{eid}  → 根據 elementId 查詢 concept 詳情
+GET  /concept/detail/{eid}  → 根據 elementId 查詢 concept 詳情（結果快取）
 POST /concept/suggest       → LLM 非同步推薦相關 concept
+
+優化（2024）：
+  /concept/detail/{eid} 結果快取在 app.state.detail_cache（eid → dict）。
+  同一個 eid 只打一次 Neo4j，後續直接從 app.state 取。
 """
 
 from __future__ import annotations
@@ -32,8 +36,8 @@ class ConceptDetailResponse(BaseModel):
 
 
 class SuggestRequest(BaseModel):
-    text:         str                    # 最近幾輪對話文字
-    anchor_eid:   Optional[str] = None  # 目前 Detail Panel 聚焦的 concept eid
+    text:         str
+    anchor_eid:   Optional[str] = None
     anchor_label: Optional[str] = None
     exclude_eids: List[str]     = []
 
@@ -55,8 +59,15 @@ class SuggestResponse(BaseModel):
 async def concept_detail(eid: str, request: Request) -> ConceptDetailResponse:
     """根據 elementId 查詢 concept 詳情。
 
-    直接用 elementId(c) = $eid 精確匹配，比 name 查詢更快且不會有歧義。
+    結果快取在 app.state.detail_cache（eid → ConceptDetailResponse dict）。
+    同一個 eid 只打一次 Neo4j。
     """
+    # ── 1. 快取命中直接回傳 ──────────────────────────────────
+    detail_cache: Dict[str, ConceptDetailResponse] = request.app.state.detail_cache
+    if eid in detail_cache:
+        return detail_cache[eid]
+
+    # ── 2. Neo4j 查詢 ─────────────────────────────────────────
     driver = request.app.state.driver
 
     with driver.session() as session:
@@ -81,10 +92,13 @@ async def concept_detail(eid: str, request: Request) -> ConceptDetailResponse:
         ).data()
 
     if not rows:
-        return ConceptDetailResponse(
+        # not found 也快取，避免對不存在的 eid 重複查詢
+        response = ConceptDetailResponse(
             found=False, eid=eid, rc_name="", description=None,
             function=None, analysis_types=[], concept_type=None, papers=[],
         )
+        detail_cache[eid] = response
+        return response
 
     row    = rows[0]
     papers = [
@@ -97,7 +111,7 @@ async def concept_detail(eid: str, request: Request) -> ConceptDetailResponse:
         if p.get("title")
     ]
 
-    return ConceptDetailResponse(
+    response = ConceptDetailResponse(
         found          = True,
         eid            = eid,
         rc_name        = row["name"] or "",
@@ -107,6 +121,10 @@ async def concept_detail(eid: str, request: Request) -> ConceptDetailResponse:
         concept_type   = row["type"],
         papers         = papers,
     )
+
+    # ── 3. 存入快取 ───────────────────────────────────────────
+    detail_cache[eid] = response
+    return response
 
 
 @router.post("/concept/suggest", response_model=SuggestResponse)
@@ -130,7 +148,6 @@ async def concept_suggest(
     all_nodes: List[Dict[str, Any]] = layout_cache.get("nodes", [])
     exclude_set = set(body.exclude_eids)
 
-    # 前置過濾：排除已在 personal brain 的、優先 RC 類型
     candidates = [
         n for n in all_nodes
         if n["id"] not in exclude_set
@@ -140,13 +157,11 @@ async def concept_suggest(
     if not candidates:
         return SuggestResponse(suggestions=[])
 
-    # SBERT 前置過濾：取 top-40 語意相近候選，減少送給 LLM 的 token 數
-    encoder = request.app.state.encoder  # SbertOnnxEncoder，從 app.state 取
+    encoder = request.app.state.encoder
     top_candidates = _sbert_prefilter(
         body.text, candidates, encoder, top_k=40
     )
 
-    # 組裝 LLM prompt
     candidate_lines = "\n".join(
         f"- eid={n['id']} | label={n['name']} | type={n.get('type','')}"
         for n in top_candidates
@@ -182,7 +197,6 @@ async def concept_suggest(
         resp = llm.invoke(prompt)
         raw  = resp.content if hasattr(resp, "content") else str(resp)
 
-        # 清除可能的 markdown fence
         raw = raw.strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
@@ -220,7 +234,6 @@ def _sbert_prefilter(
         query_emb = encoder.encode(query)[0]
         names     = [n.get("name", "") for n in candidates]
 
-        # 分批 encode，避免大 batch 耗記憶體
         batch_size = 64
         embs = []
         for i in range(0, len(names), batch_size):
