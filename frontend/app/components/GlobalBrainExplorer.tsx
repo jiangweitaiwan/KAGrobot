@@ -440,7 +440,7 @@ export default function GlobalBrainExplorer({
     }
 
     function findNearestNodeIndex(px: number, py: number): number | null {
-      if (!rotGroupRef.current) return null;
+      if (!rotGroupRef.current || !layout) return null;
       let bestDist = PICK_PIXEL_RADIUS * PICK_PIXEL_RADIUS;
       let bestIdx: number | null = null;
       layout.nodes.forEach((_, i) => {
