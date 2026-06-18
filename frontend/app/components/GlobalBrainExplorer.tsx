@@ -482,7 +482,7 @@ export default function GlobalBrainExplorer({
             if (tooltipRef.current) {
               const sp = worldToScreenPx(wp);
               if (sp) {
-                tooltipRef.current.textContent = layout.nodes[idx].name;
+                tooltipRef.current.textContent = layout?.nodes[idx]?.name ?? "";
                 tooltipRef.current.style.left    = `${sp.x + 12}px`;
                 tooltipRef.current.style.top     = `${sp.y - 8}px`;
                 tooltipRef.current.style.opacity = "1";
@@ -528,7 +528,7 @@ export default function GlobalBrainExplorer({
         const px  = e.clientX - r.left;
         const py  = e.clientY - r.top;
         const idx = findNearestNodeIndex(px, py);
-        if (idx !== null) onNodeClick(layout.nodes[idx]);
+        if (idx !== null && layout) onNodeClick(layout.nodes[idx]);
       }
       isDragging.current = false;
     }
