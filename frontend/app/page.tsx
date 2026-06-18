@@ -36,8 +36,16 @@ type ChatResponse = {
 type GraphDataLite = {
   query_concepts?: { id: string; name: string }[];
   nodes?:          { id: string; node_type: string; matched?: boolean }[];
-  paths?: { ... }[];           // 維持不變
-  foundations?:     { element_id: string; label: string }[];
+  paths?: {
+    path_id:       number;
+    node_ids:      string[];
+    edge_ids:      string[];
+    final_concept: string;
+    final_label:   string;
+    foundations?:  { element_id: string; label: string }[];
+  }[];
+  foundations?: { element_id: string; label: string }[];          // 維持不變
+  
   foundation_tree?: {           // ← 新增這個
     nodes: { element_id: string; label: string }[];
     edges: { source: string; target: string }[];
