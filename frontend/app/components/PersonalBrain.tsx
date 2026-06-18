@@ -276,7 +276,7 @@ export default function PersonalBrain({
       // pulse fMRI sprites
       if (frameCount % 2 === 0 && fmriGroupRef.current) {
         const t = frameCount * 0.01;
-        fmriGroupRef.current.children.forEach((child) => {
+        fmriGroupRef.current.children.forEach((child: THREE.Object3D) => {
           if (child instanceof THREE.Sprite) {
             child.material.opacity = child.userData.baseOpacity * (0.85 + 0.15 * Math.sin(t + child.userData.phase));
           }

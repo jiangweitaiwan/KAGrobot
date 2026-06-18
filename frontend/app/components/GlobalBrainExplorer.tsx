@@ -171,9 +171,8 @@ export default function GlobalBrainExplorer({
   width  = 480,
   height = 480,
 }: Props) {
-  const canvasRef  = useRef<SVGSVGElement | null>(null);
-  const _canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const tooltipRef = useRef<HTMLDivElement | null>(null);
+  const realCanvasRef  = useRef<HTMLCanvasElement | null>(null);
+  const tooltipRef     = useRef<HTMLDivElement | null>(null);
 
   const sceneRef     = useRef<THREE.Scene | null>(null);
   const rendererRef  = useRef<THREE.WebGLRenderer | null>(null);
@@ -189,9 +188,6 @@ export default function GlobalBrainExplorer({
   const proxyMeshesRef = useRef<THREE.Mesh[]>([]);
   const raycasterRef   = useRef<THREE.Raycaster | null>(null);
   const mouseNDCRef    = useRef(new THREE.Vector2(-9999, -9999));
-
-  // canvas ref (HTMLCanvasElement)
-  const realCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const nodeById = useMemo(() => {
     if (!layout) return new Map<string, GlobalLayoutNode>();
@@ -319,7 +315,7 @@ export default function GlobalBrainExplorer({
       }
       if (frameCount % 2 === 0 && glowGroupRef.current) {
         const t = frameCount * 0.02;
-        glowGroupRef.current.children.forEach((child) => {
+        glowGroupRef.current.children.forEach((child: THREE.Object3D) => {
           if (child instanceof THREE.Sprite)
             child.material.opacity = child.userData.baseOpacity * (0.85 + 0.15 * Math.sin(t));
         });

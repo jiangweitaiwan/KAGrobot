@@ -1,47 +1,5 @@
 # -*- coding: utf-8 -*-
-"""app.py の変更差分メモ（PR1）
-以下の箇所だけ変更する。ファイル全体は原本を維持。
-"""
-
-# ─────────────────────────────────────────────────────────────
-# 変更 1: lifespan 内で app.state.driver と app.state.encoder を追加
-# ─────────────────────────────────────────────────────────────
-#
-# 既存コード（変更なし）：
-#   driver = GraphDatabase.driver(...)
-#   encoder = SbertOnnxEncoder(model_path, tokenizer_dir)
-#
-# 追加するコード（yield の直前、app.state.orchestrator の後に追記）：
-#
-#   app.state.driver  = driver   # ← concept/detail endpoint が直接使う
-#   app.state.encoder = encoder  # ← concept/suggest の SBERT prefilter が使う
-#
-# ─────────────────────────────────────────────────────────────
-# 変更 2: create_app() で新しいルーターを include する
-# ─────────────────────────────────────────────────────────────
-#
-# 既存コード：
-#   from api.routes import chat_router, graph_router
-#   app.include_router(chat_router)
-#   app.include_router(graph_router)
-#
-# 変更後：
-#   from api.routes import chat_router, graph_router, concept_router, user_brain_router
-#   app.include_router(chat_router)
-#   app.include_router(graph_router)
-#   app.include_router(concept_router)    # ← 追加
-#   app.include_router(user_brain_router) # ← 追加
-#
-# ─────────────────────────────────────────────────────────────
-# 変更 3: requirements.txt に google-cloud-firestore を追加
-# ─────────────────────────────────────────────────────────────
-#
-# google-cloud-firestore>=2.16.0
-
-# ─────────────────────────────────────────────────────────────
-# 下に「変更後の lifespan と create_app の完全版」を示す。
-# 原本の他の部分はそのままコピーすること。
-# ─────────────────────────────────────────────────────────────
+"""app.py — FastAPI application factory."""
 
 from __future__ import annotations
 
@@ -63,13 +21,19 @@ from retrieval import (
     PathSelector,
     GlobalLayoutBuilder,
 )
-from graph_service import GraphExpander, PathScorer, GraphContextBuilder
+from graph_service    import GraphExpander, PathScorer, GraphContextBuilder
 from core.socrates_bot import SocratesChatBot
 from core.main_agent   import MainAgent
 from core.skill_loader import SkillLoader
 from orchestrator      import OrchestratorNodes, build_orchestrator
-from api.routes        import chat_router, graph_router, concept_router, user_brain_router
-from api.routes.routes_brain import router as brain_router
+from api.routes        import (
+    chat_router,
+    graph_router,
+    concept_router,
+    user_brain_router,
+    brain_router,          # ← 新增
+)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -121,11 +85,11 @@ async def lifespan(app: FastAPI):
     app.state.layout_builder = layout_builder
     app.state.layout_cache   = None
     app.state.settings       = s
-    # ↓ PR1 で追加
     app.state.driver         = driver
     app.state.encoder        = encoder
-    app.state.upstream_bfs   = upstream_bfs    # ← 新增
-    app.state.downstream_bfs = downstream_bfs  # ← 新增
+    app.state.upstream_bfs   = upstream_bfs    # ← 供 /graph/expand/{eid}
+    app.state.downstream_bfs = downstream_bfs  # ← 供 /graph/rc-paths/{eid}
+
     yield
 
     driver.close()
@@ -152,10 +116,10 @@ def create_app() -> FastAPI:
     if s.langchain_project:
         os.environ["LANGCHAIN_PROJECT"]    = s.langchain_project
 
-    # ↓ PR1 で追加: concept_router, user_brain_router
     app.include_router(chat_router)
     app.include_router(graph_router)
     app.include_router(concept_router)
     app.include_router(user_brain_router)
-    app.include_router(brain_router)
+    app.include_router(brain_router)       # ← 新增
+
     return app
