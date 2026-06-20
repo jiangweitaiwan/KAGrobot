@@ -106,7 +106,7 @@ async def concept_detail(eid: str, request: Request) -> ConceptDetailResponse:
         # not found 也快取，避免對不存在的 eid 重複查詢
         response = ConceptDetailResponse(
             found=False, eid=eid, rc_name="", definition=None,
-            mechanism=None, key_assumptions=None, function=None,
+            mechanism=None, key_assumptions=None, 
             function=None, analysis_types=[], 
             concept_type=None, papers=[],
         )

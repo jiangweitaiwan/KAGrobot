@@ -32,7 +32,6 @@ type ChatResponse = {
   all_graphs?:    Record<string, GraphDataLite | null> | null;
 };
 
-// Minimal graph type needed for rcFoundationMap extraction
 type GraphDataLite = {
   query_concepts?: { id: string; name: string }[];
   nodes?:          { id: string; node_type: string; matched?: boolean }[];
@@ -44,9 +43,8 @@ type GraphDataLite = {
     final_label:   string;
     foundations?:  { element_id: string; label: string }[];
   }[];
-  foundations?: { element_id: string; label: string }[];          // 維持不變
-  
-  foundation_tree?: {           // ← 新增這個
+  foundations?: { element_id: string; label: string }[];
+  foundation_tree?: {
     nodes: { element_id: string; label: string }[];
     edges: { source: string; target: string }[];
   };
@@ -61,7 +59,7 @@ const HISTORY_KEY = "kagrobot_history";
 const PHASE_KEY   = "kagrobot_phase";
 const USER_ID_KEY = "kagrobot_user_id";
 const MAX_HISTORY = 60;
-const ALPHA       = 0.5;   // weight for semantic_sim in score(RC)
+const ALPHA       = 0.5;
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 
@@ -97,10 +95,6 @@ function extractCandidateEids(allGraphs: Record<number, GraphDataLite | null>): 
   return eids;
 }
 
-/**
- * Extract foundation EIDs per RC from all_graphs.
- * The backend already ran UpstreamBFS and stored foundations on each graph.
- */
 function buildRCFoundationMap(allGraphs: Record<number, GraphDataLite | null>): RCFoundationMap {
   const map: RCFoundationMap = new Map();
   for (const g of Object.values(allGraphs)) {
@@ -130,10 +124,6 @@ function buildRCFoundationMap(allGraphs: Record<number, GraphDataLite | null>): 
   return map;
 }
 
-/**
- * Compute RC ranking from personal brain + semantic scores.
- * α * semantic_sim + (1-α) * weighted_inter_score
- */
 function computeRCRanking(
   personalBrain:    PersonalBrainConcept[],
   rcSemanticScores: RCSemanticScore[],
@@ -152,8 +142,8 @@ function computeRCRanking(
       const w = weightMap.get(feid);
       if (w !== undefined) weightedSum += w;
     }
-    const interScore  = n > 0 ? weightedSum / n : 0;
-    const totalScore  = alpha * semantic + (1 - alpha) * interScore;
+    const interScore = n > 0 ? weightedSum / n : 0;
+    const totalScore = alpha * semantic + (1 - alpha) * interScore;
     results.push({ eid: rcEid, label, totalScore });
   });
 
@@ -178,6 +168,30 @@ function usePanelSize(ref: React.RefObject<HTMLDivElement>) {
     return () => ro.disconnect();
   }, [ref]);
   return size;
+}
+
+// ─────────────────────────────────────────────────────────────
+// 混合策略：fetchSemanticScores
+//
+// 只在 concept_resolved 時呼叫一次，把 query 傳進去取得 SBERT 分數。
+// 後續 foundation 勾選的互動排名仍在前端計算（零延遲）。
+// ─────────────────────────────────────────────────────────────
+
+async function fetchSemanticScores(
+  query: string,
+): Promise<RCSemanticScore[]> {
+  if (!API_BASE || !query.trim()) return [];
+  try {
+    const r = await fetch(
+      `${API_BASE.replace(/\/$/, "")}/brain/rc-semantic-scores?query=${encodeURIComponent(query)}`,
+    );
+    if (!r.ok) throw new Error(`${r.status}`);
+    const d = await r.json();
+    return d.scores ?? [];
+  } catch (err) {
+    console.warn("[rc-semantic-scores]", err);
+    return [];
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -217,15 +231,15 @@ export default function Page() {
   const [loadingTree,    setLoadingTree]    = useState(false);
 
   // ── Refs ───────────────────────────────────────────────────
-  const isTypingRef   = useRef(false);
-  const messagesRef   = useRef<ChatMessage[]>([]);
-  const boxRef        = useRef<HTMLDivElement | null>(null);
-  const explorerColRef  = useRef<HTMLDivElement>(null);
-  const personalColRef  = useRef<HTMLDivElement>(null);
-  const explorerSize    = usePanelSize(explorerColRef as React.RefObject<HTMLDivElement>);
-  const personalSize    = usePanelSize(personalColRef  as React.RefObject<HTMLDivElement>);
+  const isTypingRef    = useRef(false);
+  const messagesRef    = useRef<ChatMessage[]>([]);
+  const boxRef         = useRef<HTMLDivElement | null>(null);
+  const explorerColRef = useRef<HTMLDivElement>(null);
+  const personalColRef = useRef<HTMLDivElement>(null);
+  const explorerSize   = usePanelSize(explorerColRef as React.RefObject<HTMLDivElement>);
+  const personalSize   = usePanelSize(personalColRef  as React.RefObject<HTMLDivElement>);
 
-  // ── RC Ranking (derived) ───────────────────────────────────
+  // ── RC Ranking (derived, 前端即時計算) ────────────────────
   const rcRanking = useMemo(
     () => computeRCRanking(personalBrain, rcSemanticScores, rcFoundationMap, ALPHA),
     [personalBrain, rcSemanticScores, rcFoundationMap],
@@ -311,11 +325,9 @@ export default function Page() {
     }).catch((err) => console.warn("[brain/add]", err));
   }, [userId]);
 
-  const addFoundationsToBrain = useCallback((
-    items: { eid: string; label: string }[],
-  ) => {
+  const addFoundationsToBrain = useCallback((items: { eid: string; label: string }[]) => {
     setPersonalBrain((prev) => {
-      const updated = [...prev];
+      const updated  = [...prev];
       const brainMap = new Map(updated.map((c) => [c.eid, c]));
       for (const { eid, label } of items) {
         const existing = brainMap.get(eid);
@@ -366,13 +378,10 @@ export default function Page() {
   // ──────────────────────────────────────────────────────────
 
   const handleConfirmRC = useCallback(async (
-    rcEid:   string,
-    rcLabel: string,
-    pathId:  number,
+    rcEid: string, rcLabel: string, pathId: number,
   ) => {
     if (!sessionId || isLoading || !API_BASE) return;
 
-    // Auto-add RC to brain on confirm
     addFoundationsToBrain([{ eid: rcEid, label: rcLabel }]);
 
     const confirmMsg: ChatMessage = {
@@ -459,6 +468,10 @@ export default function Page() {
       setPhase(nextPhase);
       localStorage.setItem(PHASE_KEY, nextPhase);
 
+      // ── 混合策略：concept_resolved 時一次性取得語意分數 ────
+      // chat API 回傳 all_graphs → 前端建 rcFoundationMap（純記憶體）
+      // 同時平行取 semantic scores（後端 SBERT，只需呼叫一次）
+      // 之後 foundation 勾選的互動排名完全在前端計算，零延遲
       if (data.all_graphs) {
         const parsed: Record<number, GraphDataLite | null> = {};
         for (const [k, v] of Object.entries(data.all_graphs)) parsed[Number(k)] = v;
@@ -468,15 +481,9 @@ export default function Page() {
         setRCFoundationMap(newMap);
         setActiveCandidateEids(extractCandidateEids(parsed));
 
-        // Fetch semantic scores using the query from socrates
-        // We derive query from the latest chat message
-        const query = text;
-        if (query && API_BASE) {
-          fetch(`${API_BASE.replace(/\/$/, "")}/brain/rc-semantic-scores?query=${encodeURIComponent(query)}`)
-            .then((r) => r.json())
-            .then((d) => setRCSemanticScores(d.scores ?? []))
-            .catch((err) => console.warn("[rc-semantic-scores]", err));
-        }
+        // 非同步取 semantic scores（不阻塞 typewriter 動畫）
+        // 與 typewriterAppend 並行，scores 回來後 state 更新自然觸發重算
+        fetchSemanticScores(text).then(setRCSemanticScores);
       }
 
       await typewriterAppend(data.reply || "");
@@ -542,7 +549,7 @@ export default function Page() {
         </button>
       </header>
 
-      {/* ── Four-column layout: chat | GlobalBrainExplorer | DetailPanel | PersonalBrain ── */}
+      {/* ── Four-column layout ── */}
       <div className="content-area">
 
         {/* ══ Chat ══ */}
