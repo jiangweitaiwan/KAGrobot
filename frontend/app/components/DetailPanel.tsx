@@ -231,12 +231,14 @@ function FoundationTreeViz({
     const leafEids = new Set(data.foundations.map((f) => f.element_id));
 
     // ── 1. 建立節點與邊 ───────────────────────────────────────
-    const rawNodes = data.nodes.map((n) => ({
+    const rawNodes: FNode[] = data.nodes.map((n) => ({
       id:       n.element_id,
       label:    n.label,
       isAnchor: n.element_id === data.anchor_eid,
       isLeaf:   leafEids.has(n.element_id),
       depth:    0,
+      x:        0,  // 初始化为 0，之后会计算
+      y:        0,  // 初始化为 0，之后会计算
     }));
 
     const rawEdges: FEdge[] = data.edges.map((e) => ({

@@ -123,14 +123,14 @@ class CandidateRetriever:
             if m_names:
                 for i, mn in enumerate(m_names):
                     variants.append({
-                        "element_id":       eid,
-                        "node_name":        node_name,
-                        "node_type":        node_type,
-                        "analysis_types":      node_atypes,
-                        "variant_name":     mn,
-                        "variant_function": mf or "",
-                        "variant_mechanism": mm or "",
-                    })
+                    "element_id":        eid,
+                    "node_name":         node_name,
+                    "node_type":         node_type,
+                    "analysis_types":      node_atypes,
+                    "variant_name":      node_name or "",
+                    "variant_function":  node_func,
+                    "variant_mechanism": node_mech,
+                })
             else:
                 variants.append({
                     "element_id":        eid,
