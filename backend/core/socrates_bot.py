@@ -388,7 +388,7 @@ class SocratesChatBot:
         concept_retriever = self._concept_retriever
 
         def retrieve_concept_detail(rc_name: str) -> str:
-            """查詢指定 concept 的描述與所屬論文的理論前提及模型約束。"""
+            """查詢指定 concept 的定義、機制、關鍵假設及所屬論文的理論前提與模型約束。"""
             result = concept_retriever.retrieve(rc_name)
             return json.dumps(result, ensure_ascii=False)
 
@@ -396,13 +396,17 @@ class SocratesChatBot:
             func=retrieve_concept_detail,
             name="retrieve_concept_detail",
             description=(
-                "查詢指定 Resulting Concept 的詳細資訊，包含：\n"
-                "  - concept 的 description（概念說明）\n"
+                "查詢指定 Concept 的詳細資訊，包含：\n"
+                "  - concept 的 definition（概念定義）\n"
+                "  - concept 的 mechanism（作用機制）\n"
+                "  - concept 的 key_assumptions（關鍵假設）\n"
+                "  - concept 的 function（功能說明，僅 Resulting Concept 才有值，"
+                "一般 concept 此欄位為空，可用以判斷是否為 RC）\n"
                 "  - 產生此 concept 的 paper 標題\n"
                 "  - paper 的 conceptual_premises（理論前提假設）\n"
                 "  - paper 的 contextual_model_constraints（模型情境約束）\n"
                 "當使用者詢問某個概念或路徑的理論背景、適用條件時呼叫。\n"
-                "輸入 rc_name 為 Resulting Concept 的名稱（允許部分匹配）。"
+                "輸入 rc_name 為 Concept 的名稱（允許部分匹配）。"
             ),
         )
 
@@ -448,12 +452,14 @@ class SocratesChatBot:
     @staticmethod
     def _format_concept_detail(data: dict) -> str:
         lines: List[str] = [f"概念：{data.get('rc_name', '')}"]
-        if data.get("description"):
-            lines.append(f"說明：{data['description']}")
+        if data.get("definition"):
+            lines.append(f"定義：{data['definition']}")
+        if data.get("mechanism"):
+            lines.append(f"機制：{data['mechanism']}")
+        if data.get("key_assumptions"):
+            lines.append(f"關鍵假設：{data['key_assumptions']}")
         if data.get("function"):
-            lines.append(f"功能：{data['function']}")
-        if data.get("analysis_types"):
-            lines.append(f"分析類型：{', '.join(data['analysis_types'])}")
+            lines.append(f"功能（Resulting Concept）：{data['function']}")
         for p in (data.get("papers") or []):
             lines.append(f"  ▸ {p.get('title', '（未命名）')}")
             if p.get("premises"):

@@ -7,6 +7,13 @@ POST /concept/suggest       → LLM 非同步推薦相關 concept
 優化（2024）：
   /concept/detail/{eid} 結果快取在 app.state.detail_cache（eid → dict）。
   同一個 eid 只打一次 Neo4j，後續直接從 app.state 取。
+
+Neo4j Concept 欄位：
+  definition / key_assumptions / mechanism / name：一般 concept 與 RC 皆有。
+  function：僅 Resulting Concept 才有值，一般 concept 為 null。
+            mechanism 與 function 是並存欄位，不是替代關係。
+  舊版 description / 舊版 function（取代前） / analysis_types 欄位已移除。
+  Paper 節點上的 conceptual_premises / contextual_model_constraints 不變。
 """
 
 from __future__ import annotations
@@ -25,13 +32,15 @@ router = APIRouter()
 # ── Schema ────────────────────────────────────────────────────────────
 
 class ConceptDetailResponse(BaseModel):
-    found:          bool
-    eid:            str
-    rc_name:        str
-    description:    Optional[str]
-    function:       Optional[str]
+    found:           bool
+    eid:             str
+    rc_name:         str
+    definition:      Optional[str]
+    mechanism:       Optional[str]
+    key_assumptions: Optional[str]
+    function:        Optional[str]
     analysis_types: List[str]
-    concept_type:   Optional[str]
+    concept_type:    Optional[str]
     papers: List[Dict[str, Any]]
 
 
@@ -78,7 +87,9 @@ async def concept_detail(eid: str, request: Request) -> ConceptDetailResponse:
             RETURN
                 c.name             AS name,
                 c.type             AS type,
-                c.description      AS description,
+                c.definition       AS definition,
+                c.mechanism        AS mechanism,
+                c.key_assumptions  AS key_assumptions,
                 c.function         AS function,
                 c.analysis_types   AS analysis_types,
                 collect({
@@ -94,8 +105,10 @@ async def concept_detail(eid: str, request: Request) -> ConceptDetailResponse:
     if not rows:
         # not found 也快取，避免對不存在的 eid 重複查詢
         response = ConceptDetailResponse(
-            found=False, eid=eid, rc_name="", description=None,
-            function=None, analysis_types=[], concept_type=None, papers=[],
+            found=False, eid=eid, rc_name="", definition=None,
+            mechanism=None, key_assumptions=None, function=None,
+            function=None, analysis_types=[], 
+            concept_type=None, papers=[],
         )
         detail_cache[eid] = response
         return response
@@ -112,14 +125,16 @@ async def concept_detail(eid: str, request: Request) -> ConceptDetailResponse:
     ]
 
     response = ConceptDetailResponse(
-        found          = True,
-        eid            = eid,
-        rc_name        = row["name"] or "",
-        description    = row["description"],
-        function       = row["function"],
+        found           = True,
+        eid             = eid,
+        rc_name         = row["name"] or "",
+        definition      = row["definition"],
+        mechanism       = row["mechanism"],
+        key_assumptions = row["key_assumptions"],
+        function        = row["function"],
         analysis_types = row["analysis_types"] or [],
-        concept_type   = row["type"],
-        papers         = papers,
+        concept_type    = row["type"],
+        papers          = papers,
     )
 
     # ── 3. 存入快取 ───────────────────────────────────────────

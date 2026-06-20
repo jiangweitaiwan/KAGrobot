@@ -3,6 +3,20 @@
 
 使用 SBERT embedding 對 Neo4j 中的 Resulting_Concept 做向量搜尋，
 回傳與使用者 query 最相關的 top-k 候選清單。
+
+Neo4j Concept 欄位：
+  definition / key_assumptions / mechanism / name：一般 concept 與 RC 皆有。
+  function：僅 Resulting Concept 才有值（一般 concept 為 null）。
+            mechanism 與 function 是並存欄位，不是替代關係。
+  舊版 description / 舊版 function（取代前） / analysis_types 欄位已移除。
+
+Embedding 文字組裝：
+  retrieval_embedding  : name + function     （RC 專屬的精簡功能描述，檢索用）
+  similarity_embedding : name + mechanism    （概念機制描述，相似度比對用）
+
+此檔案只對 type='Resulting_Concept' 的節點建立 embedding index，
+故查到的 function 理論上恆有值；若遇到 RC 節點 function 為 null 的
+邊界情況，仍以空字串安全退化，不影響檢索。
 """
 
 from __future__ import annotations
@@ -52,12 +66,12 @@ class CandidateRetriever:
         matches = self._match_entities(query, top_k=top_k)
         return [
             {
-                "index":          i + 1,
-                "eid":            m["element_id"],
-                "rc_name":        m["node_name"],
-                "type":           m["node_type"],
+                "index":   i + 1,
+                "eid":     m["element_id"],
+                "rc_name": m["node_name"],
+                "type":    m["node_type"],
                 "analysis_types": m.get("analysis_types", []),
-                "score":          round(m["score"], 4),
+                "score":   round(m["score"], 4),
             }
             for i, m in enumerate(matches)
         ]
@@ -72,15 +86,16 @@ class CandidateRetriever:
                 """
                 MATCH (c:Concept)
                 WHERE c.type = 'Resulting_Concept'
-                RETURN elementId(c)           AS eid,
-                       c.name                 AS name,
-                       c.type                 AS type,
-                       c.description          AS description,
-                       c.function             AS function,
+                RETURN elementId(c)             AS eid,
+                       c.name                   AS name,
+                       c.type                   AS type,
+                       c.definition             AS definition,
+                       c.mechanism              AS mechanism,
+                       c.key_assumptions        AS key_assumptions,
+                       c.function               AS function,
                        c.analysis_types       AS analysis_types,
-                       c.merged_names         AS merged_names,
-                       c.merged_descriptions  AS merged_descriptions,
-                       c.merged_functions     AS merged_functions
+                       c.merged_names           AS merged_names
+
                 """
             ).data()
 
@@ -96,37 +111,35 @@ class CandidateRetriever:
     def _build_variants(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         variants: List[Dict[str, Any]] = []
         for row in rows:
-            eid         = row["eid"]
-            node_name   = row["name"]
-            node_type   = row["type"]
-            node_func   = row["function"] or ""
+            eid           = row["eid"]
+            node_name     = row["name"]
+            node_type     = row["type"]
+            node_func     = row["function"] or ""
             node_atypes = row["analysis_types"] or []
-            m_names     = row["merged_names"]
-            m_descs     = row["merged_descriptions"]
-            m_funcs     = row["merged_functions"]
+            node_mech     = row["mechanism"] or ""
+            m_names       = row["merged_names"]
+
 
             if m_names:
                 for i, mn in enumerate(m_names):
-                    md = m_descs[i] if (m_descs and i < len(m_descs)) else ""
-                    mf = m_funcs[i] if (m_funcs and i < len(m_funcs)) else node_func
                     variants.append({
-                        "element_id":          eid,
-                        "node_name":           node_name,
-                        "node_type":           node_type,
+                        "element_id":       eid,
+                        "node_name":        node_name,
+                        "node_type":        node_type,
                         "analysis_types":      node_atypes,
-                        "variant_name":        mn,
-                        "variant_description": md or "",
-                        "variant_function":    mf or "",
+                        "variant_name":     mn,
+                        "variant_function": mf or "",
+                        "variant_mechanism": mm or "",
                     })
             else:
                 variants.append({
-                    "element_id":          eid,
-                    "node_name":           node_name,
-                    "node_type":           node_type,
+                    "element_id":        eid,
+                    "node_name":         node_name,
+                    "node_type":         node_type,
                     "analysis_types":      node_atypes,
-                    "variant_name":        node_name or "",
-                    "variant_description": row["description"] or "",
-                    "variant_function":    node_func,
+                    "variant_name":      node_name or "",
+                    "variant_function":  node_func,
+                    "variant_mechanism": node_mech,
                 })
         return variants
 
@@ -136,7 +149,7 @@ class CandidateRetriever:
             for v in variants
         ]
         similarity_texts = [
-            f"{v['variant_name']} {v['variant_description']}".strip()
+            f"{v['variant_name']} {v['variant_mechanism']}".strip()
             for v in variants
         ]
 
@@ -168,11 +181,11 @@ class CandidateRetriever:
                 continue
             score = float(np.dot(query_emb, v["retrieval_embedding"]))
             scored.append({
-                "element_id":     v["element_id"],
-                "node_name":      v["node_name"],
-                "node_type":      v["node_type"],
+                "element_id": v["element_id"],
+                "node_name":  v["node_name"],
+                "node_type":  v["node_type"],
                 "analysis_types": v.get("analysis_types", []),
-                "score":          score,
+                "score":      score,
             })
 
         scored.sort(key=lambda x: x["score"], reverse=True)
@@ -186,14 +199,3 @@ class CandidateRetriever:
 
         deduped = sorted(seen.values(), key=lambda x: x["score"], reverse=True)
         return deduped[:top_k]
-
-    # ------------------------------------------------------------------
-    # 提供給 DownstreamBFS 的 analysis_types 豐富化（保留舊功能）
-    # ------------------------------------------------------------------
-
-    def get_eid_to_analysis_types(self) -> Dict[str, List[str]]:
-        """回傳 {element_id: [analysis_type, ...]} 供 BFS 節點豐富化使用。"""
-        return {
-            v["element_id"]: v.get("analysis_types", [])
-            for v in self._index
-        }

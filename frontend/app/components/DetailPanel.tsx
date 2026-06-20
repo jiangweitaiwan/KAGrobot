@@ -7,6 +7,12 @@
  *   1. 顯示被點選 concept 的 foundation tree 拓墣（D3 force graph）
  *   2. 使用者在拓墣上勾選 foundation → 即時三層評估指數預覽
  *   3. 確認加入 personal brain
+ *
+ * Neo4j Concept 欄位（同步後端）：
+ *   definition / key_assumptions / mechanism / name：一般 concept 與 RC 皆有
+ *   function：僅 Resulting Concept 才有值（一般 concept 為 null）
+ *             mechanism 與 function 是並存欄位，不是替代關係
+ *   舊版 description / analysis_types 欄位已移除
  */
 
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
@@ -25,13 +31,15 @@ export type PersonalBrainConcept = {
 };
 
 export type ConceptDetail = {
-  found:          boolean;
-  eid:            string;
-  rc_name:        string;
-  description:    string | null;
-  function:       string | null;
+  found:            boolean;
+  eid:              string;
+  rc_name:          string;
+  definition:       string | null;
+  mechanism:        string | null;
+  key_assumptions:  string | null;
+  function:         string | null;   // 僅 Resulting Concept 才有值
   analysis_types: string[];
-  concept_type:   string | null;
+  concept_type:     string | null;
   papers: { title: string; premises: string | null; constraints: string | null }[];
 };
 
@@ -571,12 +579,44 @@ export default function DetailPanel({
         </div>
       )}
 
-      {/* ── Theory summary ── */}
-      {detail?.description && (
+      {/* ── Theory summary (definition + mechanism + key_assumptions) ── */}
+      {detail?.definition && (
         <div style={{ flexShrink: 0 }}>
-          <div className="detail-section-label" style={{ marginBottom: 4 }}>Theory</div>
+          <div className="detail-section-label" style={{ marginBottom: 4 }}>Definition</div>
           <p style={{ margin: 0, fontSize: "0.68rem", color: "#8880c0", lineHeight: 1.55 }}>
-            {detail.description.slice(0, 160)}{detail.description.length > 160 ? "…" : ""}
+            {detail.definition.slice(0, 160)}{detail.definition.length > 160 ? "…" : ""}
+          </p>
+        </div>
+      )}
+
+      {detail?.mechanism && (
+        <div style={{ flexShrink: 0 }}>
+          <div className="detail-section-label" style={{ marginBottom: 4 }}>Mechanism</div>
+          <p style={{ margin: 0, fontSize: "0.68rem", color: "#8880c0", lineHeight: 1.55 }}>
+            {detail.mechanism.slice(0, 160)}{detail.mechanism.length > 160 ? "…" : ""}
+          </p>
+        </div>
+      )}
+
+      {detail?.key_assumptions && (
+        <div style={{ flexShrink: 0 }}>
+          <div className="detail-section-label" style={{ marginBottom: 4 }}>Key Assumptions</div>
+          <p style={{ margin: 0, fontSize: "0.68rem", color: "#8880c0", lineHeight: 1.55 }}>
+            {detail.key_assumptions.slice(0, 160)}{detail.key_assumptions.length > 160 ? "…" : ""}
+          </p>
+        </div>
+      )}
+
+      {detail?.function && (
+        <div style={{ flexShrink: 0 }}>
+          <div className="detail-section-label" style={{ marginBottom: 4 }}>
+            Function
+            <span style={{ color: "var(--teal)", marginLeft: 6, fontWeight: 400, fontSize: "0.56rem" }}>
+              · Resulting Concept
+            </span>
+          </div>
+          <p style={{ margin: 0, fontSize: "0.68rem", color: "#8880c0", lineHeight: 1.55 }}>
+            {detail.function.slice(0, 160)}{detail.function.length > 160 ? "…" : ""}
           </p>
         </div>
       )}
