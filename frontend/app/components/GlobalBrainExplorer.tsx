@@ -1,24 +1,14 @@
 "use client";
 
 /**
- * GlobalBrainExplorer.tsx（深色 / 聚焦互動版）
+ * GlobalBrainExplorer.tsx（三層殼層版）
  *
- * 這次改版重點（對應討論的 4 點）：
- *   1. 配色從「來源 × 是否為 Resulting_Concept」4 群簡化為「來源」2 群：
- *      results（論文概念）/ chapter（教科書概念）。RC 與否只影響節點大小。
- *   2. 命中候選（activeCandidateEids）一律亮青綠色點，與分類色脫鉤。
- *   3. 新增「聚焦候選」(focusedCandidateEid) 概念：
- *      點擊 3D 場景中某個 active candidate 節點本身 → 設為聚焦。
- *        - 只有聚焦中的那顆才會：放大光暈、激活 foundation → candidate 路徑
- *        - 其他 active candidates 維持青綠色點，不顯示路徑、不放大
- *      點擊另一個 active candidate 會直接切換聚焦對象；點擊空白處取消聚焦。
- *   4. 背景改深色（呼應 globals.css 既有的 --bg / --panel 系統），
- *      節點描邊與文字改用淺色，維持深底下的可讀對比。
+ * 殼層隱喻（由核心向外）：
+ *   article  → 內核  — 青白色，最核心的基礎概念
+ *   chapter  → 中層  — 紫色，教科書概念
+ *   paper    → 外層  — 暖橘色，論文專精概念
  *
- * 與舊版的相容性：
- *   - GlobalLayoutNode / GlobalLayoutEdge / GlobalLayout 型別維持不變。
- *   - Props 簽名不變（rcFoundationMap 仍是可選），聚焦狀態完全是內部 state，
- *     不需要呼叫端額外管理。
+ * 互動邏輯不變（聚焦候選、foundation 路徑、drag-to-rotate 等）。
  */
 
 import { useEffect, useRef, useMemo, useState } from "react";
@@ -51,8 +41,8 @@ export type GlobalLayout = {
 
 type Props = {
   layout:              GlobalLayout | null;
-  activeCandidateEids: string[];          // SocratesChatBot 命中的候選
-  rcFoundationMap?:    RCFoundationMap;   // 候選 RC eid → 完整 foundation 路徑
+  activeCandidateEids: string[];
+  rcFoundationMap?:    RCFoundationMap;
   onNodeClick?:        (node: GlobalLayoutNode) => void;
   width?:              number;
   height?:             number;
@@ -66,39 +56,58 @@ type PulseInfo = {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Design tokens（深色版 — 呼應 globals.css 的 --bg/--panel 系統）
+// Cluster key（三層）
+// ─────────────────────────────────────────────────────────────
+
+type ClusterKey = "article" | "chapter" | "paper";
+
+function clusterKeyOf(node: GlobalLayoutNode): ClusterKey {
+  const s = (node.source || "paper").toLowerCase();
+  if (s === "article") return "article";
+  if (s === "chapter") return "chapter";
+  return "paper";
+}
+
+function isRC(node: GlobalLayoutNode): boolean {
+  return (node.type || "").toLowerCase().includes("resulting");
+}
+
+// ─────────────────────────────────────────────────────────────
+// Design tokens
 // ─────────────────────────────────────────────────────────────
 
 const PALETTE = {
   bg:     0x06080f,
   bg_css: "#06080f",
 
-  // 兩類 concept（取代舊版 4 群）：論文概念 / 教科書概念
-  results: new THREE.Color(0xff9a52),   // 暖橘 — paper concept（深底提亮）
-  chapter: new THREE.Color(0xb48cff),   // 紫 — textbook concept（深底提亮）
+  // 三層概念色
+  article: new THREE.Color(0x00e8ff),   // 青白 — 內核
+  chapter: new THREE.Color(0xb48cff),   // 紫   — 中層
+  paper:   new THREE.Color(0xff9a52),   // 暖橘 — 外層
 
   activeCandidate: new THREE.Color(0x00e0b8),  // 青綠 — 命中候選
-  focusGlow:       new THREE.Color(0x5fe6cc),  // 聚焦光暈，比候選色更亮
-  foundationPath:  new THREE.Color(0xffb84d),  // 琥珀色 — 聚焦中的 foundation 路徑
+  focusGlow:       new THREE.Color(0x5fe6cc),  // 聚焦光暈
+  foundationPath:  new THREE.Color(0xffb84d),  // 琥珀 — 聚焦路徑
 
-  strokeCss: "#e8eef8",   // 深底描邊改淺色，否則會糊進背景
+  strokeCss: "#e8eef8",
 };
 
-type ClusterKey = "results" | "chapter";
-
 const CLUSTER_COLOR: Record<ClusterKey, THREE.Color> = {
-  results: PALETTE.results,
+  article: PALETTE.article,
   chapter: PALETTE.chapter,
+  paper:   PALETTE.paper,
 };
 
 const CLUSTER_LABEL: Record<ClusterKey, string> = {
-  results: "論文概念",
+  article: "核心概念",
   chapter: "教科書概念",
+  paper:   "論文概念",
 };
 
 const CLUSTER_LABEL_COLOR: Record<ClusterKey, string> = {
-  results: "#ffb37a",
+  article: "#66eeff",
   chapter: "#c9aaff",
+  paper:   "#ffb37a",
 };
 
 const SIZE = {
@@ -112,7 +121,7 @@ const WORLD_SCALE       = 2.2;
 const ZOOM_MIN          = 2.0;
 const ZOOM_MAX          = 9.5;
 const ZOOM_DEFAULT      = 5.5;
-const PICK_PIXEL_RADIUS = 16;     // 點擊／hover 容許的螢幕像素半徑
+const PICK_PIXEL_RADIUS = 16;
 const LABEL_Y_OFFSET    = 0.34;
 
 // ─────────────────────────────────────────────────────────────
@@ -123,25 +132,20 @@ function nodeToWorld(n: GlobalLayoutNode): THREE.Vector3 {
   return new THREE.Vector3(n.x * WORLD_SCALE, n.y * WORLD_SCALE, n.z * WORLD_SCALE);
 }
 
-function isRC(node: GlobalLayoutNode): boolean {
-  return (node.type || "").toLowerCase().includes("resulting");
-}
-
-function clusterKeyOf(node: GlobalLayoutNode): ClusterKey {
-  return (node.source || "results").toLowerCase() === "chapter" ? "chapter" : "results";
-}
-
 function categoryColor(node: GlobalLayoutNode): THREE.Color {
   return CLUSTER_COLOR[clusterKeyOf(node)];
 }
 
-function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+function roundRectPath(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, w: number, h: number, r: number,
+) {
   ctx.beginPath();
   ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
+  ctx.arcTo(x + w, y,     x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x,     y + h, r);
+  ctx.arcTo(x,     y + h, x,     y,     r);
+  ctx.arcTo(x,     y,     x + w, y,     r);
   ctx.closePath();
 }
 
@@ -181,7 +185,6 @@ function makeRingSprite(colorHex: string, lineWidth = 5): THREE.Sprite {
   return new THREE.Sprite(mat);
 }
 
-/** 聚焦光暈：比一般 ring 更柔和、更亮，帶徑向漸層模擬發光感 */
 function makeGlowSprite(colorHex: string): THREE.Sprite {
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = 128;
@@ -266,10 +269,8 @@ export default function GlobalBrainExplorer({
   const pulsesRef      = useRef<PulseInfo[]>([]);
   const hoveredIdxRef  = useRef<number | null>(null);
 
-  // ── 聚焦中的候選（點擊場景中該候選節點本身觸發）──────────────
   const [focusedCandidateEid, setFocusedCandidateEid] = useState<string | null>(null);
 
-  // candidate 集合改變時，若聚焦對象不再是候選之一，自動清空
   useEffect(() => {
     if (focusedCandidateEid && !activeCandidateEids.includes(focusedCandidateEid)) {
       setFocusedCandidateEid(null);
@@ -286,11 +287,13 @@ export default function GlobalBrainExplorer({
     return layout.nodes.map((n) => nodeToWorld(n));
   }, [layout]);
 
+  // ── 分群統計（三層）────────────────────────────────────────
   const clusterStats = useMemo(() => {
     if (!layout || layout.nodes.length === 0) return [];
     const groups: Record<ClusterKey, { count: number; sum: THREE.Vector3 }> = {
-      results: { count: 0, sum: new THREE.Vector3() },
+      article: { count: 0, sum: new THREE.Vector3() },
       chapter: { count: 0, sum: new THREE.Vector3() },
+      paper:   { count: 0, sum: new THREE.Vector3() },
     };
     layout.nodes.forEach((n, i) => {
       const k = clusterKeyOf(n);
@@ -313,12 +316,9 @@ export default function GlobalBrainExplorer({
     [activeCandidateEids],
   );
 
-  // 事件 closure（onMouseUp）內需要讀取「當下」的 active candidate 集合，
-  // 用 ref 橋接避免閉包捕捉到舊值。宣告於此處，先於下方所有 useEffect。
   const activeCandidateSetRef = useRef(activeCandidateSet);
   useEffect(() => { activeCandidateSetRef.current = activeCandidateSet; }, [activeCandidateSet]);
 
-  // 只有「聚焦中」的候選才計算 foundation 路徑高亮（重點3：單一聚焦）
   const focusedTreeData = useMemo(() => {
     if (!rcFoundationMap || !focusedCandidateEid) {
       return { highlightEids: new Set<string>(), edges: [] as { source: string; target: string }[] };
@@ -333,7 +333,7 @@ export default function GlobalBrainExplorer({
     return { highlightEids, edges: entry.treeEdges ?? [] };
   }, [rcFoundationMap, focusedCandidateEid]);
 
-  // ── Init scene（layout / width / height 變動才重建）──────────
+  // ── Init scene ─────────────────────────────────────────────
   useEffect(() => {
     if (!canvasRef.current || !layout || layout.nodes.length === 0) return;
 
@@ -354,7 +354,7 @@ export default function GlobalBrainExplorer({
     scene.add(rg);
     rotGroupRef.current = rg;
 
-    // ── 背景星點（深底場景的氛圍層，淡淡的即可）─────────────────
+    // 背景星點
     const bgCount = 1200;
     const bgPos   = new Float32Array(bgCount * 3);
     for (let i = 0; i < bgCount; i++) {
@@ -368,7 +368,7 @@ export default function GlobalBrainExplorer({
       color: 0x2a3550, size: 0.01, transparent: true, opacity: 0.35, depthWrite: false,
     })));
 
-    // ── 節點標記：一顆概念一個點，實心填色 + 淺色描邊（深底對比）──
+    // 節點標記
     const n = layout.nodes.length;
     const positions = new Float32Array(n * 3);
     const colors    = new Float32Array(n * 3);
@@ -403,7 +403,6 @@ export default function GlobalBrainExplorer({
           float d = length(uv);
           if (d > 0.5) discard;
           if (d > 0.40) {
-            // 深底場景：描邊改淺色，避免融進背景
             gl_FragColor = vec4(0.91, 0.93, 0.97, 1.0);
           } else {
             gl_FragColor = vec4(vColor, 1.0);
@@ -417,7 +416,7 @@ export default function GlobalBrainExplorer({
     rg.add(markerPoints);
     markerPointsRef.current = markerPoints;
 
-    // ── 神經網格：既有 layout.edges，畫成低透明度細線（深底用較亮的線色）
+    // 神經網格（edges）
     if (layout.edges.length > 0) {
       const linePos: number[] = [];
       layout.edges.forEach((e) => {
@@ -435,29 +434,22 @@ export default function GlobalBrainExplorer({
       }
     }
 
-    // ── 分區浮動標籤 ───────────────────────────────────────────
+    // 分區浮動標籤（三層）
     clusterStats.forEach((c) => {
-      const label = makeLabelSprite(`${CLUSTER_LABEL[c.key]} ${c.pct.toFixed(0)}%`, CLUSTER_LABEL_COLOR[c.key]);
+      const label = makeLabelSprite(
+        `${CLUSTER_LABEL[c.key]} ${c.pct.toFixed(0)}%`,
+        CLUSTER_LABEL_COLOR[c.key],
+      );
       label.position.set(c.centroid.x, c.centroid.y + LABEL_Y_OFFSET, c.centroid.z);
       rg.add(label);
     });
 
-    // ── path group（聚焦候選的 foundation 路徑線 + 接力光點）────
-    const pathGroup = new THREE.Group();
-    rg.add(pathGroup);
-    pathGroupRef.current = pathGroup;
+    // path / ring / focus groups
+    const pathGroup  = new THREE.Group(); rg.add(pathGroup);  pathGroupRef.current  = pathGroup;
+    const ringGroup  = new THREE.Group(); rg.add(ringGroup);  ringGroupRef.current  = ringGroup;
+    const focusGroup = new THREE.Group(); rg.add(focusGroup); focusGroupRef.current = focusGroup;
 
-    // ── ring group（未聚焦 active candidate 的青綠標示環）───────
-    const ringGroup = new THREE.Group();
-    rg.add(ringGroup);
-    ringGroupRef.current = ringGroup;
-
-    // ── focus group（聚焦候選的光暈，獨立一層方便整體淡入淡出）──
-    const focusGroup = new THREE.Group();
-    rg.add(focusGroup);
-    focusGroupRef.current = focusGroup;
-
-    // ── hover 高亮外框 ─────────────────────────────────────────
+    // hover ring
     const hoverRing = makeRingSprite("#7a90c0");
     hoverRing.visible = false;
     hoverRing.scale.set(0.22, 0.22, 1);
@@ -466,16 +458,13 @@ export default function GlobalBrainExplorer({
 
     scene.add(new THREE.AmbientLight(0xffffff, 1));
 
-    // ── 螢幕空間點擊判定 helper（定義在 useEffect 內，讀 refs）──
+    // ── 螢幕空間點擊判定 ──────────────────────────────────────
     function worldToScreenPx(worldPos: THREE.Vector3): { x: number; y: number } | null {
       const cam = cameraRef.current;
       if (!cam) return null;
       const proj = worldPos.clone().project(cam);
       if (Math.abs(proj.z) > 1) return null;
-      return {
-        x: ((proj.x + 1) / 2) * width,
-        y: ((1 - proj.y) / 2) * height,
-      };
+      return { x: ((proj.x + 1) / 2) * width, y: ((1 - proj.y) / 2) * height };
     }
 
     function findNearestNodeIndex(px: number, py: number): number | null {
@@ -500,13 +489,11 @@ export default function GlobalBrainExplorer({
       animFrameRef.current = requestAnimationFrame(animate);
       frameCount++;
 
-      // 自動慢旋
       if (rotGroupRef.current && !isDragging.current) {
         rotGroupRef.current.rotation.y += 0.0008;
         rotGroupRef.current.rotation.x += 0.0002;
       }
 
-      // hover 更新（每 2 幀做一次，節省開銷）
       if (frameCount % 2 === 0) {
         const { x, y } = mousePixel.current;
         const idx = findNearestNodeIndex(x, y);
@@ -521,7 +508,11 @@ export default function GlobalBrainExplorer({
             if (tooltipRef.current) {
               const sp = worldToScreenPx(wp);
               if (sp) {
-                tooltipRef.current.textContent = layout?.nodes[idx]?.name ?? "";
+                const node = layout?.nodes[idx];
+                const layerLabel = node ? CLUSTER_LABEL[clusterKeyOf(node)] : "";
+                tooltipRef.current.textContent = node
+                  ? `${node.name}  ·  ${layerLabel}`
+                  : "";
                 tooltipRef.current.style.left    = `${sp.x + 12}px`;
                 tooltipRef.current.style.top     = `${sp.y - 8}px`;
                 tooltipRef.current.style.opacity = "1";
@@ -534,7 +525,7 @@ export default function GlobalBrainExplorer({
         }
       }
 
-      // 聚焦光暈的呼吸感
+      // 聚焦光暈呼吸
       if (focusGroupRef.current && focusGroupRef.current.children.length > 0) {
         const t = frameCount * 0.04;
         const pulse = 0.85 + 0.15 * Math.sin(t);
@@ -545,24 +536,19 @@ export default function GlobalBrainExplorer({
         });
       }
 
-      // 接力光點動畫（foundation → candidate 匯聚感）
-      const pulses = pulsesRef.current;
-      if (pulses.length > 0) {
-        pulses.forEach((p) => {
-          p.phase = (p.phase + 0.012) % 1;
-          p.dot.position.lerpVectors(p.from, p.to, p.phase);
-        });
-      }
+      // 接力光點動畫
+      pulsesRef.current.forEach((p) => {
+        p.phase = (p.phase + 0.012) % 1;
+        p.dot.position.lerpVectors(p.from, p.to, p.phase);
+      });
 
       renderer.render(scene, camera);
     }
     animate();
 
-    // ── 滑鼠事件 ───────────────────────────────────────────────
+    // ── 事件 ─────────────────────────────────────────────────
     const canvas = canvasRef.current!;
-
     function getBoundedRect() { return canvas.getBoundingClientRect(); }
-
     let mouseDownPos = { x: 0, y: 0 };
 
     function onMouseDown(e: MouseEvent) {
@@ -578,16 +564,15 @@ export default function GlobalBrainExplorer({
         const px  = e.clientX - r.left;
         const py  = e.clientY - r.top;
         const idx = findNearestNodeIndex(px, py);
-
         if (idx !== null && layout) {
           const clickedNode = layout.nodes[idx];
-          // 重點3：點到 active candidate 本身 → 聚焦／切換聚焦
           if (activeCandidateSetRef.current.has(clickedNode.id)) {
-            setFocusedCandidateEid((prev) => (prev === clickedNode.id ? prev : clickedNode.id));
+            setFocusedCandidateEid((prev) =>
+              prev === clickedNode.id ? prev : clickedNode.id,
+            );
           }
           onNodeClick?.(clickedNode);
         } else {
-          // 點空白處 → 取消聚焦
           setFocusedCandidateEid(null);
         }
       }
@@ -604,19 +589,15 @@ export default function GlobalBrainExplorer({
     function onMouseLeave() {
       isDragging.current = false;
       mousePixel.current = { x: -9999, y: -9999 };
-      if (tooltipRef.current) tooltipRef.current.style.opacity = "0";
-      if (hoverRingRef.current) hoverRingRef.current.visible = false;
+      if (tooltipRef.current)    tooltipRef.current.style.opacity = "0";
+      if (hoverRingRef.current)  hoverRingRef.current.visible = false;
     }
-
-    // ── 縮放：滑鼠滾輪 ─────────────────────────────────────────
     function onWheel(e: WheelEvent) {
       e.preventDefault();
       const cam = cameraRef.current;
       if (!cam) return;
       cam.position.z = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, cam.position.z + e.deltaY * 0.01));
     }
-
-    // ── 縮放：觸控 pinch ────────────────────────────────────────
     function getTouchDist(e: TouchEvent) {
       const dx = e.touches[0].clientX - e.touches[1].clientX;
       const dy = e.touches[0].clientY - e.touches[1].clientY;
@@ -670,15 +651,13 @@ export default function GlobalBrainExplorer({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layout, width, height, nodeWorldPositions, clusterStats, nodeIdxMap]);
 
-  // ── Active candidate 標示環（青綠色，重點2）── 資料變動時重建 ──
+  // ── Active candidate 標示環 ────────────────────────────────
   useEffect(() => {
     const ringGroup = ringGroupRef.current;
     if (!ringGroup || !layout) return;
-
     disposeGroupChildren(ringGroup); ringGroup.clear();
 
     activeCandidateEids.forEach((eid) => {
-      // 聚焦中的候選改由 focusGroup 處理（更大的光暈），這裡跳過避免重疊
       if (eid === focusedCandidateEid) return;
       const idx = nodeIdxMap.get(eid);
       if (idx === undefined) return;
@@ -691,7 +670,7 @@ export default function GlobalBrainExplorer({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeCandidateEids, focusedCandidateEid, nodeIdxMap, nodeWorldPositions, layout]);
 
-  // ── 聚焦候選：光暈 + foundation 路徑（重點3核心）─────────────
+  // ── 聚焦候選：光暈 + foundation 路徑 ──────────────────────
   useEffect(() => {
     const focusGroup = focusGroupRef.current;
     const pathGroup  = pathGroupRef.current;
@@ -702,7 +681,7 @@ export default function GlobalBrainExplorer({
     disposeGroupChildren(pathGroup);  pathGroup.clear();
     pulsesRef.current = [];
 
-    // 先把所有節點顏色／大小還原成基礎狀態
+    // 還原所有節點顏色
     if (markerPts) {
       const colorAttr = markerPts.geometry.attributes.color as THREE.BufferAttribute;
       const colorArr  = colorAttr.array as Float32Array;
@@ -715,7 +694,7 @@ export default function GlobalBrainExplorer({
         sizeArr[i] = isRC(node) ? SIZE.rc : SIZE.other;
       });
 
-      // 所有 active candidate 一律亮青綠色點（不論是否聚焦，重點2）
+      // active candidates → 青綠
       activeCandidateEids.forEach((eid) => {
         const idx = nodeIdxMap.get(eid);
         if (idx === undefined) return;
@@ -724,7 +703,7 @@ export default function GlobalBrainExplorer({
         sizeArr[idx] *= SIZE.highlightMultiplier;
       });
 
-      // 聚焦中的 foundation 節點改琥珀色（只有聚焦那條路徑會被標示）
+      // 聚焦中的 foundation 路徑 → 琥珀色
       if (focusedCandidateEid) {
         focusedTreeData.highlightEids.forEach((eid) => {
           const idx = nodeIdxMap.get(eid);
@@ -742,7 +721,7 @@ export default function GlobalBrainExplorer({
 
     if (!focusedCandidateEid) return;
 
-    // ── 聚焦光暈（比一般 ring 更大、更柔和）─────────────────────
+    // 聚焦光暈
     const focusIdx = nodeIdxMap.get(focusedCandidateEid);
     if (focusIdx !== undefined) {
       const glow = makeGlowSprite("#5fe6cc");
@@ -759,7 +738,7 @@ export default function GlobalBrainExplorer({
       focusGroup.add(ring);
     }
 
-    // ── foundation → candidate 路徑線（琥珀色）─────────────────
+    // foundation 路徑線（琥珀色）
     const { edges } = focusedTreeData;
     if (edges.length > 0) {
       const linePos: number[] = [];
@@ -777,9 +756,7 @@ export default function GlobalBrainExplorer({
         pathGroup.add(new THREE.LineSegments(geo, mat));
       }
 
-      // 接力光點：方向沿 BFS 既有的 upstream→downstream，
-      // 即「from = 上游 foundation，to = 下游」，視覺上自然呈現
-      // 由外圍向聚焦候選「匯聚」的流動感，不需反轉。
+      // 接力光點
       edges.forEach((e, ei) => {
         const si = nodeIdxMap.get(e.source);
         const ti = nodeIdxMap.get(e.target);
@@ -794,7 +771,7 @@ export default function GlobalBrainExplorer({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusedCandidateEid, focusedTreeData, activeCandidateEids, nodeIdxMap, nodeWorldPositions, layout]);
 
-  // ── Zoom 按鈕 handler ──────────────────────────────────────
+  // ── Zoom buttons ───────────────────────────────────────────
   function zoomBy(delta: number) {
     const cam = cameraRef.current;
     if (!cam) return;
@@ -806,8 +783,15 @@ export default function GlobalBrainExplorer({
   // ─────────────────────────────────────────────────────────
 
   return (
-    <div style={{ position: "relative", width, height, borderRadius: "16px", overflow: "hidden", background: PALETTE.bg_css, flexShrink: 0 }}>
-      <canvas ref={canvasRef} style={{ display: "block", width: "100%", height: "100%", cursor: "crosshair" }} />
+    <div style={{
+      position: "relative", width, height,
+      borderRadius: "16px", overflow: "hidden",
+      background: PALETTE.bg_css, flexShrink: 0,
+    }}>
+      <canvas
+        ref={canvasRef}
+        style={{ display: "block", width: "100%", height: "100%", cursor: "crosshair" }}
+      />
 
       {/* Tooltip */}
       <div ref={tooltipRef} style={{
@@ -821,7 +805,7 @@ export default function GlobalBrainExplorer({
         color:         "#e8eef8",
         fontFamily:    "monospace",
         whiteSpace:    "nowrap",
-        maxWidth:      "220px",
+        maxWidth:      "240px",
         overflow:      "hidden",
         textOverflow:  "ellipsis",
         opacity:       0,
@@ -875,7 +859,7 @@ export default function GlobalBrainExplorer({
         Global Knowledge Field
       </div>
 
-      {/* 圖例 */}
+      {/* 圖例（三層）*/}
       <div style={{
         position:      "absolute",
         top:           10,
@@ -887,16 +871,24 @@ export default function GlobalBrainExplorer({
         userSelect:    "none",
       }}>
         {([
-          { fill: "#ff9a52", label: "論文概念" },
-          { fill: "#b48cff", label: "教科書概念" },
-          { fill: "#00e0b8", label: "候選命中" },
-          { fill: "#ffb84d", label: "聚焦路徑" },
-        ] as { fill: string; label: string }[]).map(({ fill, label }) => (
+          { fill: "#00e8ff", label: "核心概念",   hint: "article" },
+          { fill: "#b48cff", label: "教科書概念", hint: "chapter" },
+          { fill: "#ff9a52", label: "論文概念",   hint: "paper"   },
+          { fill: "#00e0b8", label: "候選命中",   hint: ""        },
+          { fill: "#ffb84d", label: "聚焦路徑",   hint: ""        },
+        ] as { fill: string; label: string; hint: string }[]).map(({ fill, label }) => (
           <div key={label} style={{ display: "flex", alignItems: "center", gap: 5 }}>
             <svg width="9" height="9" viewBox="0 0 9 9">
               <circle cx="4.5" cy="4.5" r="3.5" fill={fill} stroke="#e8eef8" strokeWidth="0.75" />
             </svg>
-            <span style={{ fontSize: "9px", color: fill, fontFamily: "monospace", letterSpacing: "0.08em" }}>{label}</span>
+            <span style={{
+              fontSize:      "9px",
+              color:         fill,
+              fontFamily:    "monospace",
+              letterSpacing: "0.08em",
+            }}>
+              {label}
+            </span>
           </div>
         ))}
       </div>
@@ -917,26 +909,41 @@ export default function GlobalBrainExplorer({
           alignItems:    "center",
           gap:           "6px",
         }}>
-          <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: focusedCandidateEid ? "#5fe6cc" : "#00e0b8", animation: "gbrain-pulse 1.8s ease-in-out infinite" }} />
+          <span style={{
+            display:      "inline-block",
+            width:        6,
+            height:       6,
+            borderRadius: "50%",
+            background:   focusedCandidateEid ? "#5fe6cc" : "#00e0b8",
+            animation:    "gbrain-pulse 1.8s ease-in-out infinite",
+          }} />
           {focusedCandidateEid
-            ? `聚焦中 · 點其他候選或空白處切換`
+            ? "聚焦中 · 點其他候選或空白處切換"
             : `${activeCandidateEids.length} region${activeCandidateEids.length > 1 ? "s" : ""} activated`}
         </div>
       )}
 
       {!layout && (
         <div style={{
-          position: "absolute", inset: 0,
-          display: "flex", alignItems: "center", justifyContent: "center",
-          color: "rgba(232,238,248,0.3)", fontSize: "11px",
-          letterSpacing: "0.12em", textTransform: "uppercase",
-          fontFamily: "monospace", pointerEvents: "none",
+          position:      "absolute",
+          inset:         0,
+          display:       "flex",
+          alignItems:    "center",
+          justifyContent:"center",
+          color:         "rgba(232,238,248,0.3)",
+          fontSize:      "11px",
+          letterSpacing: "0.12em",
+          textTransform: "uppercase",
+          fontFamily:    "monospace",
+          pointerEvents: "none",
         }}>
           知識場域載入中…
         </div>
       )}
 
-      <style>{`@keyframes gbrain-pulse { 0%,100%{opacity:1}50%{opacity:0.25} }`}</style>
+      <style>{`
+        @keyframes gbrain-pulse { 0%,100%{opacity:1}50%{opacity:0.25} }
+      `}</style>
     </div>
   );
 }
