@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -16,10 +17,11 @@ from retrieval import (
     SbertOnnxEncoder,
     CandidateRetriever,
     ConceptDetailRetriever,
-    DownstreamBFS,
-    UpstreamBFS,
-    PathSelector,
     GlobalLayoutBuilder,
+    GlobalPredecessorGraph,
+    UpstreamBFSFromCache,
+    DownstreamBFSFromCache,
+    PathSelector,
 )
 from graph_service    import GraphExpander, PathScorer, GraphContextBuilder
 from core.socrates_bot import SocratesChatBot
@@ -34,12 +36,16 @@ from api.routes        import (
     brain_router,
 )
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     s        = get_settings()
     base_dir = Path(__file__).resolve().parent
 
+    logger.info("[App] Starting up...")
+    
     driver = GraphDatabase.driver(
         s.neo4j_uri, auth=("neo4j", s.neo4j_password)
     )
@@ -52,12 +58,9 @@ async def lifespan(app: FastAPI):
 
     concept_retriever = ConceptDetailRetriever(driver)
     path_selector     = PathSelector()
-    downstream_bfs    = DownstreamBFS(driver)
-    upstream_bfs      = UpstreamBFS(driver, path_selector)
     layout_builder    = GlobalLayoutBuilder(driver, encoder, s)
 
     scorer          = PathScorer()
-    graph_expander  = GraphExpander(downstream_bfs, upstream_bfs, scorer)
     context_builder = GraphContextBuilder()
 
     socrates_bot = SocratesChatBot(
@@ -71,7 +74,33 @@ async def lifespan(app: FastAPI):
         gcs_prefix="skills",
     )
 
-    nodes        = OrchestratorNodes(
+    # ✨ 初始化全局前驱图缓存（Lazy Loading）
+    logger.info("[App] Initializing GlobalPredecessorGraph...")
+    pred_graph = GlobalPredecessorGraph(
+        driver=driver,
+        ttl_hours=int(os.environ.get("PRED_GRAPH_TTL_HOURS", "24")),
+        max_lazy_batch=int(os.environ.get("PRED_GRAPH_MAX_BATCH", "100")),
+    )
+    
+    try:
+        pred_graph.initialize()
+        logger.info("[App] GlobalPredecessorGraph initialized successfully")
+    except Exception as e:
+        logger.error(f"[App] Failed to initialize PredecessorGraph: {e}")
+        # 继续启动，但 cached BFS 可能不可用
+    
+    # ✨ 创建基于缓存的 BFS
+    upstream_bfs_cached = UpstreamBFSFromCache(pred_graph, path_selector)
+    downstream_bfs_cached = DownstreamBFSFromCache(pred_graph)
+    
+    # GraphExpander 使用缓存版本
+    graph_expander = GraphExpander(
+        downstream_bfs=downstream_bfs_cached,
+        upstream_bfs=upstream_bfs_cached,
+        scorer=scorer,
+    )
+
+    nodes = OrchestratorNodes(
         socrates_bot    = socrates_bot,
         main_agent      = main_agent,
         graph_expander  = graph_expander,
@@ -81,24 +110,28 @@ async def lifespan(app: FastAPI):
     orchestrator = build_orchestrator(nodes)
 
     # ── app.state ─────────────────────────────────────────────
-    app.state.orchestrator   = orchestrator
-    app.state.layout_builder = layout_builder
-    app.state.layout_cache   = None
-    app.state.settings       = s
-    app.state.driver         = driver
-    app.state.encoder        = encoder
-    app.state.upstream_bfs   = upstream_bfs
-    app.state.downstream_bfs = downstream_bfs
+    app.state.orchestrator           = orchestrator
+    app.state.layout_builder         = layout_builder
+    app.state.layout_cache           = None
+    app.state.settings               = s
+    app.state.driver                 = driver
+    app.state.encoder                = encoder
+    app.state.pred_graph             = pred_graph
+    app.state.upstream_bfs_cached    = upstream_bfs_cached
+    app.state.downstream_bfs_cached  = downstream_bfs_cached
 
-    # ── 記憶體快取（process 生命週期，圖譜不常變動故不設 TTL）──
-    # eid(str) → ExpandResponse / RCPathsResponse / ConceptDetailResponse
+    # ── 内存缓存（process 生命周期）──
     app.state.expand_cache = {}
     app.state.rcpath_cache = {}
     app.state.detail_cache = {}
 
+    logger.info("[App] Startup complete")
+    
     yield
 
+    logger.info("[App] Shutting down...")
     driver.close()
+    logger.info("[App] Shutdown complete")
 
 
 def create_app() -> FastAPI:
