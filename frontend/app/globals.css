@@ -110,12 +110,18 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   opacity:        0.92;
 }
 
+/*
+ * 效能備註：backdrop-filter: blur() 屬於 GPU 合成成本較高的效果，
+ * 強度從原本 8~10px 降至 4px。視覺上毛玻璃感略微清晰一點，
+ * 但深色科技感的整體風格不受影響；換來的是每次這塊區域重繪
+ * （例如打字機效果逐字更新訊息內容）時的合成負擔明顯降低。
+ */
 .chat-box {
   border:          1px solid rgba(30, 46, 72, 0.8);
   border-radius:   14px;
   padding:         14px;
   background:      rgba(13, 18, 32, 0.7);
-  backdrop-filter: blur(8px);
+  backdrop-filter: blur(4px);
   overflow-y:      auto;
   display:         flex;
   flex-direction:  column;
@@ -215,7 +221,7 @@ textarea:focus {
   border-radius:   14px;
   padding:         12px;
   background:      rgba(13, 8, 28, 0.75);
-  backdrop-filter: blur(10px);
+  backdrop-filter: blur(4px);
   overflow-y:      auto;
   min-height:      0;
   opacity:         0.95;

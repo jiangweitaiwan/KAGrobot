@@ -10,6 +10,22 @@
  *   4. 確認 → 送入 MainAgent
  *
  * 接收整個 globalLayout（共享渲染基礎），不需要重新 build 密度雲。
+ *
+ * ── 效能優化（重點）──────────────────────────────────────────
+ *   1. 移除自動旋轉：場景不再持續自轉，改為純使用者驅動。
+ *   2. 按需渲染（on-demand rendering）：只有在「真的有東西在動」
+ *      （拖曳中、fMRI 呼吸動畫、path glow 動畫）或畫面被標記為
+ *      dirty 時才送一幀進 GPU，其餘時間迴圈直接 return，不渲染。
+ *   3. 可見性偵測：分頁切到背景（visibilitychange）或面板捲出
+ *      可視範圍（IntersectionObserver）時，完全暫停渲染。
+ *   4. 渲染幀率上限 ~24fps（原本跟著 rAF 跑滿 60fps）。
+ *   5. devicePixelRatio 上限降至 1.25（原本 2）。
+ *   6. Bloom 後製採用「降解析度版本」：UnrealBloomPass 的取樣
+ *      解析度改用 width/height 的 0.6 倍建構，而非全解析度。
+ *      因為 bloom 本質是模糊效果，降低取樣解析度視覺上幾乎無感，
+ *      但能大幅降低多重降採樣＋高斯模糊的 fill-rate 成本。
+ *   7. Cleanup 時完整 dispose 所有 geometry / material / texture，
+ *      避免面板 resize 觸發場景重建時造成 GPU 記憶體持續累積。
  */
 
 import { useEffect, useRef, useMemo, useState, useCallback } from "react";
@@ -72,6 +88,11 @@ const PROXY_THRESHOLD = 0.12;
 
 const TAG_COLORS = ["#c060ff", "#7f77dd", "#534AB7"];
 
+// ── 效能參數 ─────────────────────────────────────────────────
+const MAX_PIXEL_RATIO  = 1.25;       // 原本 2，降低 fill-rate 成本
+const RENDER_FRAME_MS  = 1000 / 24;  // 渲染幀率上限 ~24fps
+const BLOOM_RES_SCALE  = 0.6;        // Bloom 降解析度版本：取樣解析度 ×0.6
+
 // ─────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────
@@ -131,6 +152,24 @@ function buildFMRITexture(): THREE.CanvasTexture {
   return new THREE.CanvasTexture(canvas);
 }
 
+/** 完整釋放單一 Object3D 的 geometry / material / texture（含子節點）。*/
+function disposeObject3D(root: THREE.Object3D) {
+  root.traverse((child: any) => {
+    if (child.geometry) {
+      child.geometry.dispose();
+    }
+    if (child.material) {
+      const mats: THREE.Material[] = Array.isArray(child.material)
+        ? child.material
+        : [child.material];
+      mats.forEach((m: any) => {
+        if (m.map) m.map.dispose();
+        m.dispose();
+      });
+    }
+  });
+}
+
 // ─────────────────────────────────────────────────────────────
 // PersonalBrain
 // ─────────────────────────────────────────────────────────────
@@ -156,6 +195,11 @@ export default function PersonalBrain({
   const isDragging    = useRef(false);
   const prevMouse     = useRef({ x: 0, y: 0 });
   const fmriTexRef    = useRef<THREE.CanvasTexture | null>(null);
+
+  // ── 效能：可見性 / 按需渲染狀態 ──────────────────────────
+  const isVisibleRef   = useRef(true);   // 分頁可見 && 面板在視窗內
+  const needsRenderRef = useRef(true);   // 畫面是否為 dirty，需要重繪一次
+  const lastFrameTsRef = useRef(0);      // 上一次實際渲染的時間戳
 
   // RC tag state
   const [selectedRCEid,   setSelectedRCEid]   = useState<string | null>(null);
@@ -198,7 +242,7 @@ export default function PersonalBrain({
 
     const renderer = new THREE.WebGLRenderer({ canvas: canvasRef.current, antialias: true, alpha: false });
     renderer.setSize(width, height);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO));
     renderer.setClearColor(C.bg, 1);
     rendererRef.current = renderer;
 
@@ -213,7 +257,15 @@ export default function PersonalBrain({
 
     const composer = new EffectComposer(renderer);
     composer.addPass(new RenderPass(scene, camera));
-    composer.addPass(new UnrealBloomPass(new THREE.Vector2(width, height), C.bloom_strength, C.bloom_radius, C.bloom_threshold));
+    // ── Bloom：降解析度版本 ───────────────────────────────────
+    // bloom 本質是模糊效果，取樣解析度降低視覺上幾乎無感，
+    // 但能省下大量多重降採樣＋高斯模糊的 fill-rate 成本。
+    const bloomRes = new THREE.Vector2(
+      Math.max(1, Math.round(width  * BLOOM_RES_SCALE)),
+      Math.max(1, Math.round(height * BLOOM_RES_SCALE)),
+    );
+    const bloomPass = new UnrealBloomPass(bloomRes, C.bloom_strength, C.bloom_radius, C.bloom_threshold);
+    composer.addPass(bloomPass);
     composerRef.current = composer;
 
     // Background dim stars
@@ -226,7 +278,8 @@ export default function PersonalBrain({
     }
     const bgGeo = new THREE.BufferGeometry();
     bgGeo.setAttribute("position", new THREE.BufferAttribute(bgPos, 3));
-    scene.add(new THREE.Points(bgGeo, new THREE.PointsMaterial({ color: 0x0a0020, size: 0.004, transparent: true, opacity: 0.3, depthWrite: false })));
+    const bgMat = new THREE.PointsMaterial({ color: 0x0a0020, size: 0.004, transparent: true, opacity: 0.3, depthWrite: false });
+    scene.add(new THREE.Points(bgGeo, bgMat));
 
     // cloud (only brain nodes)
     const { positions, colors, sizes, nodeIndex } = buildCloud(layout.nodes, brainEids);
@@ -264,17 +317,30 @@ export default function PersonalBrain({
     rg.add(pathGroup);
     pathGroupRef.current = pathGroup;
 
-    // Animation loop
+    scene.add(new THREE.AmbientLight(0xffffff, 1));
+
+    // 場景剛建立，標記需要畫第一幀
+    needsRenderRef.current = true;
+
+    // ── Animation loop（按需渲染版）────────────────────────────
+    // 不再自動旋轉。每幀只做：
+    //   1) 可見性檢查 → 不可見直接 return
+    //   2) 幀率上限節流（~24fps）
+    //   3) fMRI 呼吸動畫（仍在動 → 需要持續渲染）
+    //   4) 只有「畫面真的有變化」才呼叫 composer.render()
     let frameCount = 0;
-    function animate() {
+    function animate(now: number) {
       animFrameRef.current = requestAnimationFrame(animate);
+
+      if (!isVisibleRef.current) return;
+      if (now - lastFrameTsRef.current < RENDER_FRAME_MS) return;
+      lastFrameTsRef.current = now;
       frameCount++;
-      if (rotGroup.current && !isDragging.current) {
-        rotGroup.current.rotation.y += 0.0006;
-        rotGroup.current.rotation.x += 0.00015;
-      }
-      // pulse fMRI sprites
-      if (frameCount % 2 === 0 && fmriGroupRef.current) {
+
+      // pulse fMRI sprites（仍在動 → 需要持續渲染）
+      let hasPulsingFmri = false;
+      if (fmriGroupRef.current && fmriGroupRef.current.children.length > 0) {
+        hasPulsingFmri = true;
         const t = frameCount * 0.01;
         fmriGroupRef.current.children.forEach((child: THREE.Object3D) => {
           if (child instanceof THREE.Sprite) {
@@ -282,25 +348,39 @@ export default function PersonalBrain({
           }
         });
       }
-      composerRef.current?.render();
+
+      if (needsRenderRef.current || isDragging.current || hasPulsingFmri) {
+        composerRef.current?.render();
+        needsRenderRef.current = false;
+      }
     }
-    animate();
+    animFrameRef.current = requestAnimationFrame(animate);
 
     // drag to rotate
-    function onMouseDown(e: MouseEvent) { isDragging.current = true; prevMouse.current = { x: e.clientX, y: e.clientY }; }
-    function onMouseUp()  { isDragging.current = false; }
+    function onMouseDown(e: MouseEvent) {
+      isDragging.current = true;
+      prevMouse.current = { x: e.clientX, y: e.clientY };
+      needsRenderRef.current = true;
+    }
+    function onMouseUp()  { isDragging.current = false; needsRenderRef.current = true; }
     function onMouseMove(e: MouseEvent) {
       if (!isDragging.current || !rotGroup.current) return;
       rotGroup.current.rotation.y += (e.clientX - prevMouse.current.x) * 0.008;
       rotGroup.current.rotation.x += (e.clientY - prevMouse.current.y) * 0.008;
       prevMouse.current = { x: e.clientX, y: e.clientY };
+      needsRenderRef.current = true;
     }
-    function onTouchStart(e: TouchEvent) { isDragging.current = true; prevMouse.current = { x: e.touches[0].clientX, y: e.touches[0].clientY }; }
+    function onTouchStart(e: TouchEvent) {
+      isDragging.current = true;
+      prevMouse.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      needsRenderRef.current = true;
+    }
     function onTouchMove(e: TouchEvent) {
       if (!isDragging.current || !rotGroup.current) return;
       rotGroup.current.rotation.y += (e.touches[0].clientX - prevMouse.current.x) * 0.008;
       rotGroup.current.rotation.x += (e.touches[0].clientY - prevMouse.current.y) * 0.008;
       prevMouse.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      needsRenderRef.current = true;
     }
     canvasRef.current.addEventListener("mousedown",  onMouseDown);
     canvasRef.current.addEventListener("touchstart", onTouchStart, { passive: true });
@@ -309,12 +389,41 @@ export default function PersonalBrain({
     window.addEventListener("touchmove", onTouchMove, { passive: true });
     window.addEventListener("touchend",  onMouseUp);
 
+    // ── 可見性偵測：分頁背景 / 面板捲出視窗外時暫停渲染 ──────────
+    function onVisibilityChange() {
+      if (document.hidden) {
+        isVisibleRef.current = false;
+      } else {
+        isVisibleRef.current = true;
+        needsRenderRef.current = true; // 回到前景時補畫一幀
+      }
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    let io: IntersectionObserver | null = null;
+    if (typeof IntersectionObserver !== "undefined" && canvasRef.current) {
+      io = new IntersectionObserver(
+        ([entry]) => {
+          isVisibleRef.current = entry.isIntersecting && !document.hidden;
+          if (isVisibleRef.current) needsRenderRef.current = true;
+        },
+        { threshold: 0.05 },
+      );
+      io.observe(canvasRef.current);
+    }
+
     return () => {
       cancelAnimationFrame(animFrameRef.current);
       window.removeEventListener("mouseup",   onMouseUp);
       window.removeEventListener("mousemove", onMouseMove);
       window.removeEventListener("touchmove", onTouchMove);
       window.removeEventListener("touchend",  onMouseUp);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      io?.disconnect();
+
+      // ── 完整釋放 GPU 資源，避免 resize 觸發重建時持續累積 ──────
+      disposeObject3D(scene);
+      fmriTexRef.current?.dispose();
       renderer.dispose();
       composer.dispose();
     };
@@ -325,6 +434,7 @@ export default function PersonalBrain({
   useEffect(() => {
     if (!fmriGroupRef.current || !fmriTexRef.current || !layout) return;
     const group = fmriGroupRef.current;
+    disposeObject3D(group);
     group.clear();
 
     const tex = fmriTexRef.current;
@@ -354,18 +464,27 @@ export default function PersonalBrain({
       spr.userData.phase       = idx * 0.7;
       group.add(spr);
     });
+
+    needsRenderRef.current = true;
   }, [personalBrain, nodeById, pulseEids, layout]);
 
   // ── Path lines: update when selected RC path changes ─────
   useEffect(() => {
     if (!pathGroupRef.current || !layout) return;
     const group = pathGroupRef.current;
+    disposeObject3D(group);
     group.clear();
 
-    if (!rcPathData || selectedPathId === null) return;
+    if (!rcPathData || selectedPathId === null) {
+      needsRenderRef.current = true;
+      return;
+    }
 
     const path = rcPathData.paths.find((p) => p.path_id === selectedPathId);
-    if (!path) return;
+    if (!path) {
+      needsRenderRef.current = true;
+      return;
+    }
 
     const nodeSet  = new Set(path.node_ids);
     const edgeSet  = new Set(path.edge_ids);
@@ -409,6 +528,8 @@ export default function PersonalBrain({
       spr.scale.setScalar(0.4);
       group.add(spr);
     }
+
+    needsRenderRef.current = true;
   }, [rcPathData, selectedPathId, layout]);
 
   // ── RC tag click ─────────────────────────────────────────

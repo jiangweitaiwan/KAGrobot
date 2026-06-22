@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * GlobalBrainExplorer.tsx（三層殼層版）
+ * GlobalBrainExplorer.tsx（三層殼層版 + 效能優化版）
  *
  * 殼層隱喻（由核心向外）：
  *   article  → 內核  — 青白色，最核心的基礎概念
@@ -9,6 +9,21 @@
  *   paper    → 外層  — 暖橘色，論文專精概念
  *
  * 互動邏輯不變（聚焦候選、foundation 路徑、drag-to-rotate 等）。
+ *
+ * ── 效能優化（重點）──────────────────────────────────────────
+ *   1. 移除自動旋轉：場景不再持續自轉，改為純使用者驅動。
+ *   2. 按需渲染（on-demand rendering）：只有在「真的有東西在動」
+ *      （拖曳中、有接力光點動畫、聚焦光暈呼吸）或畫面被標記為
+ *      dirty 時才送一幀進 GPU，其餘時間迴圈直接 return，不渲染。
+ *   3. 可見性偵測：分頁切到背景（visibilitychange）或面板捲出
+ *      可視範圍（IntersectionObserver）時，完全暫停渲染。
+ *   4. 渲染幀率上限 ~24fps（原本跟著 rAF 跑滿 60fps）。
+ *   5. devicePixelRatio 上限降至 1.25（原本 2），大幅降低
+ *      fill-rate 成本，一般螢幕無感，Retina/4K 螢幕仍清晰可用。
+ *   6. Hover 最近節點偵測降頻至 ~10Hz（原本 ~30Hz），減少主執行緒
+ *      上的暴力投影計算。
+ *   7. Cleanup 時完整 dispose 所有 geometry / material / texture，
+ *      避免面板 resize 觸發場景重建時造成 GPU 記憶體持續累積。
  */
 
 import { useEffect, useRef, useMemo, useState } from "react";
@@ -124,6 +139,11 @@ const ZOOM_DEFAULT      = 5.5;
 const PICK_PIXEL_RADIUS = 16;
 const LABEL_Y_OFFSET    = 0.34;
 
+// ── 效能參數 ─────────────────────────────────────────────────
+const MAX_PIXEL_RATIO   = 1.25;  // 原本 2，降低 fill-rate 成本
+const RENDER_FRAME_MS   = 1000 / 24; // 渲染幀率上限 ~24fps
+const HOVER_PICK_EVERY  = 6;     // 原本 2（~30Hz）→ 6（~10Hz）
+
 // ─────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────
@@ -221,18 +241,26 @@ function makeFlatDotSprite(colorHex: string): THREE.Sprite {
   return spr;
 }
 
-function disposeSceneChild(child: THREE.Object3D) {
-  if (child instanceof THREE.Sprite) {
-    child.material.map?.dispose();
-    child.material.dispose();
-  } else if (child instanceof THREE.Line) {
-    child.geometry.dispose();
-    (child.material as THREE.Material).dispose();
-  }
+/** 完整釋放單一 Object3D 的 geometry / material / texture（含子節點）。*/
+function disposeObject3D(root: THREE.Object3D) {
+  root.traverse((child: any) => {
+    if (child.geometry) {
+      child.geometry.dispose();
+    }
+    if (child.material) {
+      const mats: THREE.Material[] = Array.isArray(child.material)
+        ? child.material
+        : [child.material];
+      mats.forEach((m: any) => {
+        if (m.map) m.map.dispose();
+        m.dispose();
+      });
+    }
+  });
 }
 
 function disposeGroupChildren(group: THREE.Group) {
-  group.children.forEach(disposeSceneChild);
+  group.children.forEach((child) => disposeObject3D(child));
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -268,6 +296,11 @@ export default function GlobalBrainExplorer({
   const pinchStartZ    = useRef(ZOOM_DEFAULT);
   const pulsesRef      = useRef<PulseInfo[]>([]);
   const hoveredIdxRef  = useRef<number | null>(null);
+
+  // ── 效能：可見性 / 按需渲染狀態 ──────────────────────────
+  const isVisibleRef   = useRef(true);   // 分頁可見 && 面板在視窗內
+  const needsRenderRef = useRef(true);   // 畫面是否為 dirty，需要重繪一次
+  const lastFrameTsRef = useRef(0);      // 上一次實際渲染的時間戳
 
   const [focusedCandidateEid, setFocusedCandidateEid] = useState<string | null>(null);
 
@@ -339,7 +372,7 @@ export default function GlobalBrainExplorer({
 
     const renderer = new THREE.WebGLRenderer({ canvas: canvasRef.current, antialias: true, alpha: false });
     renderer.setSize(width, height);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO));
     renderer.setClearColor(PALETTE.bg, 1);
     rendererRef.current = renderer;
 
@@ -364,9 +397,10 @@ export default function GlobalBrainExplorer({
     }
     const bgGeo = new THREE.BufferGeometry();
     bgGeo.setAttribute("position", new THREE.BufferAttribute(bgPos, 3));
-    scene.add(new THREE.Points(bgGeo, new THREE.PointsMaterial({
+    const bgMat = new THREE.PointsMaterial({
       color: 0x2a3550, size: 0.01, transparent: true, opacity: 0.35, depthWrite: false,
-    })));
+    });
+    scene.add(new THREE.Points(bgGeo, bgMat));
 
     // 節點標記
     const n = layout.nodes.length;
@@ -458,6 +492,9 @@ export default function GlobalBrainExplorer({
 
     scene.add(new THREE.AmbientLight(0xffffff, 1));
 
+    // 場景剛建立，標記需要畫第一幀
+    needsRenderRef.current = true;
+
     // ── 螢幕空間點擊判定 ──────────────────────────────────────
     function worldToScreenPx(worldPos: THREE.Vector3): { x: number; y: number } | null {
       const cam = cameraRef.current;
@@ -483,18 +520,23 @@ export default function GlobalBrainExplorer({
       return bestIdx;
     }
 
-    // ── Animation loop ─────────────────────────────────────────
+    // ── Animation loop（按需渲染版）────────────────────────────
+    // 不再自動旋轉。每幀只做：
+    //   1) 可見性檢查 → 不可見直接 return，完全不耗用 GPU/CPU
+    //   2) 幀率上限節流（~24fps）
+    //   3) hover 偵測降頻（~10Hz）
+    //   4) 只有「畫面真的有變化」才呼叫 renderer.render()
     let frameCount = 0;
-    function animate() {
+    function animate(now: number) {
       animFrameRef.current = requestAnimationFrame(animate);
+
+      if (!isVisibleRef.current) return;
+      if (now - lastFrameTsRef.current < RENDER_FRAME_MS) return;
+      lastFrameTsRef.current = now;
       frameCount++;
 
-      if (rotGroupRef.current && !isDragging.current) {
-        rotGroupRef.current.rotation.y += 0.0008;
-        rotGroupRef.current.rotation.x += 0.0002;
-      }
-
-      if (frameCount % 2 === 0) {
+      // hover 最近節點偵測（降頻）
+      if (frameCount % HOVER_PICK_EVERY === 0 && !isDragging.current) {
         const { x, y } = mousePixel.current;
         const idx = findNearestNodeIndex(x, y);
         hoveredIdxRef.current = idx;
@@ -523,10 +565,13 @@ export default function GlobalBrainExplorer({
             if (tooltipRef.current) tooltipRef.current.style.opacity = "0";
           }
         }
+        needsRenderRef.current = true; // hover 狀態變了，補畫一幀
       }
 
-      // 聚焦光暈呼吸
+      // 聚焦光暈呼吸（仍在動 → 需要持續渲染）
+      let hasBreathing = false;
       if (focusGroupRef.current && focusGroupRef.current.children.length > 0) {
+        hasBreathing = true;
         const t = frameCount * 0.04;
         const pulse = 0.85 + 0.15 * Math.sin(t);
         focusGroupRef.current.children.forEach((child) => {
@@ -536,15 +581,23 @@ export default function GlobalBrainExplorer({
         });
       }
 
-      // 接力光點動畫
+      // 接力光點動畫（仍在動 → 需要持續渲染）
+      const hasActivePulses = pulsesRef.current.length > 0;
       pulsesRef.current.forEach((p) => {
         p.phase = (p.phase + 0.012) % 1;
         p.dot.position.lerpVectors(p.from, p.to, p.phase);
       });
 
-      renderer.render(scene, camera);
+      // 只有在「畫面真的有變化」時才送進 GPU：
+      //   - 標記為 dirty（互動、resize、資料更新後手動觸發）
+      //   - 拖曳中
+      //   - 有持續動畫（呼吸光暈 / 接力光點）
+      if (needsRenderRef.current || isDragging.current || hasBreathing || hasActivePulses) {
+        renderer.render(scene, camera);
+        needsRenderRef.current = false;
+      }
     }
-    animate();
+    animFrameRef.current = requestAnimationFrame(animate);
 
     // ── 事件 ─────────────────────────────────────────────────
     const canvas = canvasRef.current!;
@@ -555,6 +608,7 @@ export default function GlobalBrainExplorer({
       isDragging.current = true;
       prevMouse.current  = { x: e.clientX, y: e.clientY };
       mouseDownPos       = { x: e.clientX, y: e.clientY };
+      needsRenderRef.current = true;
     }
     function onMouseUp(e: MouseEvent) {
       const dx = Math.abs(e.clientX - mouseDownPos.x);
@@ -577,6 +631,7 @@ export default function GlobalBrainExplorer({
         }
       }
       isDragging.current = false;
+      needsRenderRef.current = true;
     }
     function onMouseMove(e: MouseEvent) {
       const r = getBoundedRect();
@@ -585,18 +640,21 @@ export default function GlobalBrainExplorer({
       rotGroupRef.current.rotation.y += (e.clientX - prevMouse.current.x) * 0.008;
       rotGroupRef.current.rotation.x += (e.clientY - prevMouse.current.y) * 0.008;
       prevMouse.current = { x: e.clientX, y: e.clientY };
+      needsRenderRef.current = true;
     }
     function onMouseLeave() {
       isDragging.current = false;
       mousePixel.current = { x: -9999, y: -9999 };
       if (tooltipRef.current)    tooltipRef.current.style.opacity = "0";
       if (hoverRingRef.current)  hoverRingRef.current.visible = false;
+      needsRenderRef.current = true;
     }
     function onWheel(e: WheelEvent) {
       e.preventDefault();
       const cam = cameraRef.current;
       if (!cam) return;
       cam.position.z = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, cam.position.z + e.deltaY * 0.01));
+      needsRenderRef.current = true;
     }
     function getTouchDist(e: TouchEvent) {
       const dx = e.touches[0].clientX - e.touches[1].clientX;
@@ -611,6 +669,7 @@ export default function GlobalBrainExplorer({
         isDragging.current = true;
         prevMouse.current  = { x: e.touches[0].clientX, y: e.touches[0].clientY };
       }
+      needsRenderRef.current = true;
     }
     function onTouchMove(e: TouchEvent) {
       if (e.touches.length === 2 && cameraRef.current) {
@@ -622,8 +681,9 @@ export default function GlobalBrainExplorer({
         rotGroupRef.current.rotation.x += (e.touches[0].clientY - prevMouse.current.y) * 0.008;
         prevMouse.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
       }
+      needsRenderRef.current = true;
     }
-    function onTouchEnd() { isDragging.current = false; }
+    function onTouchEnd() { isDragging.current = false; needsRenderRef.current = true; }
 
     canvas.addEventListener("mousedown",  onMouseDown);
     canvas.addEventListener("mouseleave", onMouseLeave);
@@ -633,6 +693,29 @@ export default function GlobalBrainExplorer({
     window.addEventListener("mousemove",  onMouseMove);
     window.addEventListener("touchmove",  onTouchMove, { passive: true });
     window.addEventListener("touchend",   onTouchEnd);
+
+    // ── 可見性偵測：分頁背景 / 面板捲出視窗外時暫停渲染 ──────────
+    function onVisibilityChange() {
+      if (document.hidden) {
+        isVisibleRef.current = false;
+      } else {
+        isVisibleRef.current = true;
+        needsRenderRef.current = true; // 回到前景時補畫一幀
+      }
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    let io: IntersectionObserver | null = null;
+    if (typeof IntersectionObserver !== "undefined") {
+      io = new IntersectionObserver(
+        ([entry]) => {
+          isVisibleRef.current = entry.isIntersecting && !document.hidden;
+          if (isVisibleRef.current) needsRenderRef.current = true;
+        },
+        { threshold: 0.05 },
+      );
+      io.observe(canvas);
+    }
 
     return () => {
       cancelAnimationFrame(animFrameRef.current);
@@ -644,9 +727,12 @@ export default function GlobalBrainExplorer({
       window.removeEventListener("mousemove",  onMouseMove);
       window.removeEventListener("touchmove",  onTouchMove);
       window.removeEventListener("touchend",   onTouchEnd);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      io?.disconnect();
+
+      // ── 完整釋放 GPU 資源，避免 resize 觸發重建時持續累積 ──────
+      disposeObject3D(scene);
       renderer.dispose();
-      markerGeo.dispose();
-      markerMat.dispose();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layout, width, height, nodeWorldPositions, clusterStats, nodeIdxMap]);
@@ -667,6 +753,8 @@ export default function GlobalBrainExplorer({
       ring.scale.set(sz * 1.5, sz * 1.5, 1);
       ringGroup.add(ring);
     });
+
+    needsRenderRef.current = true;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeCandidateEids, focusedCandidateEid, nodeIdxMap, nodeWorldPositions, layout]);
 
@@ -718,6 +806,8 @@ export default function GlobalBrainExplorer({
       colorAttr.needsUpdate = true;
       sizeAttr.needsUpdate  = true;
     }
+
+    needsRenderRef.current = true;
 
     if (!focusedCandidateEid) return;
 
@@ -776,6 +866,7 @@ export default function GlobalBrainExplorer({
     const cam = cameraRef.current;
     if (!cam) return;
     cam.position.z = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, cam.position.z + delta));
+    needsRenderRef.current = true;
   }
 
   // ─────────────────────────────────────────────────────────

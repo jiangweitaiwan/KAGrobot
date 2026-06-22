@@ -61,6 +61,18 @@ const USER_ID_KEY = "kagrobot_user_id";
 const MAX_HISTORY = 60;
 const ALPHA       = 0.5;
 
+// ── 打字機效能參數 ───────────────────────────────────────────
+// 原本每 10ms 輸出 1 個字元 → React re-render 次數 = 文字長度。
+// 改為每 20ms 輸出 3 個字元，視覺速度相近（甚至略快），
+// 但 re-render 次數降到約三分之一，減少與 3D 渲染搶主執行緒的情況。
+const TYPEWRITER_CHARS_PER_TICK = 3;
+const TYPEWRITER_TICK_MS        = 20;
+
+// ── Resize 防抖（毫秒）──────────────────────────────────────
+// 避免使用者拖曳視窗邊框、或瀏覽器縮放比例變動時，
+// 每個 resize 事件都觸發一次完整 3D 場景重建。
+const RESIZE_DEBOUNCE_MS = 200;
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 
 // ─────────────────────────────────────────────────────────────
@@ -151,21 +163,35 @@ function computeRCRanking(
 }
 
 // ─────────────────────────────────────────────────────────────
-// usePanelSize
+// usePanelSize（加入 resize 防抖）
+//
+// 原本 ResizeObserver 每次觸發都立即 setSize，使用者拖曳視窗邊框
+// 時會連續觸發大量 resize callback，每次都讓下游的 Three.js 元件
+// 整個場景重建（init useEffect 依賴 width/height）。
+// 改用 debounce：拖曳結束後 200ms 才真正更新尺寸，過程中只重建一次。
 // ─────────────────────────────────────────────────────────────
 
 function usePanelSize(ref: React.RefObject<HTMLDivElement>) {
   const [size, setSize] = useState({ w: 400, h: 400 });
   useEffect(() => {
     if (!ref.current) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
     const ro = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const { width, height } = entry.contentRect;
-        setSize({ w: Math.floor(width) || 400, h: Math.floor(height) || 400 });
-      }
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        for (const entry of entries) {
+          const { width, height } = entry.contentRect;
+          setSize({ w: Math.floor(width) || 400, h: Math.floor(height) || 400 });
+        }
+      }, RESIZE_DEBOUNCE_MS);
     });
     ro.observe(ref.current);
-    return () => ro.disconnect();
+
+    return () => {
+      if (timer) clearTimeout(timer);
+      ro.disconnect();
+    };
   }, [ref]);
   return size;
 }
@@ -424,16 +450,29 @@ export default function Page() {
 
   const canSend = !!input.trim() && !isLoading && !!sessionId;
 
+  // ── 打字機效果（批次輸出版）──────────────────────────────
+  // 原本每 10ms append 1 個字元，AI 回覆越長，React re-render 次數
+  // 就越多，與兩個常駐的 3D 渲染迴圈疊加時會放大主執行緒負擔。
+  // 改為每 20ms 一次輸出 TYPEWRITER_CHARS_PER_TICK 個字元，
+  // 視覺上的「逐字浮現」速度幾乎相同（甚至略快），
+  // 但 re-render 次數降到約三分之一。
   async function typewriterAppend(fullText: string): Promise<void> {
     isTypingRef.current = true;
     const aiId = createId();
     setMessages((prev) => [...prev, { id: aiId, role: "ai", content: "" }]);
-    for (let i = 1; i <= fullText.length; i++) {
+
+    let i = TYPEWRITER_CHARS_PER_TICK;
+    for (; i <= fullText.length; i += TYPEWRITER_CHARS_PER_TICK) {
       setMessages((prev) =>
         prev.map((msg) => msg.id === aiId ? { ...msg, content: fullText.slice(0, i) } : msg),
       );
-      await wait(10);
+      await wait(TYPEWRITER_TICK_MS);
     }
+    // 補上最後不滿一批的尾段，確保完整文字一定會顯示
+    setMessages((prev) =>
+      prev.map((msg) => msg.id === aiId ? { ...msg, content: fullText } : msg),
+    );
+
     isTypingRef.current = false;
     saveHistory(messagesRef.current);
   }
