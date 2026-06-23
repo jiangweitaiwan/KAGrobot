@@ -273,14 +273,14 @@ class GlobalLayoutBuilder:
 
             direct_edges = session.run(
                 """
-                MATCH (a:Concept)-[:REASONING]->(b:Concept)
+                MATCH (a:Concept)-[:COMPOSES]->(b:Concept)
                 RETURN elementId(a) AS src, elementId(b) AS tgt
                 """
             ).data()
 
             paper_edges = session.run(
                 """
-                MATCH (a:Concept)-[:INSPIRES|INDIRECT_INSPIRES|REASONING]->
+                MATCH (a:Concept)-[:INSPIRES|INDIRECT_INSPIRES|COMPOSES]->
                       (:Paper)-[:PRODUCES]->(b:Concept)
                 RETURN elementId(a) AS src, elementId(b) AS tgt
                 """

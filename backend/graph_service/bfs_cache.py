@@ -47,7 +47,7 @@ class DownstreamNeighbor:
     """Downstream BFS 的一條分支結果。
 
     分兩種：
-      - 直接邊：Concept -[REASONING]-> Concept（paper=None）
+      - 直接邊：Concept -[COMPOSES]-> Concept（paper=None）
       - 跨 Paper：Concept -[INSPIRES/...]-> Paper -[PRODUCES]-> Concept
     """
     to_concept: ConceptInfo
@@ -59,7 +59,7 @@ class UpstreamNeighbor:
     """Upstream BFS 的一條分支結果。
 
     分兩種：
-      - 直接邊：Concept <-[REASONING]- Concept（paper=None）
+      - 直接邊：Concept <-[COMPOSES]- Concept（paper=None）
       - 跨 Paper：Concept <-[PRODUCES]- Paper <-[INSPIRES/...]- Concept
     """
     from_concept: ConceptInfo
@@ -190,7 +190,7 @@ class AdjacencyCache:
         """取得 eid 節點的所有下游鄰居。
 
         包含：
-          1. 直接 REASONING 邊到其他 Concept
+          1. 直接 COMPOSES 邊到其他 Concept
           2. 經由 Paper（INSPIRES/INDIRECT_INSPIRES/REASONING）到 RC
         """
         cache_key = f"down:{eid}"
@@ -209,7 +209,7 @@ class AdjacencyCache:
         """取得 eid 節點的所有上游鄰居。
 
         包含：
-          1. 反向 REASONING 邊來自其他 Concept
+          1. 反向 COMPOSES 邊來自其他 Concept
           2. 經由 Paper 反向追溯的前驅 Concept
         """
         cache_key = f"up:{eid}"
@@ -283,11 +283,11 @@ class AdjacencyCache:
         """下游鄰接查詢：合併兩條 Cypher 為一次 session。"""
         neighbors: List[DownstreamNeighbor] = []
 
-        # 1. 直接 REASONING 邊
+        # 1. 直接 COMPOSES 邊
         rows_a = tx.run(
             """
             MATCH (c:Concept) WHERE elementId(c) = $eid
-            MATCH (c)-[:REASONING]->(next:Concept)
+            MATCH (c)-[:COMPOSES]->(next:Concept)
             WHERE elementId(next) <> $eid
             RETURN elementId(next) AS next_eid,
                    next.name       AS next_name,
@@ -311,7 +311,7 @@ class AdjacencyCache:
             """
             MATCH (c:Concept) WHERE elementId(c) = $eid
                                 AND c.type = 'Resulting_Concept'
-            MATCH (c)-[:INSPIRES|INDIRECT_INSPIRES|REASONING]->(p:Paper)
+            MATCH (c)-[:INSPIRES|INDIRECT_INSPIRES|COMPOSES]->(p:Paper)
             MATCH (p)-[:PRODUCES]->(next:Concept {type:'Resulting_Concept'})
             WHERE elementId(next) <> $eid
             RETURN elementId(p)    AS p_eid,
@@ -347,11 +347,11 @@ class AdjacencyCache:
         """上游鄰接查詢。"""
         neighbors: List[UpstreamNeighbor] = []
 
-        # 1. 反向 REASONING 邊
+        # 1. 反向 COMPOSES 邊
         rows_a = tx.run(
             """
             MATCH (c:Concept) WHERE elementId(c) = $eid
-            MATCH (prev:Concept)-[:REASONING]->(c)
+            MATCH (prev:Concept)-[:COMPOSES]->(c)
             WHERE elementId(prev) <> $eid
             RETURN elementId(prev) AS prev_eid,
                    prev.name       AS prev_name,
@@ -375,7 +375,7 @@ class AdjacencyCache:
             """
             MATCH (c:Concept) WHERE elementId(c) = $eid
             MATCH (p:Paper)-[:PRODUCES]->(c)
-            MATCH (prev:Concept)-[:INSPIRES|INDIRECT_INSPIRES|REASONING]->(p)
+            MATCH (prev:Concept)-[:INSPIRES|INDIRECT_INSPIRES|COMPOSES]->(p)
             WHERE elementId(prev) <> $eid
             RETURN elementId(prev) AS prev_eid,
                    prev.name       AS prev_name,

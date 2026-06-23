@@ -370,7 +370,7 @@ class DownstreamBFS:
             a_branches = tx.run(
                 """
                 MATCH (c:Concept) WHERE elementId(c) = $eid
-                MATCH (c)-[:REASONING]->(next:Concept)
+                MATCH (c)-[:COMPOSES]->(next:Concept)
                 WHERE elementId(next) <> $eid
                 RETURN next, elementId(next) AS next_eid
                 """,
@@ -381,7 +381,7 @@ class DownstreamBFS:
                 """
                 MATCH (c:Concept) WHERE elementId(c) = $eid
                                     AND c.type = 'Resulting_Concept'
-                MATCH (c)-[:INSPIRES|INDIRECT_INSPIRES|REASONING]->(p:Paper)
+                MATCH (c)-[:INSPIRES|INDIRECT_INSPIRES|COMPOSES]->(p:Paper)
                 MATCH (p)-[:PRODUCES]->(next:Concept {type:'Resulting_Concept'})
                 WHERE elementId(next) <> $eid
                 RETURN p, next,
@@ -426,7 +426,7 @@ class DownstreamBFS:
         rows = tx.run(
             """
             MATCH (c:Concept) WHERE elementId(c) = $eid
-            MATCH (c)-[:INSPIRES|INDIRECT_INSPIRES|APPLY_TO|REASONING]->(p:Paper)
+            MATCH (c)-[:INSPIRES|INDIRECT_INSPIRES|APPLY_TO|COMPOSES]->(p:Paper)
             MATCH (p)-[:PRODUCES]->(rc:Concept {type:'Resulting_Concept'})
             RETURN DISTINCT elementId(rc) AS rc_eid
             """,
@@ -589,7 +589,7 @@ class UpstreamBFS:
             a_branches = tx.run(
                 """
                 MATCH (c:Concept) WHERE elementId(c) = $eid
-                MATCH (prev:Concept)-[:REASONING]->(c)
+                MATCH (prev:Concept)-[:COMPOSES]->(c)
                 WHERE elementId(prev) <> $eid
                 RETURN prev, elementId(prev) AS prev_eid
                 """,
@@ -600,7 +600,7 @@ class UpstreamBFS:
                 """
                 MATCH (c:Concept) WHERE elementId(c) = $eid
                 MATCH (p:Paper)-[:PRODUCES]->(c)
-                MATCH (prev:Concept)-[:INSPIRES|INDIRECT_INSPIRES|REASONING]->(p)
+                MATCH (prev:Concept)-[:INSPIRES|INDIRECT_INSPIRES|COMPOSES]->(p)
                 WHERE elementId(prev) <> $eid
                 RETURN prev, p,
                        elementId(prev) AS prev_eid,

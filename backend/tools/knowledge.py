@@ -4,7 +4,7 @@ tools/knowledge.py
 知識圖譜查詢與推理邏輯追蹤工具。
 
 包含：
-  - knowledge_qa      — 查詢 reasoning chain 知識背景（工廠函數）
+  - knowledge_qa      — 查詢 COMPOSES chain 知識背景（工廠函數）
   - trace_rc_logic    — 追蹤 Resulting Concept 的推導邏輯鏈（工廠函數）
 
 這兩支工具以「工廠函數」形式提供，由 core/main_agent.py 在每次
@@ -28,7 +28,7 @@ from settings import get_settings
 # ═══════════════════════════════════════════════════════════════
 
 def make_knowledge_qa_tool(reasoning_chains: List[dict]) -> StructuredTool:
-    """建立一個 closure 工具，讓 Agent 可查詢 reasoning chain 知識。
+    """建立一個 closure 工具，讓 Agent 可查詢 COMPOSES chain 知識。
 
     Args:
         reasoning_chains: 來自 SocratesChatBot resolved state 的推理鏈列表。
@@ -57,7 +57,7 @@ def make_knowledge_qa_tool(reasoning_chains: List[dict]) -> StructuredTool:
 
 
 def _format_reasoning_chains(chains: List[dict]) -> str:
-    """將 reasoning chain 列表序列化為易讀文字。"""
+    """將 COMPOSES chain 列表序列化為易讀文字。"""
     if not chains:
         return "（無可用推理鏈）"
 
