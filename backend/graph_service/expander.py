@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""graph_service/expander.py — 並行展開候選概念的知識圖譜。
+"""graph_service/expander.py — 並行展開候選概念的知識圖譜（更新版）
 
-GraphExpander 負責：
-  1. 並行呼叫 DownstreamBFS 與 UpstreamBFS 展開各候選
-  2. 修剪每個圖譜只保留 top-N 路徑
-  3. 若有 intent_types，呼叫 PathScorer 重新評分
+與原版的差異：
+  - 不再直接依賴 DownstreamBFS / UpstreamBFS
+  - 改由 BFSCoordinator 統一排程，BFS 過程走鄰接層 cache
+  - expand_one_async 已在 Coordinator 層做結果快取，
+    相同 eid 第二次呼叫直接回傳，不重跑 BFS
 """
 
 from __future__ import annotations
@@ -12,8 +13,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict, List, Optional
 
-from graph_service.scorer    import PathScorer
-from retrieval.bfs            import DownstreamBFS, UpstreamBFS
+from graph_service.bfs_coordinator import BFSCoordinator
+from graph_service.scorer          import PathScorer
 
 
 _TOP_N_PATHS = 3
@@ -24,20 +25,17 @@ class GraphExpander:
 
     Parameters
     ----------
-    downstream_bfs : DownstreamBFS
-    upstream_bfs   : UpstreamBFS
-    scorer         : PathScorer
+    coordinator : BFSCoordinator  統一 BFS 排程器（取代原本的 downstream/upstream 注入）
+    scorer      : PathScorer
     """
 
     def __init__(
         self,
-        downstream_bfs: DownstreamBFS,
-        upstream_bfs:   UpstreamBFS,
-        scorer:         PathScorer,
+        coordinator: BFSCoordinator,
+        scorer:      PathScorer,
     ) -> None:
-        self._downstream = downstream_bfs
-        self._upstream   = upstream_bfs
-        self._scorer     = scorer
+        self._coordinator = coordinator
+        self._scorer      = scorer
 
     async def expand_all(
         self,
@@ -59,9 +57,7 @@ class GraphExpander:
 
         return all_graphs
 
-    # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
+    # ── Private ───────────────────────────────────────────────
 
     async def _expand_one(self, cand: dict) -> tuple[int, Any]:
         idx     = cand["index"]
@@ -72,14 +68,11 @@ class GraphExpander:
             return idx, None
 
         try:
-            raw_graph, foundations_data = await asyncio.gather(
-                asyncio.to_thread(
-                    self._downstream.run, eid, rc_name
-                ),
-                asyncio.to_thread(
-                    self._upstream.run, eid
-                ),
+            # 透過 Coordinator 取得兩方向結果（鄰接層 cache 共享）
+            raw_graph, foundations_data = await self._coordinator.expand_one_async(
+                eid, rc_name
             )
+
             raw_graph["foundations"]     = foundations_data["final_foundations"]
             raw_graph["foundation_tree"] = foundations_data["foundation_tree"]
 

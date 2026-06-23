@@ -1,16 +1,14 @@
 # -*- coding: utf-8 -*-
-"""api/routes/routes_brain.py — PersonalBrain 相關 endpoints。
+"""api/routes/routes_brain.py — PersonalBrain 相關 endpoints（更新版）
 
-GET  /graph/expand/{eid}          → 取得 concept 的 foundation tree（UpstreamBFS）
-GET  /graph/rc-paths/{eid}        → 取得 RC 的 downstream paths（DownstreamBFS）
-GET  /brain/rc-semantic-scores    → 取得所有 RC 對 query 的 SBERT 語意相似度
+與原版的差異：
+  - /graph/expand/{eid}   → 改用 coordinator.get_expand_cached()
+  - /graph/rc-paths/{eid} → 改用 coordinator.get_rcpath_cached()
+  - 移除對 app.state.expand_cache / app.state.rcpath_cache 的直接存取
+    （結果層 cache 統一由 BFSCoordinator 管理）
+  - 新增 GET /admin/cache/stats → 回傳各層 cache 統計資訊
 
-優化（2024）：
-  1. expand / rc-paths 結果快取在 app.state.expand_cache / rcpath_cache
-     （process 生命週期，圖譜不常變動故不設 TTL）
-  2. anchor label 改從 app.state.layout_cache 查，消除每次的額外 Neo4j call
-  3. expand / rc-paths 的 UpstreamBFS / DownstreamBFS 改用共用 session
-     （在 BFS 類別內部已統一管理，此層不需重開 session）
+其餘邏輯（anchor label 查詢、Schema、semantic scores）維持不變。
 """
 
 from __future__ import annotations
@@ -80,22 +78,22 @@ class SemanticScoresResponse(BaseModel):
     scores: List[RCSemanticScore]
 
 
+class CacheStatsResponse(BaseModel):
+    adjacency_cache: Dict[str, Any]
+    result_cache:    Dict[str, Any]
+    rcpath_cache:    Dict[str, Any]
+    expand_cache:    Dict[str, Any]
+
+
 # ── Helpers ───────────────────────────────────────────────────────────
 
 def _anchor_label_from_cache(
     layout_cache: Optional[Dict[str, Any]],
     eid: str,
 ) -> Optional[str]:
-    """從 layout_cache 取節點 name，避免額外打 Neo4j。
-
-    layout_cache 由 GlobalLayoutBuilder 在 /graph/global-layout 首次呼叫時
-    填入 app.state.layout_cache，結構為 {"nodes": [...], "edges": [...]}。
-    nodes 裡每個元素有 id / name / type / source / x / y / z。
-    """
     if not layout_cache:
         return None
     nodes: List[Dict[str, Any]] = layout_cache.get("nodes", [])
-    # 線性掃描；nodes 數量通常 < 5000，不需額外 index
     for n in nodes:
         if n.get("id") == eid:
             return n.get("name") or None
@@ -103,7 +101,6 @@ def _anchor_label_from_cache(
 
 
 def _anchor_label_from_neo4j(driver, eid: str) -> str:
-    """layout_cache 尚未建立時的 fallback：打一次 Neo4j。"""
     with driver.session() as session:
         rec = session.run(
             "MATCH (c:Concept) WHERE elementId(c) = $eid RETURN c.name AS name",
@@ -113,7 +110,6 @@ def _anchor_label_from_neo4j(driver, eid: str) -> str:
 
 
 def _get_anchor_label(request: Request, eid: str) -> str:
-    """優先從 layout_cache 取，沒有才 fallback 到 Neo4j。"""
     label = _anchor_label_from_cache(request.app.state.layout_cache, eid)
     if label:
         return label
@@ -126,21 +122,15 @@ def _get_anchor_label(request: Request, eid: str) -> str:
 async def expand_concept(eid: str, request: Request) -> ExpandResponse:
     """取得指定 concept 的 foundation tree（UpstreamBFS）。
 
-    結果快取在 app.state.expand_cache（eid → ExpandResponse）。
-    anchor label 從 layout_cache 取，不再額外打 Neo4j。
+    結果快取由 BFSCoordinator 統一管理（取代 app.state.expand_cache）。
+    鄰接層 cache 與其他 BFS 操作共享，重複節點不重複查詢 Neo4j。
     """
-    # ── 1. 快取命中直接回傳 ──────────────────────────────────
-    expand_cache: Dict[str, ExpandResponse] = request.app.state.expand_cache
-    if eid in expand_cache:
-        return expand_cache[eid]
-
-    # ── 2. anchor label：優先用 layout_cache ─────────────────
+    coordinator  = request.app.state.coordinator
     anchor_label = _get_anchor_label(request, eid)
 
-    # ── 3. UpstreamBFS ───────────────────────────────────────
-    upstream_bfs = request.app.state.upstream_bfs
+    # ── BFS（結果層 cache 命中則不執行）─────────────────────
     result = await asyncio.to_thread(
-        upstream_bfs.run, eid, max_depth=6, max_branches=4
+        coordinator.get_expand_cached, eid, max_depth=6, max_branches=4
     )
 
     foundations = [
@@ -156,11 +146,10 @@ async def expand_concept(eid: str, request: Request) -> ExpandResponse:
         for e in result.get("foundation_tree", {}).get("edges", [])
     ]
 
-    # anchor 節點確保出現在 nodes 中
     if not any(n.element_id == eid for n in tree_nodes):
         tree_nodes.append(FoundationTreeNode(element_id=eid, label=anchor_label))
 
-    response = ExpandResponse(
+    return ExpandResponse(
         anchor_eid=eid,
         anchor_label=anchor_label,
         foundations=foundations,
@@ -168,30 +157,19 @@ async def expand_concept(eid: str, request: Request) -> ExpandResponse:
         edges=tree_edges,
     )
 
-    # ── 4. 存入快取 ──────────────────────────────────────────
-    expand_cache[eid] = response
-    return response
-
 
 @router.get("/graph/rc-paths/{eid}", response_model=RCPathsResponse)
 async def rc_paths(eid: str, request: Request) -> RCPathsResponse:
     """取得指定 RC 的 downstream paths（DownstreamBFS）。
 
-    結果快取在 app.state.rcpath_cache（eid → RCPathsResponse）。
-    rc_label 從 layout_cache 取，不再額外打 Neo4j。
+    結果快取由 BFSCoordinator 統一管理（取代 app.state.rcpath_cache）。
     """
-    # ── 1. 快取命中直接回傳 ──────────────────────────────────
-    rcpath_cache: Dict[str, RCPathsResponse] = request.app.state.rcpath_cache
-    if eid in rcpath_cache:
-        return rcpath_cache[eid]
+    coordinator = request.app.state.coordinator
+    rc_label    = _get_anchor_label(request, eid)
 
-    # ── 2. rc_label：優先用 layout_cache ─────────────────────
-    rc_label = _get_anchor_label(request, eid)
-
-    # ── 3. DownstreamBFS ─────────────────────────────────────
-    downstream_bfs = request.app.state.downstream_bfs
+    # ── BFS（結果層 cache 命中則不執行）─────────────────────
     raw = await asyncio.to_thread(
-        downstream_bfs.run, eid, rc_label, max_depth_down=6
+        coordinator.get_rcpath_cached, eid, rc_label, max_depth=6
     )
 
     nodes = [
@@ -223,14 +201,10 @@ async def rc_paths(eid: str, request: Request) -> RCPathsResponse:
         for p in raw.get("paths", [])
     ]
 
-    response = RCPathsResponse(
+    return RCPathsResponse(
         eid=eid, label=rc_label,
         nodes=nodes, edges=edges, paths=paths,
     )
-
-    # ── 4. 存入快取 ──────────────────────────────────────────
-    rcpath_cache[eid] = response
-    return response
 
 
 @router.get("/brain/rc-semantic-scores", response_model=SemanticScoresResponse)
@@ -238,11 +212,7 @@ async def rc_semantic_scores(
     query:   str,
     request: Request,
 ) -> SemanticScoresResponse:
-    """計算所有 Resulting Concept 對 query 的 SBERT 語意相似度。
-
-    在 concept_resolved 階段呼叫一次，結果存在 frontend state。
-    α 係數（預設 0.5）在 frontend 做加權合併。
-    """
+    """計算所有 Resulting Concept 對 query 的 SBERT 語意相似度。（邏輯不變）"""
     encoder      = request.app.state.encoder
     layout_cache = request.app.state.layout_cache
 
@@ -278,3 +248,20 @@ async def rc_semantic_scores(
     scores.sort(key=lambda s: s.score, reverse=True)
 
     return SemanticScoresResponse(query=query, scores=scores)
+
+
+@router.get("/admin/cache/stats", response_model=CacheStatsResponse)
+async def cache_stats(request: Request) -> CacheStatsResponse:
+    """回傳各層 cache 的統計資訊（命中率、大小等）。
+
+    用於監控與調校 LRU maxsize。
+    """
+    coordinator = request.app.state.coordinator
+    stats       = coordinator.stats
+
+    return CacheStatsResponse(
+        adjacency_cache=stats["adjacency_cache"],
+        result_cache=stats["result_cache"],
+        rcpath_cache=stats["rcpath_cache"],
+        expand_cache=stats["expand_cache"],
+    )
