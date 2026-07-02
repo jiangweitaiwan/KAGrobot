@@ -14,6 +14,8 @@ import type {
 } from "./components/DetailPanel";
 import type { RCRankedItem, RCPathData } from "./components/PersonalBrain";
 
+import type { BertopicLayoutData } from "./components/BertopicMap";
+
 const GlobalBrainExplorer = dynamic(() => import("./components/GlobalBrainExplorer"), { ssr: false });
 const PersonalBrain       = dynamic(() => import("./components/PersonalBrain"),       { ssr: false });
 const DetailPanel         = dynamic(() => import("./components/DetailPanel"),         { ssr: false });
@@ -238,6 +240,8 @@ export default function Page() {
 
   // ── Global layout ──────────────────────────────────────────
   const [globalLayout,        setGlobalLayout]        = useState<GlobalLayout | null>(null);
+  // ── BERTopic 2D layout ─────────────────────────────────────
+  const [bertopicLayout, setBertopicLayout] = useState<BertopicLayoutData | null>(null);
   const [globalLayoutFetched, setGlobalLayoutFetched] = useState(false);
   const [activeCandidateEids, setActiveCandidateEids] = useState<string[]>([]);
 
@@ -315,6 +319,18 @@ export default function Page() {
       .then((d: GlobalLayout) => setGlobalLayout(d))
       .catch((err) => console.warn("[GlobalBrain] layout fetch failed:", err));
   }, [messages, globalLayoutFetched]);
+
+
+
+  // ── Fetch BERTopic layout（一次性，和 globalLayout 同步觸發）──
+  useEffect(() => {
+    if (!API_BASE || bertopicLayout !== null) return;
+    fetch(`${API_BASE.replace(/\/$/, "")}/graph/bertopic-layout`)
+      .then((r) => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); })
+      .then((d: BertopicLayoutData) => setBertopicLayout(d))
+      .catch((err) => console.warn("[BertopicLayout] fetch failed:", err));
+  }, [bertopicLayout]);
+
 
   // ──────────────────────────────────────────────────────────
   // GlobalBrainExplorer node click
@@ -666,6 +682,7 @@ export default function Page() {
             layout={globalLayout}
             personalBrain={personalBrain}
             rcRanking={rcRanking}
+            bertopicLayout={bertopicLayout}   // ← 新增
             onConfirmRC={handleConfirmRC}
             fetchRCPaths={fetchRCPaths}
             width={personalSize.w}

@@ -19,6 +19,9 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
+import json
+import tempfile
+from pathlib import Path
 
 router = APIRouter()
 
@@ -84,6 +87,27 @@ class CacheStatsResponse(BaseModel):
     rcpath_cache:    Dict[str, Any]
     expand_cache:    Dict[str, Any]
 
+
+class BertopicNode(BaseModel):
+    eid:         Optional[str]
+    name:        str
+    x:           float
+    y:           float
+    topic_id:    int
+    topic_label: str
+    color:       str
+
+
+class BertopicTopic(BaseModel):
+    id:    int
+    label: str
+    color: str
+    words: List[str]
+
+
+class BertopicLayoutResponse(BaseModel):
+    nodes:  List[BertopicNode]
+    topics: List[BertopicTopic]
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -265,3 +289,56 @@ async def cache_stats(request: Request) -> CacheStatsResponse:
         rcpath_cache=stats["rcpath_cache"],
         expand_cache=stats["expand_cache"],
     )
+
+
+
+@router.get("/graph/bertopic-layout", response_model=BertopicLayoutResponse)
+async def bertopic_layout(request: Request) -> BertopicLayoutResponse:
+    """回傳 BERTopic 2D layout 資料，供 PersonalBrain 前端繪製。
+
+    首次呼叫從 GCS 下載，快取在 app.state.bertopic_layout。
+    """
+    if request.app.state.bertopic_layout is not None:
+        return request.app.state.bertopic_layout
+
+    result = await asyncio.to_thread(_load_bertopic_layout, request)
+    request.app.state.bertopic_layout = result
+    return result
+
+
+def _load_bertopic_layout(request: Request) -> BertopicLayoutResponse:
+    s           = request.app.state.settings
+    bucket_name = (getattr(s, "gcs_bucketforresult", "") or "").strip()
+    gcs_object  = "bertopic_layout.json"
+    raw: dict | None = None
+
+    if bucket_name:
+        try:
+            from google.cloud import storage as gcs_storage
+            client = gcs_storage.Client()
+            bucket = client.bucket(bucket_name)
+            blob   = bucket.blob(gcs_object)
+            if blob.exists(client):
+                with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+                    tmp_path = tmp.name
+                blob.download_to_filename(tmp_path)
+                with open(tmp_path, encoding="utf-8") as f:
+                    raw = json.load(f)
+                Path(tmp_path).unlink(missing_ok=True)
+                print(f"[BertopicLayout] loaded gs://{bucket_name}/{gcs_object}")
+        except Exception as exc:
+            print(f"[BertopicLayout] GCS load failed: {exc}")
+
+    if raw is None:
+        local_path = Path(__file__).resolve().parent.parent.parent / "bertopic_layout.json"
+        if local_path.exists():
+            with open(local_path, encoding="utf-8") as f:
+                raw = json.load(f)
+        else:
+            print("[BertopicLayout] no layout found, returning empty")
+            return BertopicLayoutResponse(nodes=[], topics=[])
+
+    nodes  = [BertopicNode(**n)  for n in (raw.get("nodes")  or [])]
+    topics = [BertopicTopic(**t) for t in (raw.get("topics") or [])]
+    print(f"[BertopicLayout] nodes={len(nodes)}, topics={len(topics)}")
+    return BertopicLayoutResponse(nodes=nodes, topics=topics)

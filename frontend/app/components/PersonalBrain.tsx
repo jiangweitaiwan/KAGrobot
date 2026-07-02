@@ -35,7 +35,7 @@ import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import type { GlobalLayout, GlobalLayoutNode } from "./GlobalBrainExplorer";
 import type { PersonalBrainConcept } from "./DetailPanel";
-
+import BertopicMap, { type BertopicLayoutData } from "./BertopicMap";
 // ─────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────
@@ -56,6 +56,7 @@ export type RCPathData = {
 
 type Props = {
   layout:        GlobalLayout | null;
+  bertopicLayout: BertopicLayoutData | null;   // ← 新增
   personalBrain: PersonalBrainConcept[];
   rcRanking:     RCRankedItem[];           // Top-3 from page.tsx
   onConfirmRC:   (rcEid: string, rcLabel: string, pathId: number) => void;
@@ -176,6 +177,7 @@ function disposeObject3D(root: THREE.Object3D) {
 
 export default function PersonalBrain({
   layout,
+  bertopicLayout,   // ← 新增
   personalBrain,
   rcRanking,
   onConfirmRC,
@@ -207,7 +209,7 @@ export default function PersonalBrain({
   const [rcPathData,      setRCPathData]       = useState<RCPathData | null>(null);
   const [loadingRC,       setLoadingRC]        = useState(false);
   const [pulseEids,       setPulseEids]        = useState<string[]>([]); // for fMRI pulse effect
-
+  const [view, setView] = useState<"3d" | "2d">("3d");
   const brainEids = useMemo(
     () => new Set(personalBrain.map((c) => c.eid)),
     [personalBrain],
@@ -566,7 +568,67 @@ export default function PersonalBrain({
 
   return (
     <div style={{ position: "relative", width, height, borderRadius: "20px", overflow: "hidden", background: C.bg_css, cursor: "grab", flexShrink: 0 }}>
-      <canvas ref={canvasRef} style={{ display: "block", width: "100%", height: "100%" }} />
+      
+      {/* ── View Toggle ── */}
+      <div style={{
+        position:       "absolute",
+        top:            8,
+        right:          12,
+        display:        "flex",
+        gap:            "4px",
+        zIndex:         10,
+        pointerEvents:  "auto",
+      }}>
+        {(["3d", "2d"] as const).map((v) => (
+          <button
+            key={v}
+            onClick={() => setView(v)}
+            style={{
+              fontSize:       "0.6rem",
+              padding:        "2px 8px",
+              borderRadius:   10,
+              border:         `1px solid ${view === v ? "var(--purple)" : "rgba(127,119,221,0.2)"}`,
+              background:     view === v ? "rgba(127,119,221,0.15)" : "transparent",
+              color:          view === v ? "var(--purple)" : "rgba(127,119,221,0.4)",
+              fontFamily:     "IBM Plex Mono, monospace",
+              cursor:         "pointer",
+              letterSpacing:  "0.06em",
+            }}
+          >
+            {v === "3d" ? "fMRI" : "2D"}
+          </button>
+        ))}
+      </div>
+      
+      
+      {/* ── 3D fMRI canvas（切到 2D 時隱藏，保持 WebGL context 存活）── */}
+      <canvas
+        ref={canvasRef}
+        style={{
+          display:  view === "3d" ? "block" : "none",
+          width:    "100%",
+          height:   "100%",
+        }}
+      />
+
+      {/* ── 2D BERTopic map ── */}
+      {view === "2d" && bertopicLayout && (
+        <BertopicMap
+          data={bertopicLayout}
+          personalBrain={personalBrain}
+          width={width}
+          height={height}
+        />
+      )}
+      {view === "2d" && !bertopicLayout && (
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "center",
+          height: "100%", color: "rgba(127,119,221,0.25)",
+          fontSize: "0.65rem", fontFamily: "monospace",
+        }}>
+          載入中…
+        </div>
+      )}
 
       {/* Title */}
       <div style={{ position: "absolute", top: 10, left: 12, fontSize: "0.6rem", color: "rgba(127,119,221,0.4)", letterSpacing: "0.15em", textTransform: "uppercase", fontFamily: "monospace", pointerEvents: "none", userSelect: "none" }}>

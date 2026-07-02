@@ -121,7 +121,7 @@ async def lifespan(app: FastAPI):
 
     # detail_cache 維持不變（Concept 詳情查詢，與 BFS 無關）
     app.state.detail_cache = {}
-
+    app.state.bertopic_layout = None   # GET /graph/bertopic-layout 的結果快取
     # 注意：expand_cache / rcpath_cache 已移入 BFSCoordinator，
     # 此處不再設置，routes_brain.py 也已更新為使用 coordinator
 
