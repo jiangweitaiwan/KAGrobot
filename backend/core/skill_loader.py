@@ -1,7 +1,14 @@
 # -*- coding: utf-8 -*-
 
 
-"""skill_loader.py — RC Skill 載入器 (GCS 雲端相容版)"""
+"""skill_loader.py — RC Skill 載入器 (GCS 雲端相容版)
+
+References 採 lazy loading：
+  - SKILL.md frontmatter 的 references 只解析出「檔名清單」放進 RCSkill.reference_paths
+  - 不在此處讀取檔案內容，避免每次注入完整 prompt_context 造成 token 浪費
+  - 實際內容改由 core/main_agent.py 掛載的 read_skill_reference 工具按需讀取
+    （見 tools/knowledge.py 的 make_read_skill_reference_tool）
+"""
 
 from __future__ import annotations
 
@@ -37,15 +44,28 @@ class ToolConfig:
 
 
 @dataclass
+class ReferenceEntry:
+    """SKILL.md frontmatter 中單一 reference 的設定（僅檔名/路徑，不含內容）。"""
+    rel_path: str    # 相對於 skill_dir 的路徑，例如 "references/equations.md"
+    name:     str     # 檔名，例如 "equations.md"（供 read_skill_reference 對照用）
+
+
+@dataclass
 class RCSkill:
     """載入完成的 RC Skill，可直接注入 MainAgent。"""
-    rc_name:        str
-    prompt_context: str                     # 注入 system prompt 的動態區塊
-    tools:          List[StructuredTool] = field(default_factory=list)
+    rc_name:         str
+    prompt_context:  str                             # 注入 system prompt 的動態區塊（不含 references 全文）
+    tools:           List[StructuredTool]  = field(default_factory=list)
+    reference_paths: List[ReferenceEntry]  = field(default_factory=list)  # 新增：references 索引（lazy）
+    skill_dir:       Optional[Path]        = None     # 新增：本地 skill 目錄，供 read_skill_reference 讀取用
 
     @property
     def has_tools(self) -> bool:
         return len(self.tools) > 0
+
+    @property
+    def has_references(self) -> bool:
+        return len(self.reference_paths) > 0
 
 
 # ══════════════════════════════════════════════════════════════
@@ -196,32 +216,35 @@ def _build_structured_tool(
 
 
 # ══════════════════════════════════════════════════════════════
-# References loader
+# References — lazy loading（只列清單，不讀內容）
 # ══════════════════════════════════════════════════════════════
 
-def _load_references(skill_dir: Path, ref_paths: List[str]) -> str:
-    """載入 references/*.md，串接為補充 context 文字。"""
-    chunks: List[str] = []
+def _list_references(skill_dir: Path, ref_paths: List[str]) -> List[ReferenceEntry]:
+    """列出 references 的檔名索引，不讀取檔案內容。
+
+    內容改由 tools/knowledge.py 的 read_skill_reference 工具按需讀取，
+    避免每次都把所有 references 全文塞進 prompt_context。
+    """
+    entries: List[ReferenceEntry] = []
     for ref_rel in ref_paths:
         ref_path = skill_dir / ref_rel
         if not ref_path.exists():
             print(f"[SkillLoader] reference not found: {ref_path}")
             continue
-        try:
-            content = ref_path.read_text(encoding="utf-8").strip()
-            if content:
-                chunks.append(f"### {ref_path.name}\n\n{content}")
-        except Exception as exc:
-            print(f"[SkillLoader] failed to read {ref_path}: {exc}")
-
-    return "\n\n---\n\n".join(chunks)
+        entries.append(ReferenceEntry(rel_path=ref_rel, name=ref_path.name))
+    return entries
 
 
-
-
-
-
-
+def _build_reference_index_text(entries: List[ReferenceEntry]) -> str:
+    """將 reference 清單格式化為索引文字，附加在 prompt_context 末尾。"""
+    if not entries:
+        return ""
+    lines = "\n".join(f"- {e.name}" for e in entries)
+    return (
+        "\n\n## 可查閱的參考資料\n\n"
+        f"{lines}\n\n"
+        "如需查閱以上任一份文件的完整內容，請呼叫 read_skill_reference 工具。"
+    )
 
 
 # ══════════════════════════════════════════════════════════════
@@ -334,13 +357,14 @@ class SkillLoader:
             print(f"[SkillLoader] failed to read SKILL.md for '{rc_name}': {exc}")
             return None
 
-        # ── prompt_context：SKILL.md 正文 + references ──
-        ref_paths      = [r.get("value", r) if isinstance(r, dict) else r
+        # ── references：只列索引（lazy loading，不讀內容）──
+        ref_paths_raw = [r.get("value", r) if isinstance(r, dict) else r
                           for r in frontmatter.get("references", [])]
-        ref_context    = _load_references(local_skill_dir, ref_paths) # 傳入本地路徑
+        reference_entries = _list_references(local_skill_dir, ref_paths_raw)
+
+        # ── prompt_context：SKILL.md 正文 + references 索引（非全文）──
         prompt_context = body
-        if ref_context:
-            prompt_context += "\n\n## 參考資料\n\n" + ref_context
+        prompt_context += _build_reference_index_text(reference_entries)
 
         # ── tools：從 frontmatter 的 tools[] 動態載入 ──
         tool_cfgs: List[ToolConfig] = []
@@ -365,12 +389,15 @@ class SkillLoader:
         actual_rc_name = frontmatter.get("rc_name", rc_name)
 
         print(f"[SkillLoader] successfully loaded from GCS '{actual_rc_name}': "
-              f"{len(tools)} tools, {len(prompt_context)} chars of context")
+              f"{len(tools)} tools, {len(reference_entries)} references, "
+              f"{len(prompt_context)} chars of context")
 
         return RCSkill(
             rc_name=actual_rc_name,
             prompt_context=prompt_context,
             tools=tools,
+            reference_paths=reference_entries,
+            skill_dir=local_skill_dir,
         )
 
     @staticmethod
@@ -380,8 +407,3 @@ class SkillLoader:
         s = re.sub(r"\s+", "_", s.strip())
         s = re.sub(r"_+", "_", s)
         return s
-
-
-
-
-

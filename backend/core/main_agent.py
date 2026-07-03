@@ -10,6 +10,11 @@ Skill 注入：
   chat(..., skill=RCSkill) 時，skill.prompt_context 與 skill.tools
   取代基於 socrates_state 的 fallback 組裝邏輯。
 
+References 注入（lazy loading）：
+  skill.prompt_context 只含 references 的檔名索引（見 skill_loader.py）。
+  若 skill.has_references 為真，會額外掛上 read_skill_reference 工具，
+  並在 system prompt 固定加上使用提示，讓 LLM 依需要自行呼叫讀取全文。
+
 所有歷史由呼叫端（OrchestratorNodes）管理，MainAgent 本身不持有狀態。
 """
 
@@ -32,7 +37,11 @@ from core.google_llm import create_chat_google_generative_ai
 from core.llm_retry  import call_with_retry
 from core.registry   import AGENTS_REGISTRY, TOOLS_REGISTRY, collect_tools_with_deps
 from tools.base      import _TOOL_IMPLEMENTATIONS
-from tools.knowledge import make_knowledge_qa_tool, make_trace_rc_logic_tool
+from tools.knowledge import (
+    make_knowledge_qa_tool,
+    make_trace_rc_logic_tool,
+    make_read_skill_reference_tool,
+)
 
 import tools  # noqa: F401  確保所有工具副作用式註冊已執行
 
@@ -260,6 +269,8 @@ class MainAgent:
             "\n此外，你始終可使用 **trace_rc_logic** 工具查詢 concept 中的理論背景。"
         )
 
+        reference_hint = self._build_reference_hint(skill)
+
         return (
             _BASE_SYSTEM_PROMPT
             + "\n"
@@ -268,6 +279,25 @@ class MainAgent:
             + "\n"
             + tool_section
             + trace_hint
+            + reference_hint
+        )
+
+    @staticmethod
+    def _build_reference_hint(skill: Optional["RCSkill"]) -> str:
+        """條件式加入 read_skill_reference 的使用提示。
+
+        只有當這個 skill 確實有 references 檔案時才提示，
+        避免在沒有 references 的情況下製造不必要的噪音或誤導模型嘗試呼叫。
+        """
+        if not skill or not skill.has_references:
+            return ""
+
+        file_list = "、".join(f"`{r.name}`" for r in skill.reference_paths)
+        return (
+            f"\n若上方「分析方法」說明中提及需要查閱的補充文件"
+            f"（目前此 Skill 提供：{file_list}），"
+            f"可呼叫 **read_skill_reference** 工具，傳入確切檔名讀取完整內容。"
+            f"若當前需求不需要更多細節，則不必主動呼叫。"
         )
 
     @staticmethod
@@ -325,6 +355,13 @@ class MainAgent:
             langchain_tools = list(skill.tools)
         else:
             langchain_tools = self._fallback_tools(socrates_state)
+
+        # 若 skill 有 references，掛上按需讀取工具（lazy loading）
+        if skill and skill.has_references and skill.skill_dir is not None:
+            allowed_files = [r.name for r in skill.reference_paths]
+            langchain_tools.append(
+                make_read_skill_reference_tool(skill.skill_dir, allowed_files)
+            )
 
         langchain_tools.append(make_trace_rc_logic_tool())
         return langchain_tools

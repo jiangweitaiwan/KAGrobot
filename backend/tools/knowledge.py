@@ -4,10 +4,11 @@ tools/knowledge.py
 知識圖譜查詢與推理邏輯追蹤工具。
 
 包含：
-  - knowledge_qa      — 查詢 COMPOSES chain 知識背景（工廠函數）
-  - trace_rc_logic    — 追蹤 Resulting Concept 的推導邏輯鏈（工廠函數）
+  - knowledge_qa               — 查詢 COMPOSES chain 知識背景（工廠函數）
+  - trace_rc_logic              — 追蹤 Resulting Concept 的推導邏輯鏈（工廠函數）
+  - read_skill_reference        — 按需讀取 RC Skill 的 references 文件（工廠函數，新增）
 
-這兩支工具以「工廠函數」形式提供，由 core/main_agent.py 在每次
+這些工具以「工廠函數」形式提供，由 core/main_agent.py 在每次
 build_tools_from_state 時動態建立，因此不透過 _TOOL_IMPLEMENTATIONS
 全域字典管理，而是直接在 build_tools_from_state 內呼叫這裡的工廠。
 """
@@ -15,6 +16,7 @@ build_tools_from_state 時動態建立，因此不透過 _TOOL_IMPLEMENTATIONS
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import List, Optional
 
 from langchain_core.tools import StructuredTool
@@ -197,5 +199,84 @@ def make_trace_rc_logic_tool() -> StructuredTool:
             "回傳結果包含 intermediate_steps，"
             "其中標籤為 T1, T2... 的是中間邏輯單元，"
             "標籤為 final 的是產出 concept 前的最後一個關鍵理論/步驟。"
+        ),
+    )
+
+
+# ═══════════════════════════════════════════════════════════════
+# read_skill_reference（工廠函數，新增）
+# ═══════════════════════════════════════════════════════════════
+
+def make_read_skill_reference_tool(
+    skill_dir:     Path,
+    allowed_files: List[str],
+) -> StructuredTool:
+    """建立按需讀取 RC Skill references 文件的 closure 工具。
+
+    採 lazy loading 設計：SKILL.md 的 prompt_context 只包含 references
+    的檔名索引，不含全文。當 LLM 判斷需要更詳細的理論依據、公式推導或
+    參數說明時，才呼叫此工具讀取指定檔案的完整內容。
+
+    Args:
+        skill_dir:     此 skill 在本地（/tmp）解壓後的根目錄。
+        allowed_files: 該 skill 底下 references/ 目錄中實際存在的檔名清單，
+                        用於防止 LLM 傳入任意路徑（也順帶避免 path traversal）。
+
+    Returns:
+        LangChain StructuredTool。
+    """
+    allowed_set = set(allowed_files)
+
+    def read_skill_reference(file_name: str) -> str:
+        """讀取當前 RC Skill 底下 references/ 目錄中指定檔案的完整內容。
+        當 SKILL 說明中提及某份參考文件、而你判斷需要更深入的理論依據、
+        公式推導或參數校準細節時才呼叫此工具，傳入檔名（不含路徑）。"""
+        if file_name not in allowed_set:
+            return json.dumps({
+                "ok":    False,
+                "error": f"'{file_name}' 不在此 Skill 的 references 清單中。",
+                "available_files": sorted(allowed_set),
+            }, ensure_ascii=False)
+
+        target_path = skill_dir / "references" / file_name
+
+        # 防禦性檢查：確保解析後的路徑仍在 references/ 目錄內
+        try:
+            target_path = target_path.resolve()
+            refs_root   = (skill_dir / "references").resolve()
+            if refs_root not in target_path.parents and target_path != refs_root:
+                return json.dumps(
+                    {"ok": False, "error": "非法路徑。"}, ensure_ascii=False
+                )
+        except Exception:
+            return json.dumps({"ok": False, "error": "路徑解析失敗。"}, ensure_ascii=False)
+
+        if not target_path.exists():
+            return json.dumps(
+                {"ok": False, "error": f"檔案不存在：{file_name}"}, ensure_ascii=False
+            )
+
+        try:
+            content = target_path.read_text(encoding="utf-8").strip()
+        except Exception as exc:
+            return json.dumps(
+                {"ok": False, "error": f"讀取失敗：{exc}"}, ensure_ascii=False
+            )
+
+        return json.dumps({
+            "ok":        True,
+            "file_name": file_name,
+            "content":   content,
+        }, ensure_ascii=False)
+
+    return StructuredTool.from_function(
+        func=read_skill_reference,
+        name="read_skill_reference",
+        description=(
+            "讀取此 RC Skill 底下 references/ 目錄中的補充文件完整內容。"
+            "當 SKILL 說明中提及某份參考文件（例如「詳見 references/xxx.md」），"
+            "而你判斷當前需求需要更詳細的理論依據、公式推導或參數說明時，"
+            "才呼叫此工具，傳入確切檔名（不含路徑，例如 'equations.md'）。"
+            "若當前問題不需要更多細節，則不必主動呼叫。"
         ),
     )
