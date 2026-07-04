@@ -58,6 +58,16 @@ class Settings(BaseSettings):
     # --- Optional external data ---
     fred_api_key: str = Field(default="", alias="FRED_API_KEY")
 
+    # --- Python sandbox (GCP Cloud Function) ---
+    python_sandbox_url: str = Field(
+        default="",
+        alias="PYTHON_SANDBOX_URL",
+        description=(
+            "GCP Cloud Function URL for remote Python execution "
+            "(e.g. https://<region>-<project>.cloudfunctions.net/python_sandbox_worker)"
+        ),
+    )
+
     # --- GCS skills ---
     skills_bucket_name: str = Field(
         default="kagrobot-skills",

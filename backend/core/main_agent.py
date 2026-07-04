@@ -42,6 +42,7 @@ from tools.knowledge import (
     make_trace_rc_logic_tool,
     make_read_skill_reference_tool,
 )
+from tools.sandbox import make_execute_python_in_sandbox_tool
 
 import tools  # noqa: F401  確保所有工具副作用式註冊已執行
 
@@ -267,6 +268,8 @@ class MainAgent:
 
         trace_hint = (
             "\n此外，你始終可使用 **trace_rc_logic** 工具查詢 concept 中的理論背景。"
+            "\n若需要矩陣運算、DSGE 模擬或執行 Python 程式碼，"
+            "可呼叫 **execute_python_in_sandbox** 工具在遠端沙盒中執行。"
         )
 
         reference_hint = self._build_reference_hint(skill)
@@ -364,6 +367,7 @@ class MainAgent:
             )
 
         langchain_tools.append(make_trace_rc_logic_tool())
+        langchain_tools.append(make_execute_python_in_sandbox_tool())
         return langchain_tools
 
     @staticmethod
