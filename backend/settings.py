@@ -94,6 +94,11 @@ class Settings(BaseSettings):
         tokenizer_dir = self.sbert_tokenizer_dir or str(bd / "sbert_onnx")
         return model_path, tokenizer_dir
 
+    # --- e2b sandbox (per-skill 隔離執行環境) ---
+    e2b_api_key: str = Field(default="", alias="E2B_API_KEY")
+    e2b_skill_template: str = Field(
+        default="kagrobot-skill-base", alias="E2B_SKILL_TEMPLATE"
+    )
 
 
 

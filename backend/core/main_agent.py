@@ -3,12 +3,22 @@
 
 MainAgent 每次 chat() 呼叫：
   1. 動態組裝 system prompt（BASE + 需求 + skill context + 工具清單）
-  2. 動態組裝工具清單（skill.tools 優先，fallback 到 socrates_state）
+  2. 動態組裝工具清單（skill 存在時掛泛用 run_skill_code，否則 fallback 到 socrates_state）
   3. 建立單次 LangGraph 執行圖並完成推理
 
 Skill 注入：
-  chat(..., skill=RCSkill) 時，skill.prompt_context 與 skill.tools
-  取代基於 socrates_state 的 fallback 組裝邏輯。
+  chat(..., skill=RCSkill) 時，skill.prompt_context 取代基於 socrates_state
+  的 fallback 組裝邏輯；若 skill.has_functions 為真，掛載單一泛用工具
+  run_skill_code，讓 LLM 自行撰寫 Python 程式碼在該 skill 專屬的 e2b sandbox
+  中 import 並呼叫 skill 內的函式，不再逐一把函式包成獨立 StructuredTool。
+
+Sandbox 生命週期：
+  - Sandbox 採 lazy 建立：只有在 LLM 第一次真的呼叫 run_skill_code 時才建立，
+    由 SkillSandboxProvisioner.create() 完成（見 core/skill_sandbox.py）。
+  - 每次 chat() 呼叫開頭，若傳入既有 sandbox_id，會先嘗試 keep_alive() 續命；
+    續命失敗（sandbox 已過期）視同不存在，交由下一次 run_skill_code 呼叫時重建。
+  - sandbox_id 本身不由 MainAgent 持有狀態，而是每次 chat() 回傳最新值，
+    由呼叫端（OrchestratorNodes）寫回 OrchestratorState.skill_sandbox_id 逐 session 保存。
 
 References 注入（lazy loading）：
   skill.prompt_context 只含 references 的檔名索引（見 skill_loader.py）。
@@ -36,13 +46,14 @@ from core.chat_state import ChatState, ConversationPhase
 from core.google_llm import create_chat_google_generative_ai
 from core.llm_retry  import call_with_retry
 from core.registry   import AGENTS_REGISTRY, TOOLS_REGISTRY, collect_tools_with_deps
+from core.skill_sandbox import SkillSandboxProvisioner
 from tools.base      import _TOOL_IMPLEMENTATIONS
 from tools.knowledge import (
     make_knowledge_qa_tool,
     make_trace_rc_logic_tool,
     make_read_skill_reference_tool,
 )
-from tools.sandbox import make_execute_python_in_sandbox_tool
+from tools.skill_code import make_run_skill_code_tool
 
 import tools  # noqa: F401  確保所有工具副作用式註冊已執行
 
@@ -85,15 +96,19 @@ class MainAgent:
 
     Parameters
     ----------
-    model   : LLM 模型名稱
-    api_key : Google API key（選填）
+    model               : LLM 模型名稱
+    api_key             : Google API key（選填）
+    sandbox_provisioner : e2b sandbox 生命週期管理器（選填，
+                          未提供時掛載 skill 的 run_skill_code 工具會直接失敗，
+                          僅適用於完全不需要程式碼執行能力的部署情境）
     """
 
     def __init__(
         self,
         *,
-        model:   str = "gemini-2.5-flash",
-        api_key: str = "",
+        model:               str = "gemini-2.5-flash",
+        api_key:             str = "",
+        sandbox_provisioner: Optional[SkillSandboxProvisioner] = None,
     ) -> None:
         self._model_name = model
         self._base_llm   = create_chat_google_generative_ai(
@@ -101,6 +116,7 @@ class MainAgent:
             temperature=0,
             api_key=api_key,
         )
+        self._sandbox_provisioner = sandbox_provisioner
 
     # ------------------------------------------------------------------
     # Public API
@@ -112,6 +128,7 @@ class MainAgent:
         socrates_state: ChatState,
         history:        List[BaseMessage],
         skill:          Optional["RCSkill"] = None,
+        sandbox_id:     Optional[str]       = None,
     ) -> dict:
         """單次處理對話請求（完全無狀態）。
 
@@ -121,6 +138,8 @@ class MainAgent:
         socrates_state : 包含 query / tools / parameters 等意圖收斂結果
         history        : 目前為止的對話歷史（由外部傳入）
         skill          : 選取 path 後對應的 RC Skill（可為 None）
+        sandbox_id     : 此 session 既有的 e2b sandbox id（可為 None，
+                         代表尚未建立，或上一輪重新選路後已捨棄）
 
         Returns
         -------
@@ -129,6 +148,8 @@ class MainAgent:
             "tool_calls_made": List[str],
             "messages":        List[BaseMessage],
             "skill_used":      Optional[str],
+            "sandbox_id":      Optional[str],  # 本輪結束後最新的 sandbox id，
+                                                # 呼叫端需寫回 OrchestratorState 保存
         }
         """
         if socrates_state.get("phase") != ConversationPhase.PATH_CONFIRMED.value:
@@ -137,8 +158,20 @@ class MainAgent:
                 f"目前為 {socrates_state.get('phase')}"
             )
 
+        # 每次呼叫都幫既有 sandbox 續命；續命失敗（sandbox 已過期）
+        # 視同不存在，交由 run_skill_code 第一次被呼叫時 lazy 重建。
+        if sandbox_id and self._sandbox_provisioner:
+            if not self._sandbox_provisioner.keep_alive(sandbox_id):
+                print(f"[MainAgent] sandbox '{sandbox_id}' keep_alive failed, "
+                      f"will lazily recreate on next run_skill_code call.")
+                sandbox_id = None
+
+        # 可變容器：run_skill_code 內部第一次執行時會寫入新建立的 sandbox_id，
+        # chat() 結束後從這裡讀出回傳給呼叫端保存。
+        sandbox_state: dict = {"id": sandbox_id}
+
         system_prompt = self._build_system_prompt(socrates_state, skill)
-        tools         = self._build_tools(socrates_state, skill)
+        tools         = self._build_tools(socrates_state, skill, sandbox_state)
         has_tools     = bool(tools)
 
         llm_bound = self._base_llm.bind_tools(tools) if has_tools else self._base_llm
@@ -160,6 +193,7 @@ class MainAgent:
             "tool_calls_made": tool_calls_made,
             "messages":        updated_messages,
             "skill_used":      skill.rc_name if skill else None,
+            "sandbox_id":      sandbox_state["id"],
         }
 
     def describe(
@@ -168,10 +202,11 @@ class MainAgent:
         skill: Optional["RCSkill"] = None,
     ) -> str:
         """回傳 Agent 摘要資訊（供 debug / logging）。"""
-        query      = socrates_state.get("query")
-        tools      = self._build_tools(socrates_state, skill)
-        tool_names = [t.name for t in tools]
-        skill_info = f"  RC Skill: {skill.rc_name}" if skill else "  RC Skill: （無）"
+        query         = socrates_state.get("query")
+        sandbox_state = {"id": None}
+        tools         = self._build_tools(socrates_state, skill, sandbox_state)
+        tool_names    = [t.name for t in tools]
+        skill_info    = f"  RC Skill: {skill.rc_name}" if skill else "  RC Skill: （無）"
         return "\n".join([
             "MainAgent 摘要 (Stateless)",
             f"  當前需求: {query}",
@@ -252,9 +287,9 @@ class MainAgent:
             {skill.prompt_context.strip()}
             """)
 
-        if skill and skill.has_tools:
+        if skill and skill.has_functions:
             tool_lines  = self._tool_lines_from_skill(skill)
-            tool_header = "可用工具（來自 RC Skill）"
+            tool_header = "此 Skill 提供的分析函式（透過 run_skill_code 呼叫）"
         else:
             tool_lines  = self._fallback_tool_lines(socrates_state)
             tool_header = "可用工具"
@@ -268,9 +303,13 @@ class MainAgent:
 
         trace_hint = (
             "\n此外，你始終可使用 **trace_rc_logic** 工具查詢 concept 中的理論背景。"
-            "\n若需要矩陣運算、DSGE 模擬或執行 Python 程式碼，"
-            "可呼叫 **execute_python_in_sandbox** 工具在遠端沙盒中執行。"
         )
+        if skill and skill.has_functions:
+            trace_hint += (
+                "\n若需要執行上方列出的函式、進行數值運算、模擬或繪圖，"
+                "請呼叫 **run_skill_code** 工具，直接撰寫可執行的 Python 程式碼"
+                "（可直接 import 上方函式，不需自行處理路徑）。"
+            )
 
         reference_hint = self._build_reference_hint(skill)
 
@@ -306,8 +345,8 @@ class MainAgent:
     @staticmethod
     def _tool_lines_from_skill(skill: "RCSkill") -> List[str]:
         return [
-            f"{i}. **{t.name}** — {t.description}"
-            for i, t in enumerate(skill.tools, 1)
+            f"{i}. **{spec.function}**（{spec.script}） — {spec.description}"
+            for i, spec in enumerate(skill.function_specs, 1)
         ]
 
     @staticmethod
@@ -353,13 +392,31 @@ class MainAgent:
         self,
         socrates_state: ChatState,
         skill:          Optional["RCSkill"],
+        sandbox_state:  dict,
     ) -> List[StructuredTool]:
-        if skill and skill.has_tools:
-            langchain_tools = list(skill.tools)
+        """組裝本次對話可用的工具清單。
+
+        Parameters
+        ----------
+        sandbox_state : {"id": Optional[str]}，可變容器。
+                        run_skill_code 工具第一次真正執行程式碼時，
+                        會在此容器內寫入新建立的 sandbox_id，
+                        供 chat() 結束後讀出回傳給呼叫端保存。
+        """
+        if skill and skill.has_functions and skill.skill_dir is not None:
+            remote_root = f"/home/user/skills/{self._skill_slug(skill.rc_name)}"
+            langchain_tools: List[StructuredTool] = [
+                make_run_skill_code_tool(
+                    provisioner=self._sandbox_provisioner,
+                    sandbox_state=sandbox_state,
+                    skill_dir=skill.skill_dir,
+                    remote_root=remote_root,
+                )
+            ]
         else:
             langchain_tools = self._fallback_tools(socrates_state)
 
-        # 若 skill 有 references，掛上按需讀取工具（lazy loading）
+        # 若 skill 有 references，掛上按需讀取工具（lazy loading，純檔案讀取，不需要 sandbox）
         if skill and skill.has_references and skill.skill_dir is not None:
             allowed_files = [r.name for r in skill.reference_paths]
             langchain_tools.append(
@@ -367,8 +424,15 @@ class MainAgent:
             )
 
         langchain_tools.append(make_trace_rc_logic_tool())
-        langchain_tools.append(make_execute_python_in_sandbox_tool())
         return langchain_tools
+
+    @staticmethod
+    def _skill_slug(rc_name: str) -> str:
+        import re
+        s = rc_name.lower()
+        s = re.sub(r"[^a-z0-9\s_]", "", s)
+        s = re.sub(r"\s+", "_", s.strip())
+        return re.sub(r"_+", "_", s) or "skill"
 
     @staticmethod
     def _fallback_tools(socrates_state: ChatState) -> List[StructuredTool]:

@@ -19,3 +19,4 @@ class OrchestratorState(TypedDict, total=False):
     confirmed_path_id: Optional[int]
     all_graphs:        Optional[Dict[int, Any]]
     graph_context:     Optional[str]
+    skill_sandbox_id:  Optional[str]   # 新增：per-session 保存的 e2b sandbox id    

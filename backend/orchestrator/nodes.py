@@ -119,6 +119,7 @@ class OrchestratorNodes:
     # Node: main_agent
     # ------------------------------------------------------------------
 
+
     async def main_agent(
         self, state: OrchestratorState
     ) -> OrchestratorState:
@@ -142,6 +143,10 @@ class OrchestratorNodes:
 
         selected_path = self._find_path(all_graphs, selected_path_id)
         skill         = self._load_skill(selected_path)
+
+        # 重新選路時捨棄舊 sandbox：新 skill 需要全新的隔離環境，
+        # 不應延用上一個分析方法遺留的變數/檔案狀態。
+        sandbox_id = None if is_reselect else state.get("skill_sandbox_id")
 
         if is_reselect:
             user_msg        = socrates_state.get("query") or "請開始執行分析。"
@@ -167,6 +172,7 @@ class OrchestratorNodes:
             socrates_state,
             history,
             skill=skill,
+            sandbox_id=sandbox_id,
         )
 
         output_messages: List[BaseMessage] = []
@@ -183,7 +189,12 @@ class OrchestratorNodes:
             confirmed_path_id = (
                 selected_path_id if is_reselect else confirmed_path_id
             ),
+            skill_sandbox_id  = result.get("sandbox_id"),
         )
+
+
+
+
 
     # ------------------------------------------------------------------
     # Private helpers

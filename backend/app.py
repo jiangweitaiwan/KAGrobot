@@ -48,6 +48,7 @@ from api.routes                    import (
     brain_router,
 )
 
+from core.skill_sandbox import SkillSandboxProvisioner
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -93,7 +94,16 @@ async def lifespan(app: FastAPI):
         concept_retriever=concept_retriever,
         model=s.socrates_model,
     )
-    main_agent   = MainAgent(model=s.main_agent_model)
+
+    sandbox_provisioner = SkillSandboxProvisioner(
+        api_key=s.e2b_api_key,
+        template=s.e2b_skill_template,
+    )
+    main_agent = MainAgent(
+        model=s.main_agent_model,
+        sandbox_provisioner=sandbox_provisioner,
+    )
+
     skill_loader = SkillLoader(
         bucket_name=s.skills_bucket_name,
         gcs_prefix="skills",

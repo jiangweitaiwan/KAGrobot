@@ -8,12 +8,19 @@ References 採 lazy loading：
   - 不在此處讀取檔案內容，避免每次注入完整 prompt_context 造成 token 浪費
   - 實際內容改由 core/main_agent.py 掛載的 read_skill_reference 工具按需讀取
     （見 tools/knowledge.py 的 make_read_skill_reference_tool）
+
+Functions（原 tools）採純 metadata 設計：
+  - SKILL.md frontmatter 的 tools[] 只解析為 SkillFunctionSpec 清單（純文字描述），
+    不再動態 importlib 執行 skill 內程式碼、不再包成 StructuredTool。
+  - 實際執行改由 MainAgent 掛載的泛用 run_skill_code 工具，
+    在 e2b sandbox 內直接 import 這些函式執行
+    （見 tools/skill_code.py 的 make_run_skill_code_tool）。
+  - RCSkill 本身因此不含任何「執行期」狀態，@lru_cache 快取安全，
+    不會有不同 session 共用同一份執行狀態的問題。
 """
 
 from __future__ import annotations
 
-import importlib.util
-import inspect
 import re
 import sys
 import os
@@ -21,9 +28,8 @@ import shutil
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from langchain_core.tools import StructuredTool
 from google.cloud import storage  # ── 引入 GCS SDK ──
 
 # YAML / TOML frontmatter 解析（僅依賴標準庫可解析的純文字格式）
@@ -35,11 +41,16 @@ from google.cloud import storage  # ── 引入 GCS SDK ──
 # ══════════════════════════════════════════════════════════════
 
 @dataclass
-class ToolConfig:
-    """SKILL.md frontmatter 中單一工具的設定。"""
-    name:        str
-    script:      str                    # 相對於 skill_dir 的路徑
-    function:    str                    # 函數名稱
+class SkillFunctionSpec:
+    """SKILL.md frontmatter 中單一函式的描述（純文件用途，不再動態 import）。
+
+    此函式實際存在於 skill_dir 底下的 script 檔案中，
+    由 LLM 透過 run_skill_code 工具在 sandbox 內自行 import 呼叫，
+    此處只用來組裝 prompt_context 中的說明文字。
+    """
+    name:        str   # 顯示名稱（供 prompt 說明用，預設等同 function）
+    script:      str   # 相對於 skill_dir 的路徑
+    function:    str   # 函數名稱
     description: str = ""
 
 
@@ -52,16 +63,21 @@ class ReferenceEntry:
 
 @dataclass
 class RCSkill:
-    """載入完成的 RC Skill，可直接注入 MainAgent。"""
+    """載入完成的 RC Skill，可直接注入 MainAgent。
+
+    純 metadata 設計：不含任何執行期狀態（無 sandbox_id、無已 import 的函式物件）。
+    執行相關的狀態（e2b sandbox_id）由呼叫端逐 session 保存於
+    OrchestratorState.skill_sandbox_id，不放進此 dataclass 或 SkillLoader 的快取。
+    """
     rc_name:         str
-    prompt_context:  str                             # 注入 system prompt 的動態區塊（不含 references 全文）
-    tools:           List[StructuredTool]  = field(default_factory=list)
-    reference_paths: List[ReferenceEntry]  = field(default_factory=list)  # 新增：references 索引（lazy）
-    skill_dir:       Optional[Path]        = None     # 新增：本地 skill 目錄，供 read_skill_reference 讀取用
+    prompt_context:  str                                 # 注入 system prompt 的動態區塊（不含 references 全文）
+    function_specs:  List[SkillFunctionSpec] = field(default_factory=list)  # 此 skill 提供的函式索引（純文件）
+    reference_paths: List[ReferenceEntry]    = field(default_factory=list)  # references 索引（lazy）
+    skill_dir:       Optional[Path]          = None      # 本地 skill 目錄，供 run_skill_code / read_skill_reference 使用
 
     @property
-    def has_tools(self) -> bool:
-        return len(self.tools) > 0
+    def has_functions(self) -> bool:
+        return len(self.function_specs) > 0
 
     @property
     def has_references(self) -> bool:
@@ -168,54 +184,6 @@ def _parse_yaml_lite(yaml_str: str) -> Dict[str, Any]:
 
 
 # ══════════════════════════════════════════════════════════════
-# Dynamic script importer
-# ══════════════════════════════════════════════════════════════
-
-def _import_function(script_path: Path, function_name: str) -> Optional[Callable]:
-    """從 .py 檔動態 import 指定函數。"""
-    if not script_path.exists():
-        print(f"[SkillLoader] script not found: {script_path}")
-        return None
-
-    module_name = f"_skill_script_{script_path.stem}_{abs(hash(str(script_path)))}"
-
-    try:
-        spec   = importlib.util.spec_from_file_location(module_name, script_path)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
-        spec.loader.exec_module(module)
-    except Exception as exc:
-        print(f"[SkillLoader] failed to import {script_path}: {exc}")
-        return None
-
-    func = getattr(module, function_name, None)
-    if func is None:
-        print(f"[SkillLoader] function '{function_name}' not found in {script_path}")
-    return func
-
-
-def _build_structured_tool(
-    skill_dir: Path,
-    cfg: ToolConfig,
-) -> Optional[StructuredTool]:
-    """根據 ToolConfig 建立 LangChain StructuredTool。"""
-    script_path = skill_dir / cfg.script
-    func = _import_function(script_path, cfg.function)
-    if func is None:
-        return None
-
-    try:
-        return StructuredTool.from_function(
-            func=func,
-            name=cfg.name,
-            description=cfg.description or inspect.getdoc(func) or "",
-        )
-    except Exception as exc:
-        print(f"[SkillLoader] failed to build tool '{cfg.name}': {exc}")
-        return None
-
-
-# ══════════════════════════════════════════════════════════════
 # References — lazy loading（只列清單，不讀內容）
 # ══════════════════════════════════════════════════════════════
 
@@ -244,6 +212,32 @@ def _build_reference_index_text(entries: List[ReferenceEntry]) -> str:
         "\n\n## 可查閱的參考資料\n\n"
         f"{lines}\n\n"
         "如需查閱以上任一份文件的完整內容，請呼叫 read_skill_reference 工具。"
+    )
+
+
+# ══════════════════════════════════════════════════════════════
+# Functions — 純 metadata（只列清單，不動態 import 執行）
+# ══════════════════════════════════════════════════════════════
+
+def _build_function_index_text(specs: List[SkillFunctionSpec]) -> str:
+    """將函式清單格式化為索引文字，附加在 prompt_context 末尾。
+
+    此清單只用於告知 LLM「sandbox 內有哪些函式可以 import 呼叫」，
+    實際執行由 run_skill_code 工具在 e2b sandbox 內完成
+    （見 tools/skill_code.py）。
+    """
+    if not specs:
+        return ""
+    lines = "\n".join(
+        f"- `{s.function}`（{s.script}） — {s.description}" if s.description
+        else f"- `{s.function}`（{s.script}）"
+        for s in specs
+    )
+    return (
+        "\n\n## 此 Skill 沙盒內可直接 import 的函式\n\n"
+        f"{lines}\n\n"
+        "呼叫 run_skill_code 執行程式碼時，這些模組已可直接 import 使用"
+        "（不需自行處理 sys.path）。"
     )
 
 
@@ -318,6 +312,12 @@ class SkillLoader:
     # 建立時改傳入 GCS bucket 名稱
     loader = SkillLoader(bucket_name="my-claud-skills-bucket", gcs_prefix="skills")
     skill  = loader.load("DSGE Model")   # -> 第一次會從 GCS 抓取並快取
+
+    注意：load() 的 @lru_cache 只快取「skill 定義」（純 metadata：
+    prompt_context / function_specs / reference_paths / skill_dir），
+    不含任何執行期狀態。e2b sandbox 的建立與 session 綁定
+    由呼叫端（MainAgent / OrchestratorState）另行管理，
+    確保不同 session 選到同一個 RC 時不會共用同一個 sandbox 實例。
     """
 
     def __init__(self, bucket_name: str, gcs_prefix: str = "skills"):
@@ -362,40 +362,35 @@ class SkillLoader:
                           for r in frontmatter.get("references", [])]
         reference_entries = _list_references(local_skill_dir, ref_paths_raw)
 
-        # ── prompt_context：SKILL.md 正文 + references 索引（非全文）──
-        prompt_context = body
-        prompt_context += _build_reference_index_text(reference_entries)
-
-        # ── tools：從 frontmatter 的 tools[] 動態載入 ──
-        tool_cfgs: List[ToolConfig] = []
+        # ── functions：只列索引（純 metadata，不動態 import 執行）──
+        function_specs: List[SkillFunctionSpec] = []
         for t in frontmatter.get("tools", []):
             if not isinstance(t, dict):
                 continue
-            if not t.get("name") or not t.get("script") or not t.get("function"):
+            if not t.get("script") or not t.get("function"):
                 continue
-            tool_cfgs.append(ToolConfig(
-                name=t["name"],
+            function_specs.append(SkillFunctionSpec(
+                name=t.get("name", t["function"]),
                 script=t["script"],
                 function=t["function"],
                 description=t.get("description", ""),
             ))
 
-        tools: List[StructuredTool] = []
-        for cfg in tool_cfgs:
-            tool = _build_structured_tool(local_skill_dir, cfg) # 傳入本地路徑
-            if tool is not None:
-                tools.append(tool)
+        # ── prompt_context：SKILL.md 正文 + functions 索引 + references 索引（非全文）──
+        prompt_context = body
+        prompt_context += _build_function_index_text(function_specs)
+        prompt_context += _build_reference_index_text(reference_entries)
 
         actual_rc_name = frontmatter.get("rc_name", rc_name)
 
         print(f"[SkillLoader] successfully loaded from GCS '{actual_rc_name}': "
-              f"{len(tools)} tools, {len(reference_entries)} references, "
+              f"{len(function_specs)} functions, {len(reference_entries)} references, "
               f"{len(prompt_context)} chars of context")
 
         return RCSkill(
             rc_name=actual_rc_name,
             prompt_context=prompt_context,
-            tools=tools,
+            function_specs=function_specs,
             reference_paths=reference_entries,
             skill_dir=local_skill_dir,
         )
