@@ -29,13 +29,30 @@ def make_run_skill_code_tool(
 
     def run_skill_code(code: str) -> str:
         """在此 Skill 專屬的沙盒環境中執行 Python 程式碼。
-        sandbox 內已放好此 Skill 目錄下的所有檔案，其中的函式可直接 import 使用，
-        不需要重新實作邏輯。若需要繪圖，將檔案存到 /home/user/outputs/ 目錄。"""
+        sandbox 內已放好此 Skill 目錄下的所有檔案（含 references/），其中的函式
+        可直接 import 使用，references 檔案可用相對路徑讀取，例如：
+        open('references/equations.md').read()。
+        若需要繪圖，將檔案存到 /home/user/outputs/ 目錄。"""
         if sandbox_state["id"] is None:
-            sandbox_state["id"] = provisioner.create(skill_dir, remote_root)
+            try:
+                sandbox_state["id"] = provisioner.create(skill_dir, remote_root)
+            except Exception as exc:
+                return f"[error]\n沙盒環境建立失敗，無法執行程式碼：{exc}"
 
-        full_code = f"import sys; sys.path.insert(0, '{remote_root}')\n{code}"
-        result    = provisioner.run_code(sandbox_state["id"], full_code)
+        full_code = (
+            f"import sys, os\n"
+            f"sys.path.insert(0, '{remote_root}')\n"
+            f"os.chdir('{remote_root}')\n"
+            f"{code}"
+        )
+
+        try:
+            result = provisioner.run_code(sandbox_state["id"], full_code)
+        except Exception as exc:
+            # 連線失敗多半代表 sandbox 已過期，重置狀態讓下次呼叫重建
+            sandbox_state["id"] = None
+            return f"[error]\n沙盒執行失敗：{exc}"
+
         return result.to_text()
 
     return StructuredTool.from_function(

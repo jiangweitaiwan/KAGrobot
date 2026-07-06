@@ -26,7 +26,8 @@ import sys
 import os
 import shutil
 from dataclasses import dataclass, field
-from functools import lru_cache
+from threading import Lock   # ← 新增，取代 functools.lru_cache
+# 移除: from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -305,41 +306,40 @@ def _download_gcs_skill_file(bucket_name: str, gcs_blob_path: str, local_dir: Pa
 # SkillLoader (重構版)
 # ══════════════════════════════════════════════════════════════
 class SkillLoader:
-    """RC Skill 的單例載入器 (GCS 雲端相容版)
-
-    Usage
-    -----
-    # 建立時改傳入 GCS bucket 名稱
-    loader = SkillLoader(bucket_name="my-claud-skills-bucket", gcs_prefix="skills")
-    skill  = loader.load("DSGE Model")   # -> 第一次會從 GCS 抓取並快取
-
-    注意：load() 的 @lru_cache 只快取「skill 定義」（純 metadata：
-    prompt_context / function_specs / reference_paths / skill_dir），
-    不含任何執行期狀態。e2b sandbox 的建立與 session 綁定
-    由呼叫端（MainAgent / OrchestratorState）另行管理，
-    確保不同 session 選到同一個 RC 時不會共用同一個 sandbox 實例。
-    """
-
     def __init__(self, bucket_name: str, gcs_prefix: str = "skills"):
         self.bucket_name = bucket_name
         self.gcs_prefix = gcs_prefix.strip("/")
-        # 本地暫存目錄設在 Cloud Run 的記憶體磁碟 /tmp
         self._local_base_dir = Path("/tmp/cloud_run_skills")
         self._local_base_dir.mkdir(parents=True, exist_ok=True)
 
-    @lru_cache(maxsize=64)
+        # 手動快取：只快取成功結果，失敗（GCS 抖動、SKILL.md 缺失等）不快取，
+        # 讓下一次呼叫可以重試，而不是被永久記成「沒有 skill」。
+        self._cache:      Dict[str, RCSkill] = {}
+        self._cache_lock  = Lock()
+
     def load(self, rc_name: str) -> Optional[RCSkill]:
+        with self._cache_lock:
+            cached = self._cache.get(rc_name)
+        if cached is not None:
+            return cached
+
+        skill = self._load_uncached(rc_name)
+
+        if skill is not None:
+            with self._cache_lock:
+                self._cache[rc_name] = skill
+
+        return skill
+
+    def _load_uncached(self, rc_name: str) -> Optional[RCSkill]:
         slug = self._slug(rc_name)
-        
-        # 1. 決定 GCS 的路徑與本地 /tmp 的暫存路徑
+
         gcs_skill_folder = f"{self.gcs_prefix}/{rc_name}.skill"
         local_skill_dir = self._local_base_dir / slug
 
-        # 2. 從 GCS 下載該技能的完整目錄 (SKILL.md, scripts/, references/)
-        # 注意：因為有 lru_cache，同一個技能在同一個實例中只會被下載一次
         print(f"[SkillLoader] Fetching '{rc_name}' from GCS bucket '{self.bucket_name}'...")
         success = _download_gcs_skill_file(self.bucket_name, gcs_skill_folder, local_skill_dir)
-        
+
         if not success or not local_skill_dir.exists():
             print(f"[SkillLoader] no skill found in GCS for rc_name='{rc_name}' (slug='{slug}')")
             return None
@@ -349,7 +349,6 @@ class SkillLoader:
             print(f"[SkillLoader] SKILL.md not found in {local_skill_dir}")
             return None
 
-        # ── 後續邏輯完全不需要動，直接讀取 local_skill_dir ──
         try:
             raw_text          = skill_md_path.read_text(encoding="utf-8")
             frontmatter, body = _parse_frontmatter(raw_text)
@@ -357,12 +356,10 @@ class SkillLoader:
             print(f"[SkillLoader] failed to read SKILL.md for '{rc_name}': {exc}")
             return None
 
-        # ── references：只列索引（lazy loading，不讀內容）──
         ref_paths_raw = [r.get("value", r) if isinstance(r, dict) else r
                           for r in frontmatter.get("references", [])]
         reference_entries = _list_references(local_skill_dir, ref_paths_raw)
 
-        # ── functions：只列索引（純 metadata，不動態 import 執行）──
         function_specs: List[SkillFunctionSpec] = []
         for t in frontmatter.get("tools", []):
             if not isinstance(t, dict):
@@ -376,7 +373,6 @@ class SkillLoader:
                 description=t.get("description", ""),
             ))
 
-        # ── prompt_context：SKILL.md 正文 + functions 索引 + references 索引（非全文）──
         prompt_context = body
         prompt_context += _build_function_index_text(function_specs)
         prompt_context += _build_reference_index_text(reference_entries)

@@ -36,18 +36,20 @@ class OrchestratorNodes:
 
     def __init__(
         self,
-        socrates_bot:    SocratesChatBot,
-        main_agent:      MainAgent,
-        graph_expander:  GraphExpander,
-        context_builder: GraphContextBuilder,
-        skill_loader:    SkillLoader,
+        socrates_bot:        SocratesChatBot,
+        main_agent:          MainAgent,
+        graph_expander:      GraphExpander,
+        context_builder:     GraphContextBuilder,
+        skill_loader:        SkillLoader,
+        sandbox_provisioner: "SkillSandboxProvisioner",   # ← 新增注入
     ) -> None:
-        self._socrates_bot    = socrates_bot
-        self._main_agent      = main_agent
-        self._graph_expander  = graph_expander
-        self._context_builder = context_builder
-        self._skill_loader    = skill_loader
-        self._projector       = GraphProjector()
+        self._socrates_bot        = socrates_bot
+        self._main_agent          = main_agent
+        self._graph_expander      = graph_expander
+        self._context_builder     = context_builder
+        self._skill_loader        = skill_loader
+        self._sandbox_provisioner = sandbox_provisioner   # ← 新增
+        self._projector           = GraphProjector()
 
     # ------------------------------------------------------------------
     # Node: socratic
@@ -142,11 +144,17 @@ class OrchestratorNodes:
         )
 
         selected_path = self._find_path(all_graphs, selected_path_id)
-        skill         = self._load_skill(selected_path)
 
-        # 重新選路時捨棄舊 sandbox：新 skill 需要全新的隔離環境，
-        # 不應延用上一個分析方法遺留的變數/檔案狀態。
-        sandbox_id = None if is_reselect else state.get("skill_sandbox_id")
+        # skill_loader.load() 內部是同步 GCS 下載 + zip 解壓，避免卡住 event loop
+        skill = await asyncio.to_thread(self._load_skill, selected_path)
+
+        # 重新選路時捨棄舊 sandbox：best-effort 通知 e2b 直接 kill，
+        # 失敗（sandbox 已過期/不存在）不影響流程，純粹避免堆積孤兒 sandbox
+        old_sandbox_id = state.get("skill_sandbox_id")
+        if is_reselect and old_sandbox_id:
+            await asyncio.to_thread(self._sandbox_provisioner.kill, old_sandbox_id)
+
+        sandbox_id = None if is_reselect else old_sandbox_id
 
         if is_reselect:
             user_msg        = socrates_state.get("query") or "請開始執行分析。"
@@ -224,7 +232,7 @@ class OrchestratorNodes:
         skill = self._skill_loader.load(final_rc_name)
         if skill:
             print(f"[OrchestratorNodes] skill loaded: '{skill.rc_name}' "
-                  f"(tools={len(skill.tools)})")
+                  f"(functions={len(skill.function_specs)})")   # ← skill.tools 改成 skill.function_specs
         else:
             print(f"[OrchestratorNodes] no skill for rc='{final_rc_name}', "
                   f"using fallback")

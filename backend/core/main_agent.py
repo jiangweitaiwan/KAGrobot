@@ -326,15 +326,22 @@ class MainAgent:
 
     @staticmethod
     def _build_reference_hint(skill: Optional["RCSkill"]) -> str:
-        """條件式加入 read_skill_reference 的使用提示。
-
-        只有當這個 skill 確實有 references 檔案時才提示，
-        避免在沒有 references 的情況下製造不必要的噪音或誤導模型嘗試呼叫。
-        """
         if not skill or not skill.has_references:
             return ""
 
         file_list = "、".join(f"`{r.name}`" for r in skill.reference_paths)
+
+        if skill.has_functions:
+            # references 已隨 skill_dir 一起上傳進沙盒，不需要額外的 host-side 工具
+            return (
+                f"\n若上方「分析方法」說明中提及需要查閱的補充文件"
+                f"（目前此 Skill 提供：{file_list}），"
+                f"這些檔案已放在沙盒內的 references/ 目錄，"
+                f"可在 **run_skill_code** 中直接讀取，"
+                f"例如 `print(open('references/檔名').read())`。"
+                f"若當前需求不需要更多細節，則不必主動讀取。"
+            )
+
         return (
             f"\n若上方「分析方法」說明中提及需要查閱的補充文件"
             f"（目前此 Skill 提供：{file_list}），"
@@ -394,15 +401,6 @@ class MainAgent:
         skill:          Optional["RCSkill"],
         sandbox_state:  dict,
     ) -> List[StructuredTool]:
-        """組裝本次對話可用的工具清單。
-
-        Parameters
-        ----------
-        sandbox_state : {"id": Optional[str]}，可變容器。
-                        run_skill_code 工具第一次真正執行程式碼時，
-                        會在此容器內寫入新建立的 sandbox_id，
-                        供 chat() 結束後讀出回傳給呼叫端保存。
-        """
         if skill and skill.has_functions and skill.skill_dir is not None:
             remote_root = f"/home/user/skills/{self._skill_slug(skill.rc_name)}"
             langchain_tools: List[StructuredTool] = [
@@ -416,12 +414,12 @@ class MainAgent:
         else:
             langchain_tools = self._fallback_tools(socrates_state)
 
-        # 若 skill 有 references，掛上按需讀取工具（lazy loading，純檔案讀取，不需要 sandbox）
-        if skill and skill.has_references and skill.skill_dir is not None:
-            allowed_files = [r.name for r in skill.reference_paths]
-            langchain_tools.append(
-                make_read_skill_reference_tool(skill.skill_dir, allowed_files)
-            )
+            # 沒有 script → 沒有 sandbox，references 改由 host-side 工具直接讀本機檔案
+            if skill and skill.has_references and skill.skill_dir is not None:
+                allowed_files = [r.name for r in skill.reference_paths]
+                langchain_tools.append(
+                    make_read_skill_reference_tool(skill.skill_dir, allowed_files)
+                )
 
         langchain_tools.append(make_trace_rc_logic_tool())
         return langchain_tools
