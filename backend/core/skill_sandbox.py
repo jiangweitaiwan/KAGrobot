@@ -125,9 +125,46 @@ class SkillSandboxProvisioner:
 
     # ── Private ──────────────────────────────────────────────
 
+
+
+    _IGNORED_DIR_NAMES = {
+        "__pycache__", ".git", ".ipynb_checkpoints", "node_modules", ".pytest_cache",
+    }
+    _IGNORED_FILE_SUFFIXES = {".pyc", ".pyo"}
+    
+    
     @staticmethod
     def _upload_dir(sbx: "Sandbox", local_dir: Path, remote_root: str) -> None:
+        """遞迴上傳 skill 目錄，保留相對路徑，並過濾快取/版控等雜訊檔案。
+    
+        過濾規則與 skill_loader._scan_code_dirs / _scan_references 一致，
+        避免把 __pycache__、.pyc、隱藏檔等上傳進 sandbox
+        （既浪費頻寬，也可能造成 import 到過期 bytecode 的問題）。
+        """
         for p in local_dir.rglob("*"):
-            if p.is_file():
-                rel = p.relative_to(local_dir)
-                sbx.files.write(f"{remote_root}/{rel}", p.read_bytes())
+            if not p.is_file():
+                continue
+    
+            rel = p.relative_to(local_dir)
+    
+            if any(part in _IGNORED_DIR_NAMES for part in rel.parts):
+                continue
+            if p.name.startswith(".") or p.suffix in _IGNORED_FILE_SUFFIXES:
+                continue
+    
+            sbx.files.write(f"{remote_root}/{rel}", p.read_bytes())
+
+
+    def kill(self, sandbox_id: str) -> None:
+            """Best-effort 終止一個即將被捨棄的 sandbox（例如重新選路時）。
+
+            失敗（sandbox 已過期、已被 e2b 回收等）不拋出例外，
+            純粹是盡力清理，避免呼叫端因為這個非關鍵動作而中斷主流程。
+            """
+            try:
+                sbx = Sandbox.connect(sandbox_id, api_key=self._api_key)
+                sbx.kill()
+                print(f"[SkillSandboxProvisioner] killed sandbox={sandbox_id}")
+            except Exception as exc:
+                print(f"[SkillSandboxProvisioner] kill failed "
+                    f"sandbox={sandbox_id}: {exc}")                

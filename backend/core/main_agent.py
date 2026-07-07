@@ -351,10 +351,23 @@ class MainAgent:
 
     @staticmethod
     def _tool_lines_from_skill(skill: "RCSkill") -> List[str]:
+        if skill.function_specs:
+            return [
+                f"{i}. **{spec.function}**（{spec.script}） — {spec.description}"
+                for i, spec in enumerate(skill.function_specs, 1)
+            ]
+        # frontmatter 未宣告個別函式時，實際函式清單已在
+        # skill.prompt_context（SKILL.md body + sandbox 使用提示）中說明，
+        # 這裡只需提示程式碼實際位置即可。
+        dirs = [d for d in skill.code_dirs if d != "."]
+        dir_hint = "、".join(f"`{d}/`" for d in dirs) if dirs else "skill 根目錄"
         return [
-            f"{i}. **{spec.function}**（{spec.script}） — {spec.description}"
-            for i, spec in enumerate(skill.function_specs, 1)
+            f"（此 Skill 未在 frontmatter 逐一宣告函式，"
+            f"完整程式碼已掛載於 {dir_hint}，"
+            f"請參考上方「分析方法」說明中的使用範例與檔案結構。）"
         ]
+
+
 
     @staticmethod
     def _fallback_tool_lines(socrates_state: ChatState) -> List[str]:
@@ -409,8 +422,9 @@ class MainAgent:
                     sandbox_state=sandbox_state,
                     skill_dir=skill.skill_dir,
                     remote_root=remote_root,
+                    code_dirs=skill.code_dirs,   # ← 新增：告知 sandbox 要掛哪些目錄到 sys.path
                 )
-            ]
+            ]            
         else:
             langchain_tools = self._fallback_tools(socrates_state)
 
