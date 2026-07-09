@@ -57,6 +57,11 @@ class Settings(BaseSettings):
 
     # --- Optional external data ---
     fred_api_key: str = Field(default="", alias="FRED_API_KEY")
+    bea_api_key: str = Field(
+        default="",
+        alias="BEA_API_KEY",
+        description="BEA（Bureau of Economic Analysis）API key，供 tools/connectors/bea.py 使用",
+    )
 
     # --- Python sandbox (GCP Cloud Function) ---
     python_sandbox_url: str = Field(

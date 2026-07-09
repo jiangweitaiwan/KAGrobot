@@ -12,6 +12,19 @@ Skill 注入：
   run_skill_code，讓 LLM 自行撰寫 Python 程式碼在該 skill 專屬的 e2b sandbox
   中 import 並呼叫 skill 內的函式，不再逐一把函式包成獨立 StructuredTool。
 
+參數解析（resolve_params / retrieve_param）：
+  比照 dsge-model skill 的 references/params_manifest.yaml 協定，
+  凡是有 skill_dir 的情境，都會額外掛載 resolve_params 工具（後端規則
+  引擎版本，見 tools/params_resolver.py）：LLM 傳入已從對話中確認的
+  參數，工具依 manifest 規則（user_override > tool_retrieval >
+  calibrated_default）解析，回傳 resolved / provenance / unresolved。
+  這個工具與 skill 是否真的提供 params_manifest.yaml 無關，永遠掛載，
+  沒有 manifest 時呼叫會直接回報「此 Skill 未提供 manifest」，不影響
+  其餘流程。
+  retrieve_param 工具（單一經濟數據序列查詢，FRED/WorldBank/OECD/BEA）
+  則無條件掛載，供 LLM 在一般對話中查詢時效性數據，不限於任何 Skill
+  的 manifest。
+
 Sandbox 生命週期：
   - Sandbox 採 lazy 建立：只有在 LLM 第一次真的呼叫 run_skill_code 時才建立，
     由 SkillSandboxProvisioner.create() 完成（見 core/skill_sandbox.py）。
@@ -48,6 +61,8 @@ from core.llm_retry  import call_with_retry
 from core.registry   import AGENTS_REGISTRY, TOOLS_REGISTRY, collect_tools_with_deps
 from core.skill_sandbox import SkillSandboxProvisioner
 from tools.base      import _TOOL_IMPLEMENTATIONS
+from tools.data_retriever import retrieve_param
+from tools.params_resolver import make_resolve_params_tool
 from tools.knowledge import (
     make_knowledge_qa_tool,
     make_trace_rc_logic_tool,
@@ -312,6 +327,7 @@ class MainAgent:
             )
 
         reference_hint = self._build_reference_hint(skill)
+        resolve_hint    = self._build_resolve_params_hint(skill)
 
         return (
             _BASE_SYSTEM_PROMPT
@@ -322,6 +338,7 @@ class MainAgent:
             + tool_section
             + trace_hint
             + reference_hint
+            + resolve_hint
         )
 
     @staticmethod
@@ -348,6 +365,40 @@ class MainAgent:
             f"可呼叫 **read_skill_reference** 工具，傳入確切檔名讀取完整內容。"
             f"若當前需求不需要更多細節，則不必主動呼叫。"
         )
+
+    @staticmethod
+    def _build_resolve_params_hint(skill: Optional["RCSkill"]) -> str:
+        """resolve_params / retrieve_param 的使用規則說明。
+
+        resolve_params 只在有 skill_dir 時掛載（見 _build_tools），
+        故此提示也只在該情境下加入；retrieve_param 無條件掛載，
+        提示文字放在最後一句、不受 skill 是否存在影響。
+        """
+        resolve_part = ""
+        if skill and skill.skill_dir is not None:
+            resolve_part = (
+                "\n若此 Skill 有提供 params_manifest.yaml，"
+                "執行模型前應先呼叫 **resolve_params** 工具，"
+                "傳入你已從對話中確認的參數，取得 resolved／provenance／unresolved。"
+                "若 unresolved 非空，先跟使用者確認清單裡的問題，"
+                "答案齊全後再重新呼叫一次確認 unresolved 為空，"
+                "才可以呼叫 run_skill_code 執行模型。"
+                "回覆時若 provenance 顯示 tool_retrieval 失敗改用 "
+                "calibrated_default（見 _fallback_log），"
+                "或某個數值超出 valid_range 而附上 warning，"
+                "務必向使用者說明數據來源、時效性與可靠性風險，"
+                "不要讓使用者誤以為是即時或無風險的數據。"
+                "若此 Skill 未提供 manifest，呼叫 resolve_params 會直接說明，"
+                "不影響你照舊自行判斷參數並執行 run_skill_code。"
+            )
+
+        retrieve_part = (
+            "\n你也可以隨時呼叫 **retrieve_param** 查詢單一經濟數據序列"
+            "（FRED / World Bank / OECD / BEA，不限於此 Skill 的 manifest），"
+            "例如使用者臨時想知道其他國家或指標的現況。"
+        )
+
+        return resolve_part + retrieve_part
 
     @staticmethod
     def _tool_lines_from_skill(skill: "RCSkill") -> List[str]:
@@ -434,6 +485,16 @@ class MainAgent:
                 langchain_tools.append(
                     make_read_skill_reference_tool(skill.skill_dir, allowed_files)
                 )
+
+        # resolve_params：只要有 skill_dir 就掛載（不判斷 manifest 存不存在，
+        # 有沒有 manifest 由工具被呼叫「當下」自己去讀檔案決定，見
+        # tools/params_resolver.py 的說明）。
+        if skill and skill.skill_dir is not None:
+            langchain_tools.append(make_resolve_params_tool(skill.skill_dir))
+
+        # retrieve_param：與 skill/manifest 完全無關的一般查詢工具，
+        # 無條件掛載（跟 trace_rc_logic 同一層級）。
+        langchain_tools.append(retrieve_param)
 
         langchain_tools.append(make_trace_rc_logic_tool())
         return langchain_tools
