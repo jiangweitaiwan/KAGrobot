@@ -187,6 +187,29 @@ class BFSCoordinator:
     ) -> Dict[str, Any]:
         return await asyncio.to_thread(self.upstream, eid, max_depth, max_branches)
 
+    async def get_rcpath_cached_async(
+        self,
+        eid:       str,
+        rc_name:   str = "",
+        max_depth: int = 6,
+    ) -> Dict[str, Any]:
+        """get_rcpath_cached 的非同步版本。
+
+        main_agent 與 /graph/rc-paths/{eid} 共用此入口與同一個
+        _rcpath_cache，確保兩邊算出的 path_id 定址空間完全一致。
+        """
+        return await asyncio.to_thread(self.get_rcpath_cached, eid, rc_name, max_depth)
+
+    async def get_expand_cached_async(
+        self,
+        eid:          str,
+        max_depth:    int = 6,
+        max_branches: int = 4,
+    ) -> Dict[str, Any]:
+        """get_expand_cached 的非同步版本，供 /graph/expand/batch 使用。"""
+        return await asyncio.to_thread(self.get_expand_cached, eid, max_depth, max_branches)
+
+
     # ──────────────────────────────────────────────────────────
     # Stats & debug
     # ──────────────────────────────────────────────────────────

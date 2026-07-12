@@ -109,6 +109,13 @@ class BertopicLayoutResponse(BaseModel):
     nodes:  List[BertopicNode]
     topics: List[BertopicTopic]
 
+class BatchExpandRequest(BaseModel):
+    eids: List[str]
+
+
+class BatchExpandResponse(BaseModel):
+    results: Dict[str, ExpandResponse]    
+
 # ── Helpers ───────────────────────────────────────────────────────────
 
 def _anchor_label_from_cache(
@@ -144,18 +151,11 @@ def _get_anchor_label(request: Request, eid: str) -> str:
 
 @router.get("/graph/expand/{eid}", response_model=ExpandResponse)
 async def expand_concept(eid: str, request: Request) -> ExpandResponse:
-    """取得指定 concept 的 foundation tree（UpstreamBFS）。
-
-    結果快取由 BFSCoordinator 統一管理（取代 app.state.expand_cache）。
-    鄰接層 cache 與其他 BFS 操作共享，重複節點不重複查詢 Neo4j。
-    """
     coordinator  = request.app.state.coordinator
     anchor_label = _get_anchor_label(request, eid)
 
-    # ── BFS（結果層 cache 命中則不執行）─────────────────────
-    result = await asyncio.to_thread(
-        coordinator.get_expand_cached, eid, max_depth=6, max_branches=4
-    )
+    result = await coordinator.get_expand_cached_async(eid, max_depth=6, max_branches=4)
+
 
     foundations = [
         FoundationTreeNode(element_id=f["element_id"], label=f["label"])
@@ -180,6 +180,55 @@ async def expand_concept(eid: str, request: Request) -> ExpandResponse:
         nodes=tree_nodes,
         edges=tree_edges,
     )
+
+
+@router.post("/graph/expand/batch", response_model=BatchExpandResponse)
+async def expand_concept_batch(
+    body:    BatchExpandRequest,
+    request: Request,
+) -> BatchExpandResponse:
+    """批次版 /graph/expand/{eid}，供前端一次補齊 ranking pool 缺少的 RC。
+
+    每個 eid 仍各自走 coordinator.get_expand_cached_async，
+    命中 _expand_cache 時幾乎零延遲；未命中的才會真正觸發 BFS
+    （鄰接層 cache 與其他 BFS 操作共享，不重複打 Neo4j）。
+    """
+    coordinator = request.app.state.coordinator
+
+    # 去重 + 上限保護，避免前端誤傳過大清單
+    eids = list(dict.fromkeys(body.eids))[:50]
+
+    async def _one(eid: str) -> tuple[str, ExpandResponse]:
+        anchor_label = _get_anchor_label(request, eid)
+        result = await coordinator.get_expand_cached_async(
+            eid, max_depth=6, max_branches=4
+        )
+
+        foundations = [
+            FoundationTreeNode(element_id=f["element_id"], label=f["label"])
+            for f in result.get("final_foundations", [])
+        ]
+        tree_nodes = [
+            FoundationTreeNode(element_id=n["element_id"], label=n["label"])
+            for n in result.get("foundation_tree", {}).get("nodes", [])
+        ]
+        tree_edges = [
+            FoundationTreeEdge(source=e["source"], target=e["target"])
+            for e in result.get("foundation_tree", {}).get("edges", [])
+        ]
+        if not any(n.element_id == eid for n in tree_nodes):
+            tree_nodes.append(FoundationTreeNode(element_id=eid, label=anchor_label))
+
+        return eid, ExpandResponse(
+            anchor_eid=eid,
+            anchor_label=anchor_label,
+            foundations=foundations,
+            nodes=tree_nodes,
+            edges=tree_edges,
+        )
+
+    pairs = await asyncio.gather(*[_one(e) for e in eids])
+    return BatchExpandResponse(results=dict(pairs))
 
 
 @router.get("/graph/rc-paths/{eid}", response_model=RCPathsResponse)

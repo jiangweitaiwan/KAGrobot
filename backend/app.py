@@ -108,14 +108,15 @@ async def lifespan(app: FastAPI):
         bucket_name=s.skills_bucket_name,
         gcs_prefix="skills",
     )
-
+    
     nodes = OrchestratorNodes(
         socrates_bot        = socrates_bot,
         main_agent          = main_agent,
         graph_expander       = graph_expander,
         context_builder      = context_builder,
         skill_loader         = skill_loader,
-        sandbox_provisioner  = sandbox_provisioner,   # ← 新增
+        sandbox_provisioner  = sandbox_provisioner,
+        coordinator          = coordinator,   # ← 新增
     )
     orchestrator = build_orchestrator(nodes)
 

@@ -18,10 +18,12 @@ _projector = GraphProjector()
 # ── Schema ────────────────────────────────────────────────────────────
 
 class ChatRequest(BaseModel):
-    session_id:       str
-    message:          str
-    phase:            Optional[str] = None
-    selected_path_id: Optional[int] = None
+    session_id:        str
+    message:           str
+    phase:             Optional[str] = None
+    selected_path_id:  Optional[int] = None
+    selected_rc_eid:   Optional[str] = None   # ← 新增
+    selected_rc_label: Optional[str] = None   # ← 新增（cache 冷啟動時的 fallback 標籤）
 
 
 class ChatResponse(BaseModel):
@@ -49,6 +51,12 @@ async def chat_endpoint(
     }
     if body.selected_path_id is not None:
         invoke_input["selected_path_id"] = body.selected_path_id
+    if body.selected_rc_eid is not None:
+        invoke_input["selected_rc_eid"] = body.selected_rc_eid
+    if body.selected_rc_label is not None:
+        invoke_input["selected_rc_label"] = body.selected_rc_label
+
+
 
     result = await orchestrator.ainvoke(invoke_input, config=config)
 

@@ -76,7 +76,7 @@ const TYPEWRITER_TICK_MS        = 20;
 const RESIZE_DEBOUNCE_MS = 200;
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
-
+const RC_RANKING_POOL_SIZE = 15;
 // ─────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────
@@ -222,6 +222,32 @@ async function fetchSemanticScores(
   }
 }
 
+
+
+async function fetchExpandBatch(
+  eids: string[],
+): Promise<Record<string, {
+  anchor_eid: string;
+  anchor_label: string;
+  foundations: { element_id: string; label: string }[];
+  nodes: { element_id: string; label: string }[];
+  edges: { source: string; target: string }[];
+}>> {
+  if (!API_BASE || eids.length === 0) return {};
+  try {
+    const r = await fetch(`${API_BASE.replace(/\/$/, "")}/graph/expand/batch`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ eids }),
+    });
+    if (!r.ok) throw new Error(`${r.status}`);
+    const d = await r.json();
+    return d.results ?? {};
+  } catch (err) {
+    console.warn("[expand/batch]", err);
+    return {};
+  }
+}
 // ─────────────────────────────────────────────────────────────
 // Page
 // ─────────────────────────────────────────────────────────────
@@ -274,7 +300,8 @@ export default function Page() {
     () => computeRCRanking(personalBrain, rcSemanticScores, rcFoundationMap, ALPHA),
     [personalBrain, rcSemanticScores, rcFoundationMap],
   );
-
+  // ── 避免同一個 eid 重複觸發 batch expand ──────────────────
+  const expandFetchedRef = useRef<Set<string>>(new Set());
   // ──────────────────────────────────────────────────────────
   // Init from localStorage
   // ──────────────────────────────────────────────────────────
@@ -330,6 +357,44 @@ export default function Page() {
       .then((d: BertopicLayoutData) => setBertopicLayout(d))
       .catch((err) => console.warn("[BertopicLayout] fetch failed:", err));
   }, [bertopicLayout]);
+
+
+
+  // ── Phase 2：用 rcSemanticScores 補全 rcFoundationMap，
+  //    讓推薦 RC 不再侷限於 all_graphs 裡的候選 ────────────
+  useEffect(() => {
+    if (rcSemanticScores.length === 0) return;
+
+    const topK = [...rcSemanticScores]
+      .sort((a, b) => b.score - a.score)
+      .slice(0, RC_RANKING_POOL_SIZE)
+      .map((s) => s.eid);
+
+    const missing = topK.filter(
+      (eid) => !rcFoundationMap.has(eid) && !expandFetchedRef.current.has(eid),
+    );
+    if (missing.length === 0) return;
+
+    missing.forEach((eid) => expandFetchedRef.current.add(eid));
+
+    fetchExpandBatch(missing).then((results) => {
+      if (Object.keys(results).length === 0) return;
+      setRCFoundationMap((prev) => {
+        const next = new Map(prev);
+        for (const [eid, r] of Object.entries(results)) {
+          // all_graphs 來源的條目已含完整 downstream 資訊，不覆蓋
+          if (next.has(eid)) continue;
+          next.set(eid, {
+            label:          r.anchor_label || eid,
+            foundationEids: r.foundations.map((f) => f.element_id),
+            treeNodes:      r.nodes,
+            treeEdges:      r.edges,
+          });
+        }
+        return next;
+      });
+    });
+  }, [rcSemanticScores, rcFoundationMap]);
 
 
   // ──────────────────────────────────────────────────────────
@@ -443,6 +508,8 @@ export default function Page() {
           message:          confirmMsg.content,
           phase:            phase === "main_agent" ? "main_agent" : "concept_resolved",
           selected_path_id: pathId,
+          selected_rc_eid:    rcEid,     // ← 新增
+          selected_rc_label:  rcLabel,   // ← 新增
         }),
       });
       if (!resp.ok) throw new Error(`API error ${resp.status}`);
@@ -562,6 +629,7 @@ export default function Page() {
     setActiveCandidateEids([]);
     setRCFoundationMap(new Map());
     setRCSemanticScores([]);
+    expandFetchedRef.current = new Set();   // ← 新增
     setSelectedNode(null);
     setDetail(null);
     setFoundationTree(null);

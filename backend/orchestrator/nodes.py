@@ -20,7 +20,7 @@ from graph_service.expander  import GraphExpander
 from graph_service.context_builder import GraphContextBuilder
 from graph_service.projector import GraphProjector
 from orchestrator.state     import OrchestratorState
-
+from graph_service.bfs_coordinator import BFSCoordinator   # ← 新增 import
 
 class OrchestratorNodes:
     """封裝 LangGraph 兩個主要節點的業務邏輯。
@@ -42,6 +42,7 @@ class OrchestratorNodes:
         context_builder:     GraphContextBuilder,
         skill_loader:        SkillLoader,
         sandbox_provisioner: "SkillSandboxProvisioner",   # ← 新增注入
+        coordinator:         BFSCoordinator,   # ← 新增
     ) -> None:
         self._socrates_bot        = socrates_bot
         self._main_agent          = main_agent
@@ -49,6 +50,7 @@ class OrchestratorNodes:
         self._context_builder     = context_builder
         self._skill_loader        = skill_loader
         self._sandbox_provisioner = sandbox_provisioner   # ← 新增
+        self._coordinator         = coordinator   # ← 新增
         self._projector           = GraphProjector()
 
     # ------------------------------------------------------------------
@@ -120,8 +122,6 @@ class OrchestratorNodes:
     # ------------------------------------------------------------------
     # Node: main_agent
     # ------------------------------------------------------------------
-
-
     async def main_agent(
         self, state: OrchestratorState
     ) -> OrchestratorState:
@@ -135,15 +135,22 @@ class OrchestratorNodes:
             )
 
         selected_path_id  = state.get("selected_path_id")
+        selected_rc_eid   = state.get("selected_rc_eid")
+        selected_rc_label = state.get("selected_rc_label") or ""
         confirmed_path_id = state.get("confirmed_path_id")
-        all_graphs        = state.get("all_graphs")
+        confirmed_rc_eid  = state.get("confirmed_rc_eid")
 
         is_reselect = (
             selected_path_id is not None
-            and selected_path_id != confirmed_path_id
+            and (
+                selected_path_id != confirmed_path_id
+                or selected_rc_eid != confirmed_rc_eid
+            )
         )
 
-        selected_path = self._find_path(all_graphs, selected_path_id)
+        selected_path = await self._resolve_selected_path(
+            state, selected_rc_eid, selected_rc_label, selected_path_id
+        )
 
         # skill_loader.load() 內部是同步 GCS 下載 + zip 解壓，避免卡住 event loop
         skill = await asyncio.to_thread(self._load_skill, selected_path)
@@ -197,6 +204,9 @@ class OrchestratorNodes:
             confirmed_path_id = (
                 selected_path_id if is_reselect else confirmed_path_id
             ),
+            confirmed_rc_eid  = (
+                selected_rc_eid if is_reselect else confirmed_rc_eid
+            ),
             skill_sandbox_id  = result.get("sandbox_id"),
         )
 
@@ -208,11 +218,41 @@ class OrchestratorNodes:
     # Private helpers
     # ------------------------------------------------------------------
 
+    async def _resolve_selected_path(
+        self,
+        state:             OrchestratorState,
+        selected_rc_eid:   Optional[str],
+        selected_rc_label: str,
+        selected_path_id:  Optional[int],
+    ) -> Optional[Dict[str, Any]]:
+        """定位使用者選定的路徑。
+
+        優先透過 coordinator.get_rcpath_cached_async(eid) 取得，
+        這與前端 PersonalBrain 呼叫 /graph/rc-paths/{eid} 時走的是
+        同一份 _rcpath_cache，保證 path_id 定址空間一致。
+
+        selected_rc_eid 缺失時（例如較舊的前端版本），退回到
+        all_graphs 快照查詢（僅涵蓋原本 3 個候選，行為與修正前相同）。
+        """
+        if selected_rc_eid and selected_path_id is not None:
+            raw = await self._coordinator.get_rcpath_cached_async(
+                selected_rc_eid, selected_rc_label, max_depth=6
+            )
+            for p in raw.get("paths", []):
+                if p.get("path_id") == selected_path_id:
+                    return p
+            print(f"[OrchestratorNodes] path_id={selected_path_id} 在 "
+                  f"rc_eid='{selected_rc_eid}' 的快取路徑中找不到，"
+                  f"fallback 至 all_graphs 查詢")
+
+        return self._find_path(state.get("all_graphs"), selected_path_id)
+
     def _find_path(
         self,
         all_graphs:      Optional[Dict[int, Any]],
         selected_path_id: Optional[int],
     ) -> Optional[Dict[str, Any]]:
+        """legacy fallback：僅在 selected_rc_eid 缺失時使用。"""
         if all_graphs is None or selected_path_id is None:
             return None
         for g in all_graphs.values():

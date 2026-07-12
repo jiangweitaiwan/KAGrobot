@@ -12,11 +12,14 @@ from langgraph.graph.message import add_messages
 class OrchestratorState(TypedDict, total=False):
     messages:          Annotated[List[BaseMessage], add_messages]
     phase:             str
-    socrates_state:    Any          # ChatState（避免循環 import 使用 Any）
+    socrates_state:    Any
     main_state:        Annotated[List[BaseMessage], add_messages]
     handoff_task:      Optional[str]
     selected_path_id:  Optional[int]
+    selected_rc_eid:   Optional[str]    # ← 新增
+    selected_rc_label: Optional[str]    # ← 新增
     confirmed_path_id: Optional[int]
+    confirmed_rc_eid:  Optional[str]    # ← 新增
     all_graphs:        Optional[Dict[int, Any]]
     graph_context:     Optional[str]
-    skill_sandbox_id:  Optional[str]   # 新增：per-session 保存的 e2b sandbox id    
+    skill_sandbox_id:  Optional[str]

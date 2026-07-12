@@ -105,7 +105,10 @@ class Settings(BaseSettings):
         default="kagrobot-skill-base", alias="E2B_SKILL_TEMPLATE"
     )
 
-
+    rc_ranking_pool_size: int = Field(
+        default=15, alias="RC_RANKING_POOL_SIZE",
+        description="Ranking pool 的 top-K 大小，供前端 batch expand 使用",
+    )
 
 
 @lru_cache

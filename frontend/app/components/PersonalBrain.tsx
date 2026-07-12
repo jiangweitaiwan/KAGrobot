@@ -686,10 +686,12 @@ export default function PersonalBrain({
         </div>
       )}
 
-      {/* ── Path sub-selector (when RC selected) ── */}
-      {selectedRCEid && rcPathData && rcPathData.paths.length > 0 && (
+      {/* ── Path sub-selector（僅在該 RC 底下有 >1 條 downstream 路徑時顯示；
+           多數情況下 RC tag 本身已是路徑終點，此時 fetchRCPaths 只有一條
+           路徑，自動選定即可，不需要讓使用者多按一次） ── */}
+      {selectedRCEid && rcPathData && rcPathData.paths.length > 1 && (
         <div style={{
-          position: "absolute", bottom: selectedRCEid ? 52 : 10,
+          position: "absolute", bottom: 52,
           left: 0, right: 0, padding: "0 12px",
           display: "flex", flexDirection: "column", gap: 5, pointerEvents: "auto",
         }}>
