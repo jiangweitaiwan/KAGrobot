@@ -695,6 +695,7 @@ export default function DetailPanel({
   onAddFoundations,
   onRemove,
   onUpdateWeight,
+  recommendedFoundations,   // ← 補上這行
 }: Props) {
   const [selectedEids,  setSelectedEids]  = useState<Set<string>>(new Set());
   const [showWeightFor, setShowWeightFor] = useState<string | null>(null);
