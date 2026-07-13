@@ -36,6 +36,7 @@ from graph_service.bfs_cache       import AdjacencyCache
 from graph_service.bfs_coordinator import BFSCoordinator
 from graph_service                 import GraphContextBuilder, PathScorer
 from graph_service.expander        import GraphExpander   # 已更新版
+from graph_service.foundation_recommender import FoundationRecommender
 from core.socrates_bot             import SocratesChatBot
 from core.main_agent               import MainAgent
 from core.skill_loader             import SkillLoader
@@ -119,6 +120,10 @@ async def lifespan(app: FastAPI):
         coordinator          = coordinator,   # ← 新增
     )
     orchestrator = build_orchestrator(nodes)
+    foundation_recommender = FoundationRecommender(
+        coordinator=coordinator,
+        encoder=encoder,
+    )
 
     # ── app.state ─────────────────────────────────────────────
     app.state.orchestrator    = orchestrator
@@ -130,6 +135,8 @@ async def lifespan(app: FastAPI):
     app.state.upstream_bfs    = upstream_bfs    # 保留（GlobalLayoutBuilder 等使用）
     app.state.downstream_bfs  = downstream_bfs  # 保留
     app.state.coordinator     = coordinator     # 新增：統一 BFS 排程器
+    app.state.candidate_retriever   = candidate_retriever      # ← 新增
+    app.state.foundation_recommender = foundation_recommender  # ← 新增
 
     # detail_cache 維持不變（Concept 詳情查詢，與 BFS 無關）
     app.state.detail_cache = {}

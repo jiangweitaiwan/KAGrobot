@@ -48,11 +48,7 @@ export type FoundationTreeData = {
   edges:        { source: string; target: string }[];
 };
 
-export type RCSemanticScore = {
-  eid:   string;
-  label: string;
-  score: number;
-};
+
 
 export type RCFoundationMap = Map<string, {
   label:          string;
