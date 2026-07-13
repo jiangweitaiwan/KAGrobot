@@ -39,7 +39,7 @@ class ChatState(TypedDict, total=False):
     tools:          Optional[List[dict]]
     parameters:     Optional[List[dict]]
     intent_types:   Optional[List[str]]
-
+    context_summary: Optional[str]   # ← 新增：每輪重寫的英文對話摘要
 
 # ═══════════════════════════════════════════════════════════════
 # 公開輔助函數

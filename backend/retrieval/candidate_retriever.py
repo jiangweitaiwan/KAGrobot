@@ -21,7 +21,7 @@ Embedding 文字組裝：
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -63,7 +63,8 @@ class CandidateRetriever:
         if not self._embeddings_loaded:
             self._load_concept_embeddings()
 
-        matches = self._match_entities(query, top_k=top_k)
+        query_emb = self.embed(query)
+        matches = self._score_index(query_emb, top_k=top_k)
         return [
             {
                 "index":   i + 1,
@@ -75,6 +76,21 @@ class CandidateRetriever:
             }
             for i, m in enumerate(matches)
         ]
+
+    def embed(self, text: str) -> np.ndarray:
+        """對外部文字（例如 SemanticContext.embedding_text）編碼。"""
+        return self._encoder.encode(text)[0]
+
+    def score_all(self, query_emb: np.ndarray) -> List[Dict[str, Any]]:
+        """對索引內所有 RC 計算 cosine，不做 top_k 截斷，回傳去重後全部結果。
+
+        供 Semantic 機制（RC 全域排名 / Foundation 推薦的 RC pool）使用，
+        與 retrieve_candidates 共用同一份索引與語料（name+function），
+        避免與舊版 rc-semantic-scores 各自維護一套 embedding 造成語料不一致。
+        """
+        if not self._embeddings_loaded:
+            self._load_concept_embeddings()
+        return self._score_index(query_emb, top_k=None)
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -168,13 +184,14 @@ class CandidateRetriever:
                 v["retrieval_embedding"]  = ret_matrix[idx]
                 v["similarity_embedding"] = sim_matrix[idx]
 
-    def _match_entities(
-        self,
-        query: str,
-        top_k: int = 3,
-    ) -> List[Dict[str, Any]]:
-        query_emb = self._encoder.encode(query)[0]
 
+
+
+    def _score_index(
+        self,
+        query_emb: np.ndarray,
+        top_k: Optional[int],
+    ) -> List[Dict[str, Any]]:
         scored: List[Dict[str, Any]] = []
         for v in self._index:
             if "retrieval_embedding" not in v:
@@ -198,4 +215,4 @@ class CandidateRetriever:
                 seen[eid] = s
 
         deduped = sorted(seen.values(), key=lambda x: x["score"], reverse=True)
-        return deduped[:top_k]
+        return deduped[:top_k] if top_k is not None else deduped        

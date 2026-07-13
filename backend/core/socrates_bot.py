@@ -41,6 +41,7 @@ class _InternalState(TypedDict):
     messages:   Annotated[List[BaseMessage], add_messages]
     candidates: Optional[List[dict]]
     query:      Optional[str]
+    
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -70,13 +71,16 @@ _SYSTEM_PROMPT = """\
 
 ## 輸出格式（強制）
 每輪必須輸出合法 JSON，不得有任何前綴文字或 markdown code block：
-{"ai_message": "<繁體中文回覆>", "intent_types": [...]}
+{"ai_message": "<繁體中文回覆>", "intent_types": [...], "context_summary": "<英文摘要>"}
 
 - 對話以繁體中文；retrieve_concepts 的查詢語句用英文。
 - intent_types：在使用者需求已足夠清晰時，填入對應的分析類型標籤（可複數）。
   需求尚不明確時填入空列表 []。
   候選值：causal_mechanism, equilibrium_analysis, forecasting, event_study,
           structural_estimation, policy_evaluation, asset_pricing, descriptive
+- context_summary：用一到兩句**英文**重新總結「使用者目前完整的分析需求」，
+  每輪都根據目前為止的完整對話重寫（不是逐輪疊加），供後端 Semantic 機制
+  做 embedding 相似度比對。需求尚不明確時，摘要目前已知的線索即可。
 """
 
 
@@ -90,6 +94,14 @@ class OutputSchema(BaseModel):
             "event_study, structural_estimation, policy_evaluation, "
             "asset_pricing, descriptive。"
             "需求尚未釐清時回傳空列表。"
+        ),
+    )
+    context_summary: str = Field(
+        default="",
+        description=(
+            "每輪重寫的英文摘要，涵蓋使用者目前完整的分析需求。"
+            "不是逐輪疊加，而是根據目前為止的完整對話重新總結，"
+            "供 Semantic 機制做 embedding 相似度比對。"
         ),
     )
 
@@ -148,6 +160,7 @@ class SocratesChatBot:
             tools          = None,
             parameters     = None,
             intent_types   = None,
+            context_summary = None,   # ← 新增            
         )
 
     def process_message(
@@ -195,9 +208,11 @@ class SocratesChatBot:
         bot_resp    = self._parse_bot_response(graph_result["messages"])
         ai_text     = bot_resp.get("ai_message", "")
         new_intents = bot_resp.get("intent_types", [])
-
+        new_summary = bot_resp.get("context_summary", "")
         if new_intents:
             state["intent_types"] = new_intents
+        if new_summary:
+            state["context_summary"] = new_summary   # ← 新增：每輪覆蓋重寫            
 
         state["messages"].append(AIMessage(content=ai_text))
         return state

@@ -65,13 +65,13 @@ const ALPHA       = 0.5;
 
 // ── 打字機效能參數 ───────────────────────────────────────────
 // 原本每 10ms 輸出 1 個字元 → React re-render 次數 = 文字長度。
-// 改為每 20ms 輸出 3 個字元，視覺速度相近（甚至略快），
-// 但 re-render 次數降到約三分之一，減少與 3D 渲染搶主執行緒的情況。
+// 改為每 20ms 輸出 3 個字元,視覺速度相近(甚至略快),
+// 但 re-render 次數降到約三分之一,減少與 3D 渲染搶主執行緒的情況。
 const TYPEWRITER_CHARS_PER_TICK = 3;
 const TYPEWRITER_TICK_MS        = 20;
 
-// ── Resize 防抖（毫秒）──────────────────────────────────────
-// 避免使用者拖曳視窗邊框、或瀏覽器縮放比例變動時，
+// ── Resize 防抖(毫秒)──────────────────────────────────────
+// 避免使用者拖曳視窗邊框、或瀏覽器縮放比例變動時,
 // 每個 resize 事件都觸發一次完整 3D 場景重建。
 const RESIZE_DEBOUNCE_MS = 200;
 
@@ -165,12 +165,12 @@ function computeRCRanking(
 }
 
 // ─────────────────────────────────────────────────────────────
-// usePanelSize（加入 resize 防抖）
+// usePanelSize(加入 resize 防抖)
 //
-// 原本 ResizeObserver 每次觸發都立即 setSize，使用者拖曳視窗邊框
-// 時會連續觸發大量 resize callback，每次都讓下游的 Three.js 元件
-// 整個場景重建（init useEffect 依賴 width/height）。
-// 改用 debounce：拖曳結束後 200ms 才真正更新尺寸，過程中只重建一次。
+// 原本 ResizeObserver 每次觸發都立即 setSize,使用者拖曳視窗邊框
+// 時會連續觸發大量 resize callback,每次都讓下游的 Three.js 元件
+// 整個場景重建(init useEffect 依賴 width/height)。
+// 改用 debounce:拖曳結束後 200ms 才真正更新尺寸,過程中只重建一次。
 // ─────────────────────────────────────────────────────────────
 
 function usePanelSize(ref: React.RefObject<HTMLDivElement>) {
@@ -199,10 +199,10 @@ function usePanelSize(ref: React.RefObject<HTMLDivElement>) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 混合策略：fetchSemanticScores
+// 混合策略:fetchSemanticScores
 //
-// 只在 concept_resolved 時呼叫一次，把 query 傳進去取得 SBERT 分數。
-// 後續 foundation 勾選的互動排名仍在前端計算（零延遲）。
+// 只在 concept_resolved 時呼叫一次,把 query 傳進去取得 SBERT 分數。
+// 後續 foundation 勾選的互動排名仍在前端計算(零延遲)。
 // ─────────────────────────────────────────────────────────────
 
 async function fetchSemanticScores(
@@ -349,7 +349,7 @@ export default function Page() {
 
 
 
-  // ── Fetch BERTopic layout（一次性，和 globalLayout 同步觸發）──
+  // ── Fetch BERTopic layout(一次性,和 globalLayout 同步觸發)──
   useEffect(() => {
     if (!API_BASE || bertopicLayout !== null) return;
     fetch(`${API_BASE.replace(/\/$/, "")}/graph/bertopic-layout`)
@@ -360,7 +360,7 @@ export default function Page() {
 
 
 
-  // ── Phase 2：用 rcSemanticScores 補全 rcFoundationMap，
+  // ── Phase 2:用 rcSemanticScores 補全 rcFoundationMap,
   //    讓推薦 RC 不再侷限於 all_graphs 裡的候選 ────────────
   useEffect(() => {
     if (rcSemanticScores.length === 0) return;
@@ -382,7 +382,7 @@ export default function Page() {
       setRCFoundationMap((prev) => {
         const next = new Map(prev);
         for (const [eid, r] of Object.entries(results)) {
-          // all_graphs 來源的條目已含完整 downstream 資訊，不覆蓋
+          // all_graphs 來源的條目已含完整 downstream 資訊,不覆蓋
           if (next.has(eid)) continue;
           next.set(eid, {
             label:          r.anchor_label || eid,
@@ -481,6 +481,22 @@ export default function Page() {
   }, []);
 
   // ──────────────────────────────────────────────────────────
+  // PersonalBrain: fetch foundation tree(垂直剖面圖用)
+  // ──────────────────────────────────────────────────────────
+
+  const fetchFoundationTree = useCallback(async (eid: string): Promise<FoundationTreeData | null> => {
+    if (!API_BASE) return null;
+    try {
+      const r = await fetch(`${API_BASE.replace(/\/$/, "")}/graph/expand/${eid}`);
+      if (!r.ok) throw new Error(`${r.status}`);
+      return await r.json();
+    } catch (err) {
+      console.warn("[graph/expand]", err);
+      return null;
+    }
+  }, []);
+
+  // ──────────────────────────────────────────────────────────
   // PersonalBrain: confirm RC → MainAgent
   // ──────────────────────────────────────────────────────────
 
@@ -493,7 +509,7 @@ export default function Page() {
 
     const confirmMsg: ChatMessage = {
       id: createId(), role: "user",
-      content: `確認選擇路徑：${rcLabel}`,
+      content: `確認選擇路徑:${rcLabel}`,
     };
     setMessages((prev) => [...prev, confirmMsg]);
     setIsLoading(true);
@@ -518,8 +534,8 @@ export default function Page() {
       localStorage.setItem(PHASE_KEY, data.phase || "main_agent");
       await typewriterAppend(data.reply || "");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "請求失敗，請稍後重試");
-      setMessages((prev) => [...prev, { id: createId(), role: "ai", content: "抱歉，連線失敗。" }]);
+      setError(err instanceof Error ? err.message : "請求失敗,請稍後重試");
+      setMessages((prev) => [...prev, { id: createId(), role: "ai", content: "抱歉,連線失敗。" }]);
     } finally {
       setIsLoading(false);
       if (!isTypingRef.current) saveHistory(messagesRef.current);
@@ -533,11 +549,11 @@ export default function Page() {
 
   const canSend = !!input.trim() && !isLoading && !!sessionId;
 
-  // ── 打字機效果（批次輸出版）──────────────────────────────
-  // 原本每 10ms append 1 個字元，AI 回覆越長，React re-render 次數
-  // 就越多，與兩個常駐的 3D 渲染迴圈疊加時會放大主執行緒負擔。
-  // 改為每 20ms 一次輸出 TYPEWRITER_CHARS_PER_TICK 個字元，
-  // 視覺上的「逐字浮現」速度幾乎相同（甚至略快），
+  // ── 打字機效果(批次輸出版)──────────────────────────────
+  // 原本每 10ms append 1 個字元,AI 回覆越長,React re-render 次數
+  // 就越多,與兩個常駐的 3D 渲染迴圈疊加時會放大主執行緒負擔。
+  // 改為每 20ms 一次輸出 TYPEWRITER_CHARS_PER_TICK 個字元,
+  // 視覺上的「逐字浮現」速度幾乎相同(甚至略快),
   // 但 re-render 次數降到約三分之一。
   async function typewriterAppend(fullText: string): Promise<void> {
     isTypingRef.current = true;
@@ -551,7 +567,7 @@ export default function Page() {
       );
       await wait(TYPEWRITER_TICK_MS);
     }
-    // 補上最後不滿一批的尾段，確保完整文字一定會顯示
+    // 補上最後不滿一批的尾段,確保完整文字一定會顯示
     setMessages((prev) =>
       prev.map((msg) => msg.id === aiId ? { ...msg, content: fullText } : msg),
     );
@@ -590,10 +606,10 @@ export default function Page() {
       setPhase(nextPhase);
       localStorage.setItem(PHASE_KEY, nextPhase);
 
-      // ── 混合策略：concept_resolved 時一次性取得語意分數 ────
-      // chat API 回傳 all_graphs → 前端建 rcFoundationMap（純記憶體）
-      // 同時平行取 semantic scores（後端 SBERT，只需呼叫一次）
-      // 之後 foundation 勾選的互動排名完全在前端計算，零延遲
+      // ── 混合策略:concept_resolved 時一次性取得語意分數 ────
+      // chat API 回傳 all_graphs → 前端建 rcFoundationMap(純記憶體)
+      // 同時平行取 semantic scores(後端 SBERT,只需呼叫一次)
+      // 之後 foundation 勾選的互動排名完全在前端計算,零延遲
       if (data.all_graphs) {
         const parsed: Record<number, GraphDataLite | null> = {};
         for (const [k, v] of Object.entries(data.all_graphs)) parsed[Number(k)] = v;
@@ -603,15 +619,15 @@ export default function Page() {
         setRCFoundationMap(newMap);
         setActiveCandidateEids(extractCandidateEids(parsed));
 
-        // 非同步取 semantic scores（不阻塞 typewriter 動畫）
-        // 與 typewriterAppend 並行，scores 回來後 state 更新自然觸發重算
+        // 非同步取 semantic scores(不阻塞 typewriter 動畫)
+        // 與 typewriterAppend 並行,scores 回來後 state 更新自然觸發重算
         fetchSemanticScores(text).then(setRCSemanticScores);
       }
 
       await typewriterAppend(data.reply || "");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "請求失敗，請稍後重試");
-      setMessages((prev) => [...prev, { id: createId(), role: "ai", content: "抱歉，連線失敗，請稍後再試。" }]);
+      setError(err instanceof Error ? err.message : "請求失敗,請稍後重試");
+      setMessages((prev) => [...prev, { id: createId(), role: "ai", content: "抱歉,連線失敗,請稍後再試。" }]);
       saveHistory(messagesRef.current);
     } finally {
       setIsLoading(false);
@@ -680,7 +696,7 @@ export default function Page() {
           <div className="chat-box" ref={boxRef}>
             {messages.length === 0 ? (
               <div className="meta" style={{ textAlign: "center", marginTop: 24 }}>
-                輸入問題，開始與知識場域對話
+                輸入問題,開始與知識場域對話
               </div>
             ) : (
               messages.map((msg) => (
@@ -711,7 +727,7 @@ export default function Page() {
                 送出
               </button>
             </form>
-            {error && <div className="status">錯誤：{error}</div>}
+            {error && <div className="status">錯誤:{error}</div>}
           </div>
         </div>
 
@@ -750,7 +766,8 @@ export default function Page() {
             layout={globalLayout}
             personalBrain={personalBrain}
             rcRanking={rcRanking}
-            bertopicLayout={bertopicLayout}   // ← 新增
+            bertopicLayout={bertopicLayout}
+            fetchFoundationTree={fetchFoundationTree}
             onConfirmRC={handleConfirmRC}
             fetchRCPaths={fetchRCPaths}
             width={personalSize.w}

@@ -23,6 +23,9 @@ import json
 import tempfile
 from pathlib import Path
 
+from core.semantic_context import SemanticContext
+from graph_service.semantic_scorer import combine_score, type_overlap
+
 router = APIRouter()
 
 
@@ -72,13 +75,30 @@ class RCPathsResponse(BaseModel):
 
 
 class RCSemanticScore(BaseModel):
-    eid:   str
-    label: str
-    score: float
+    eid:          str
+    label:        str
+    score:        float
+    embed_score:  float = 0.0
+    intent_score: float = 0.0
 
 class SemanticScoresResponse(BaseModel):
     query:  str
     scores: List[RCSemanticScore]
+
+class SemanticContextResponse(BaseModel):
+    session_id:   str
+    query:        str
+    intent_types: List[str]
+    summary:      str
+
+class FoundationRecommendation(BaseModel):
+    element_id: str
+    label:      str
+    score:      float
+
+class FoundationRecommendationsResponse(BaseModel):
+    session_id:      str
+    recommendations: List[FoundationRecommendation]
 
 
 class CacheStatsResponse(BaseModel):
@@ -146,6 +166,26 @@ def _get_anchor_label(request: Request, eid: str) -> str:
         return label
     return _anchor_label_from_neo4j(request.app.state.driver, eid)
 
+def _get_semantic_context(request: Request, session_id: str) -> SemanticContext:
+    """從 orchestrator checkpoint 讀出該 session 目前的 SemanticContext。
+
+    LangGraph 的 MemorySaver checkpointer 是純記憶體 dict 讀取，
+    get_state() 本身開銷極小，這裡不特別包 asyncio.to_thread。
+    """
+    orchestrator = request.app.state.orchestrator
+    config = {"configurable": {"thread_id": session_id}}
+    try:
+        snapshot = orchestrator.get_state(config)
+    except Exception:
+        return SemanticContext()
+
+    values = snapshot.values or {}
+    socrates_state = values.get("socrates_state") or {}
+    return SemanticContext(
+        query=socrates_state.get("query") or "",
+        intent_types=socrates_state.get("intent_types") or [],
+        summary=socrates_state.get("context_summary") or "",
+    )
 
 # ── Routes ────────────────────────────────────────────────────────────
 
@@ -282,45 +322,55 @@ async def rc_paths(eid: str, request: Request) -> RCPathsResponse:
 
 @router.get("/brain/rc-semantic-scores", response_model=SemanticScoresResponse)
 async def rc_semantic_scores(
-    query:   str,
-    request: Request,
+    request:    Request,
+    session_id: Optional[str] = None,
+    query:      Optional[str] = None,
 ) -> SemanticScoresResponse:
-    """計算所有 Resulting Concept 對 query 的 SBERT 語意相似度。（邏輯不變）"""
-    encoder      = request.app.state.encoder
-    layout_cache = request.app.state.layout_cache
+    """計算所有 Resulting Concept 對目前 SemanticContext 的匹配分數。
 
-    if not layout_cache or not query.strip():
-        return SemanticScoresResponse(query=query, scores=[])
+    優先使用 session_id 從 orchestrator checkpoint 取得完整 SemanticContext
+    （query + summary + intent_types）；未提供 session_id 時退回到直接傳入
+    的 query 字串（向後相容舊版前端呼叫方式，此時 intent_score 恆為 0）。
+    """
+    candidate_retriever = request.app.state.candidate_retriever
 
-    rc_nodes = [
-        n for n in layout_cache.get("nodes", [])
-        if (n.get("type") or "").lower().find("resulting") >= 0
-    ]
-    if not rc_nodes:
-        return SemanticScoresResponse(query=query, scores=[])
+    ctx = (
+        _get_semantic_context(request, session_id)
+        if session_id
+        else SemanticContext(query=query or "")
+    )
 
-    names   = [n["name"] for n in rc_nodes]
-    eids    = [n["id"]   for n in rc_nodes]
+    embedding_text = ctx.embedding_text
+    if not embedding_text.strip():
+        return SemanticScoresResponse(query=ctx.query, scores=[])
 
-    query_emb = await asyncio.to_thread(lambda: encoder.encode(query)[0])
+    query_emb = await asyncio.to_thread(candidate_retriever.embed, embedding_text)
+    scored    = await asyncio.to_thread(candidate_retriever.score_all, query_emb)
 
-    batch_size = 64
-    emb_parts: List[np.ndarray] = []
-    for i in range(0, len(names), batch_size):
-        batch = names[i:i + batch_size]
-        part  = await asyncio.to_thread(lambda b=batch: encoder.encode(b))
-        emb_parts.append(part)
+    results: List[RCSemanticScore] = []
+    for s in scored:
+        embed_sc  = s["score"]
+        intent_sc = type_overlap(s.get("analysis_types", []), ctx.intent_types)
+        results.append(RCSemanticScore(
+            eid=s["element_id"],
+            label=s["node_name"],
+            score=combine_score(embed_sc, intent_sc),
+            embed_score=embed_sc,
+            intent_score=intent_sc,
+        ))
 
-    emb_matrix = np.vstack(emb_parts)
-    raw_scores  = (emb_matrix @ query_emb).tolist()
+    results.sort(key=lambda r: r.score, reverse=True)
+    return SemanticScoresResponse(query=ctx.query, scores=results)
 
-    scores = [
-        RCSemanticScore(eid=eids[i], label=names[i], score=float(raw_scores[i]))
-        for i in range(len(rc_nodes))
-    ]
-    scores.sort(key=lambda s: s.score, reverse=True)
-
-    return SemanticScoresResponse(query=query, scores=scores)
+@router.get("/brain/semantic-context", response_model=SemanticContextResponse)
+async def semantic_context(session_id: str, request: Request) -> SemanticContextResponse:
+    ctx = _get_semantic_context(request, session_id)
+    return SemanticContextResponse(
+        session_id=session_id,
+        query=ctx.query,
+        intent_types=ctx.intent_types,
+        summary=ctx.summary,
+    )
 
 
 @router.get("/admin/cache/stats", response_model=CacheStatsResponse)
@@ -391,3 +441,34 @@ def _load_bertopic_layout(request: Request) -> BertopicLayoutResponse:
     topics = [BertopicTopic(**t) for t in (raw.get("topics") or [])]
     print(f"[BertopicLayout] nodes={len(nodes)}, topics={len(topics)}")
     return BertopicLayoutResponse(nodes=nodes, topics=topics)
+
+
+@router.get("/brain/foundation-recommendations", response_model=FoundationRecommendationsResponse)
+async def foundation_recommendations(
+    session_id: str,
+    request:    Request,
+) -> FoundationRecommendationsResponse:
+    ctx = _get_semantic_context(request, session_id)
+    if not ctx.embedding_text.strip():
+        return FoundationRecommendationsResponse(session_id=session_id, recommendations=[])
+
+    candidate_retriever = request.app.state.candidate_retriever
+    recommender         = request.app.state.foundation_recommender
+    settings            = request.app.state.settings
+    pool_size           = getattr(settings, "rc_ranking_pool_size", 15)
+
+    query_emb  = await asyncio.to_thread(candidate_retriever.embed, ctx.embedding_text)
+    scored_rcs = await asyncio.to_thread(candidate_retriever.score_all, query_emb)
+    top_rc_eids = [s["element_id"] for s in scored_rcs[:pool_size]]
+
+    recs = await recommender.recommend(query_emb, top_rc_eids)
+
+    return FoundationRecommendationsResponse(
+        session_id=session_id,
+        recommendations=[
+            FoundationRecommendation(
+                element_id=r["element_id"], label=r["label"], score=r["score"]
+            )
+            for r in recs
+        ],
+    )
