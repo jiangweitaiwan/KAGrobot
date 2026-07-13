@@ -57,20 +57,6 @@ export type RCFoundationMap = Map<string, {
   treeEdges?:     { source: string; target: string }[];
 }>;
 
-type Props = {
-  node:              { id: string; name: string; type: string; source?: string } | null;
-  detail:            ConceptDetail | null;
-  foundationTree:    FoundationTreeData | null;
-  loadingTree:       boolean;
-  personalBrain:     PersonalBrainConcept[];
-  rcSemanticScores:  RCSemanticScore[];
-  rcFoundationMap:   RCFoundationMap;
-  alpha:             number;
-  onAddFoundations:  (eids: { eid: string; label: string }[]) => void;
-  onRemove:          (eid: string) => void;
-  onUpdateWeight:    (eid: string, weight: number) => void;
-};
-
 export type RCSemanticScore = {
   eid:           string;
   label:         string;
@@ -86,9 +72,23 @@ export type RecommendedFoundation = {
 };
 
 type Props = {
-  // ...既有 props 不變
-  recommendedFoundations?: RecommendedFoundation[];
+  node:              { id: string; name: string; type: string; source?: string } | null;
+  detail:            ConceptDetail | null;
+  foundationTree:    FoundationTreeData | null;
+  loadingTree:       boolean;
+  personalBrain:     PersonalBrainConcept[];
+  rcSemanticScores:  RCSemanticScore[];
+  rcFoundationMap:   RCFoundationMap;
+  alpha:             number;
+  recommendedFoundations?: RecommendedFoundation[];  
+  onAddFoundations:  (eids: { eid: string; label: string }[]) => void;
+  onRemove:          (eid: string) => void;
+  onUpdateWeight:    (eid: string, weight: number) => void;
 };
+
+
+
+
 
 // ─────────────────────────────────────────────────────────────
 // Score computation
