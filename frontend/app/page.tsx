@@ -16,6 +16,10 @@ import type { RCRankedItem, RCPathData } from "./components/PersonalBrain";
 
 import type { BertopicLayoutData } from "./components/BertopicMap";
 
+import SemanticPanel from "./components/SemanticPanel";
+import type { SemanticContextData } from "./components/SemanticPanel";
+import type { RecommendedFoundation } from "./components/DetailPanel";
+
 const GlobalBrainExplorer = dynamic(() => import("./components/GlobalBrainExplorer"), { ssr: false });
 const PersonalBrain       = dynamic(() => import("./components/PersonalBrain"),       { ssr: false });
 const DetailPanel         = dynamic(() => import("./components/DetailPanel"),         { ssr: false });
@@ -205,13 +209,26 @@ function usePanelSize(ref: React.RefObject<HTMLDivElement>) {
 // 後續 foundation 勾選的互動排名仍在前端計算(零延遲)。
 // ─────────────────────────────────────────────────────────────
 
-async function fetchSemanticScores(
-  query: string,
-): Promise<RCSemanticScore[]> {
-  if (!API_BASE || !query.trim()) return [];
+async function fetchSemanticContextData(sessionId: string): Promise<SemanticContextData | null> {
+  if (!API_BASE || !sessionId) return null;
   try {
     const r = await fetch(
-      `${API_BASE.replace(/\/$/, "")}/brain/rc-semantic-scores?query=${encodeURIComponent(query)}`,
+      `${API_BASE.replace(/\/$/, "")}/brain/semantic-context?session_id=${encodeURIComponent(sessionId)}`,
+    );
+    if (!r.ok) throw new Error(`${r.status}`);
+    const d = await r.json();
+    return { query: d.query ?? "", intent_types: d.intent_types ?? [], summary: d.summary ?? "" };
+  } catch (err) {
+    console.warn("[semantic-context]", err);
+    return null;
+  }
+}
+
+async function fetchSemanticScores(sessionId: string): Promise<RCSemanticScore[]> {
+  if (!API_BASE || !sessionId) return [];
+  try {
+    const r = await fetch(
+      `${API_BASE.replace(/\/$/, "")}/brain/rc-semantic-scores?session_id=${encodeURIComponent(sessionId)}`,
     );
     if (!r.ok) throw new Error(`${r.status}`);
     const d = await r.json();
@@ -221,6 +238,22 @@ async function fetchSemanticScores(
     return [];
   }
 }
+
+async function fetchFoundationRecommendations(sessionId: string): Promise<RecommendedFoundation[]> {
+  if (!API_BASE || !sessionId) return [];
+  try {
+    const r = await fetch(
+      `${API_BASE.replace(/\/$/, "")}/brain/foundation-recommendations?session_id=${encodeURIComponent(sessionId)}`,
+    );
+    if (!r.ok) throw new Error(`${r.status}`);
+    const d = await r.json();
+    return d.recommendations ?? [];
+  } catch (err) {
+    console.warn("[foundation-recommendations]", err);
+    return [];
+  }
+}
+
 
 
 
@@ -275,6 +308,8 @@ export default function Page() {
   const [rcSemanticScores, setRCSemanticScores] = useState<RCSemanticScore[]>([]);
   const [rcFoundationMap,  setRCFoundationMap]  = useState<RCFoundationMap>(new Map());
   const allGraphsRef = useRef<Record<number, GraphDataLite | null>>({});
+  const [semanticContext, setSemanticContext] = useState<SemanticContextData | null>(null);
+  const [recommendedFoundations, setRecommendedFoundations] = useState<RecommendedFoundation[]>([]);
 
   // ── Personal Brain ─────────────────────────────────────────
   const [personalBrain, setPersonalBrain] = useState<PersonalBrainConcept[]>([]);
@@ -606,10 +641,11 @@ export default function Page() {
       setPhase(nextPhase);
       localStorage.setItem(PHASE_KEY, nextPhase);
 
-      // ── 混合策略:concept_resolved 時一次性取得語意分數 ────
-      // chat API 回傳 all_graphs → 前端建 rcFoundationMap(純記憶體)
-      // 同時平行取 semantic scores(後端 SBERT,只需呼叫一次)
-      // 之後 foundation 勾選的互動排名完全在前端計算,零延遲
+      // ── Semantic 機制：每輪都刷新（不依賴 all_graphs）──────────
+      fetchSemanticContextData(sessionId).then(setSemanticContext);
+      fetchSemanticScores(sessionId).then(setRCSemanticScores);
+      fetchFoundationRecommendations(sessionId).then(setRecommendedFoundations);
+
       if (data.all_graphs) {
         const parsed: Record<number, GraphDataLite | null> = {};
         for (const [k, v] of Object.entries(data.all_graphs)) parsed[Number(k)] = v;
@@ -618,10 +654,7 @@ export default function Page() {
         const newMap = buildRCFoundationMap(parsed);
         setRCFoundationMap(newMap);
         setActiveCandidateEids(extractCandidateEids(parsed));
-
-        // 非同步取 semantic scores(不阻塞 typewriter 動畫)
-        // 與 typewriterAppend 並行,scores 回來後 state 更新自然觸發重算
-        fetchSemanticScores(text).then(setRCSemanticScores);
+        // 舊的 fetchSemanticScores(text) 呼叫已移除，改用上方 session 版本
       }
 
       await typewriterAppend(data.reply || "");
@@ -652,6 +685,8 @@ export default function Page() {
     localStorage.setItem(SESSION_KEY, sid);
     localStorage.setItem(PHASE_KEY, "socratic");
     localStorage.removeItem(HISTORY_KEY);
+    setSemanticContext(null);
+    setRecommendedFoundations([]);
   }
 
   const inputPlaceholder =
@@ -757,7 +792,10 @@ export default function Page() {
           onAddFoundations={addFoundationsToBrain}
           onRemove={removeFromBrain}
           onUpdateWeight={updateWeight}
+          recommendedFoundations={recommendedFoundations}
         />
+
+        <SemanticPanel context={semanticContext} rcScores={rcSemanticScores} />
 
         {/* ══ PersonalBrain ══ */}
         <div className="brain-panel" ref={personalColRef}>

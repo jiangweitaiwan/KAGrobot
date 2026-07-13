@@ -93,7 +93,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .content-area {
   display:               grid;
-  grid-template-columns: 220px 1fr 300px 1fr;
+  grid-template-columns: 220px 1fr 300px 260px 1fr;
   gap:                   12px;
   min-height:            0;
   overflow:              hidden;
@@ -348,14 +348,14 @@ textarea:focus {
 /* ── responsive ──────────────────────────────────────────── */
 @media (max-width: 1500px) {
   .content-area {
-    grid-template-columns: 200px 1fr 280px 1fr;
+    grid-template-columns: 200px 1fr 280px 240px 1fr;
   }
 }
 
 @media (max-width: 1200px) {
   /* Drop chat column, keep three panels */
   .content-area {
-    grid-template-columns: 1fr 260px 1fr;
+    grid-template-columns: 1fr 260px 240px 1fr;
   }
   .chat-column { display: none; }
 }

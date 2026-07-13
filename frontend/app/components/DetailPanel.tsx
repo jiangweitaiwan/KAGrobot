@@ -75,6 +75,25 @@ type Props = {
   onUpdateWeight:    (eid: string, weight: number) => void;
 };
 
+export type RCSemanticScore = {
+  eid:           string;
+  label:         string;
+  score:         number;
+  embed_score?:  number;
+  intent_score?: number;
+};
+
+export type RecommendedFoundation = {
+  element_id: string;
+  label:      string;
+  score:      number;
+};
+
+type Props = {
+  // ...既有 props 不變
+  recommendedFoundations?: RecommendedFoundation[];
+};
+
 // ─────────────────────────────────────────────────────────────
 // Score computation
 // ─────────────────────────────────────────────────────────────
@@ -628,6 +647,42 @@ function ConceptInfoCard({ detail }: { detail: ConceptDetail | null }) {
   );
 }
 
+function RecommendedFoundationsCard({
+  items, onAdd,
+}: {
+  items: RecommendedFoundation[];
+  onAdd: (eid: string, label: string) => void;
+}) {
+  if (!items.length) return null;
+  return (
+    <div style={{ flexShrink: 0 }}>
+      <div className="detail-section-label" style={{ marginBottom: 4 }}>
+        語意推薦 Foundation
+        <span style={{ color: "var(--muted)", marginLeft: 6, fontWeight: 400 }}>
+          · 依對話語意匹配
+        </span>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+        {items.map((f) => (
+          <span
+            key={f.element_id}
+            style={{
+              fontSize: "0.62rem", padding: "2px 8px", borderRadius: 12,
+              border:     "1px solid rgba(0,212,170,0.35)",
+              background: "rgba(0,212,170,0.06)",
+              color:      "var(--teal)",
+              cursor:     "pointer",
+            }}
+            title={`語意分數 ${f.score.toFixed(2)}`}
+            onClick={() => onAdd(f.element_id, f.label)}
+          >
+            + {f.label}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
 // ─────────────────────────────────────────────────────────────
 // DetailPanel
 // ─────────────────────────────────────────────────────────────
@@ -714,10 +769,17 @@ export default function DetailPanel({
     return (
       <div className="detail-panel">
         <div className="detail-label" style={{ flexShrink: 0 }}>Detail Panel</div>
-        <div className="detail-empty">
-          <span>點擊 Global Brain</span>
-          <span>探索 concept 的 foundations</span>
-        </div>
+        {recommendedFoundations && recommendedFoundations.length > 0 ? (
+          <RecommendedFoundationsCard
+            items={recommendedFoundations}
+            onAdd={(eid, label) => onAddFoundations([{ eid, label }])}
+          />
+        ) : (
+          <div className="detail-empty">
+            <span>點擊 Global Brain</span>
+            <span>探索 concept 的 foundations</span>
+          </div>
+        )}
       </div>
     );
   }
@@ -750,6 +812,12 @@ export default function DetailPanel({
       {/* ── Concept Info（definition + mechanism）── 提升至頂部 ── */}
       <ConceptInfoCard detail={detail} />
 
+      {recommendedFoundations && recommendedFoundations.length > 0 && (
+        <RecommendedFoundationsCard
+          items={recommendedFoundations}
+          onAdd={(eid, label) => onAddFoundations([{ eid, label }])}
+        />
+      )}
       {/* ── Foundation Tree ── */}
       <div style={{ flexShrink: 0 }}>
         <div className="detail-section-label" style={{ marginBottom: 4 }}>
