@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * GlobalBrainExplorer.tsx（三層殼層版 + 效能優化版）
+ * GlobalBrainExplorer.tsx（三層殼層版 + 效能優化版 + three-shared 共用版）
  *
  * 殼層隱喻（由核心向外）：
  *   article  → 內核  — 青白色，最核心的基礎概念
@@ -10,7 +10,14 @@
  *
  * 互動邏輯不變（聚焦候選、foundation 路徑、drag-to-rotate 等）。
  *
- * ── 效能優化（重點）──────────────────────────────────────────
+ * ── three-shared 共用重構 ────────────────────────────────────
+ *   makeLabelSprite / makeRingSprite / makeGlowSprite / makeFlatDotSprite /
+ *   disposeObject3D / disposeGroupChildren 原本是這個檔案的私有函式，
+ *   現在抽到 three-shared.ts，供 HourglassViz.tsx 共用同一套 sprite
+ *   視覺語言，避免兩個場景的質感各自漂移。行為完全不變，純搬移，
+ *   不影響下方效能優化的任何邏輯。
+ *
+ * ── 效能優化（重點，維持不變）──────────────────────────────
  *   1. 移除自動旋轉：場景不再持續自轉，改為純使用者驅動。
  *   2. 按需渲染（on-demand rendering）：只有在「真的有東西在動」
  *      （拖曳中、有接力光點動畫、聚焦光暈呼吸）或畫面被標記為
@@ -29,6 +36,14 @@
 import { useEffect, useRef, useMemo, useState } from "react";
 import * as THREE from "three";
 import type { RCFoundationMap } from "./DetailPanel";
+import {
+  makeLabelSprite,
+  makeRingSprite,
+  makeGlowSprite,
+  makeFlatDotSprite,
+  disposeObject3D,
+  disposeGroupChildren,
+} from "./three-shared";
 
 // ─────────────────────────────────────────────────────────────
 // Types
@@ -145,7 +160,7 @@ const RENDER_FRAME_MS   = 1000 / 24; // 渲染幀率上限 ~24fps
 const HOVER_PICK_EVERY  = 6;     // 原本 2（~30Hz）→ 6（~10Hz）
 
 // ─────────────────────────────────────────────────────────────
-// Helpers
+// Helpers（只留本檔案專屬的，共用 sprite/dispose helper 已搬到 three-shared.ts）
 // ─────────────────────────────────────────────────────────────
 
 function nodeToWorld(n: GlobalLayoutNode): THREE.Vector3 {
@@ -154,113 +169,6 @@ function nodeToWorld(n: GlobalLayoutNode): THREE.Vector3 {
 
 function categoryColor(node: GlobalLayoutNode): THREE.Color {
   return CLUSTER_COLOR[clusterKeyOf(node)];
-}
-
-function roundRectPath(
-  ctx: CanvasRenderingContext2D,
-  x: number, y: number, w: number, h: number, r: number,
-) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y,     x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x,     y + h, r);
-  ctx.arcTo(x,     y + h, x,     y,     r);
-  ctx.arcTo(x,     y,     x + w, y,     r);
-  ctx.closePath();
-}
-
-function makeLabelSprite(text: string, colorHex: string): THREE.Sprite {
-  const canvas = document.createElement("canvas");
-  canvas.width = 320; canvas.height = 72;
-  const ctx = canvas.getContext("2d")!;
-  ctx.fillStyle = "rgba(13,18,32,0.85)";
-  roundRectPath(ctx, 2, 2, canvas.width - 4, canvas.height - 4, 14);
-  ctx.fill();
-  ctx.strokeStyle = "rgba(232,238,248,0.18)";
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-  ctx.fillStyle = colorHex;
-  ctx.font = "26px \"IBM Plex Mono\", monospace";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(text, canvas.width / 2, canvas.height / 2);
-  const tex = new THREE.CanvasTexture(canvas);
-  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
-  const spr = new THREE.Sprite(mat);
-  spr.scale.set(0.62, 0.14, 1);
-  return spr;
-}
-
-function makeRingSprite(colorHex: string, lineWidth = 5): THREE.Sprite {
-  const canvas = document.createElement("canvas");
-  canvas.width = canvas.height = 64;
-  const ctx = canvas.getContext("2d")!;
-  ctx.lineWidth = lineWidth;
-  ctx.strokeStyle = colorHex;
-  ctx.beginPath();
-  ctx.arc(32, 32, 24, 0, Math.PI * 2);
-  ctx.stroke();
-  const tex = new THREE.CanvasTexture(canvas);
-  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
-  return new THREE.Sprite(mat);
-}
-
-function makeGlowSprite(colorHex: string): THREE.Sprite {
-  const canvas = document.createElement("canvas");
-  canvas.width = canvas.height = 128;
-  const ctx = canvas.getContext("2d")!;
-  const grad = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
-  grad.addColorStop(0,    `${colorHex}cc`);
-  grad.addColorStop(0.35, `${colorHex}55`);
-  grad.addColorStop(0.7,  `${colorHex}15`);
-  grad.addColorStop(1,    `${colorHex}00`);
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, 128, 128);
-  const tex = new THREE.CanvasTexture(canvas);
-  const mat = new THREE.SpriteMaterial({
-    map: tex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-  });
-  return new THREE.Sprite(mat);
-}
-
-function makeFlatDotSprite(colorHex: string): THREE.Sprite {
-  const canvas = document.createElement("canvas");
-  canvas.width = canvas.height = 32;
-  const ctx = canvas.getContext("2d")!;
-  ctx.fillStyle = colorHex;
-  ctx.beginPath();
-  ctx.arc(16, 16, 9, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = PALETTE.strokeCss;
-  ctx.lineWidth = 2;
-  ctx.stroke();
-  const tex = new THREE.CanvasTexture(canvas);
-  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
-  const spr = new THREE.Sprite(mat);
-  spr.scale.set(0.05, 0.05, 1);
-  return spr;
-}
-
-/** 完整釋放單一 Object3D 的 geometry / material / texture（含子節點）。*/
-function disposeObject3D(root: THREE.Object3D) {
-  root.traverse((child: any) => {
-    if (child.geometry) {
-      child.geometry.dispose();
-    }
-    if (child.material) {
-      const mats: THREE.Material[] = Array.isArray(child.material)
-        ? child.material
-        : [child.material];
-      mats.forEach((m: any) => {
-        if (m.map) m.map.dispose();
-        m.dispose();
-      });
-    }
-  });
-}
-
-function disposeGroupChildren(group: THREE.Group) {
-  group.children.forEach((child) => disposeObject3D(child));
 }
 
 // ─────────────────────────────────────────────────────────────

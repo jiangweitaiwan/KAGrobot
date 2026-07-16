@@ -1,32 +1,24 @@
 "use client";
 
 /**
- * PersonalBrain.tsx(垂直剖面圖版)
+ * PersonalBrain.tsx（沙漏剖面圖版）
  *
- * 與舊版的差異:
- *   - 移除整個 3D fMRI 場景(Three.js renderer / composer / bloom /
- *     point cloud / 呼吸動畫)。原本花了不少力氣做的按需渲染 /
- *     可見性偵測等效能優化,隨著場景整個拿掉一併移除。
- *   - 新增「聚焦(focus)」狀態機:不管是點 Top-3 推薦 RC 標籤、
- *     還是點鎖鏈上的任一個 downstream 節點(不分中繼或終點),
- *     一律呼叫 focusOn(eid, label),對該 eid 平行呼叫
- *     /graph/expand/{eid}(foundation tree)與 /graph/rc-paths/{eid}
- *     (downstream 鏈),取回後餵給 RCLineageViz 畫垂直剖面圖。
- *   - 鎖鏈本身用 buildDownstreamChains() 從 rc-paths 的 paths[] 裡,
- *     篩出「以目前聚焦 eid 為起點、屬於 Resulting_Concept 類型節點」
- *     的子序列取得,不需要額外的 adjacency 走訪,也不需要額外的
- *     後端改動。
- *   - Confirm 一律作用在「目前聚焦的 eid + 它自己 paths 裡的預設路徑」,
- *     語意等同於原本的 (selectedRCEid, selectedPathId) 呼叫方式,
- *     /chat 與 orchestrator 端完全不需要更動。
- *   - 視角切換從「3D / 2D」改為「垂直剖面 / 2D BERTopic」兩個選項。
+ * 與上一版（RCLineageViz 垂直剖面圖）的差異：
+ *   - 「剖面」視角改用 HourglassViz：waist = 聚焦 RC，上半錐 = downstream
+ *     發散的多條 path，下半錐 = foundation_tree，rim 呼應 BERTopic 2D 平面。
+ *   - 新增 bertopicPosByEid / bertopicCentroid 兩份衍生資料，供 HourglassViz
+ *     計算節點的方位角（角度取自 BERTopic 語意方向，半徑取自樹狀深度）。
+ *   - 「分佈」視角（BertopicMap）維持不變，讓使用者可以切換去看
+ *     selected foundations 在整個語意地形裡的精確群聚效果——
+ *     沙漏本身只保留方向性的呼應，不追求座標精確對齊。
+ *   - 其餘邏輯（聚焦狀態機、鎖鏈萃取、confirm 流程）完全不變。
  */
 
 import { useCallback, useMemo, useState } from "react";
 import type { FoundationTreeData, PersonalBrainConcept } from "./DetailPanel";
 import type { GlobalLayout } from "./GlobalBrainExplorer";
 import BertopicMap, { type BertopicLayoutData } from "./BertopicMap";
-import RCLineageViz, { type ChainStep } from "./RCLineageViz";
+import HourglassViz, { type ChainStep } from "./HourglassViz";
 
 // ─────────────────────────────────────────────────────────────
 // Types
@@ -84,12 +76,7 @@ function isRCNode(n: RCPathNode | undefined): boolean {
 
 /**
  * 從 rc-paths 的 paths[] 裡,萃取「以 focusedEid 為起點」的 downstream 鏈。
- *
- * 做法:每條 path 的 node_ids 本身就是有序的完整節點序列,篩出屬於
- * Resulting_Concept 類型的子序列,找到 focusedEid 在其中的位置,
- * 往後 slice 即為它的 downstream 鏈(第一個元素就是 focusedEid 自己)。
- * 同一個終點(final eid)若有多條路徑,保留最短的一條。
- * tail 長度 <= 1(代表沒有走到別的 RC)則不計入。
+ * （邏輯與前一版完全相同，未變動。）
  */
 function buildDownstreamChains(
   data:       RCPathData | null,
@@ -144,7 +131,7 @@ export default function PersonalBrain({
   width  = 480,
   height = 480,
 }: Props) {
-  const [view, setView] = useState<"lineage" | "2d">("lineage");
+  const [view, setView] = useState<"hourglass" | "2d">("hourglass");
 
   const [breadcrumb,      setBreadcrumb]      = useState<Crumb[]>([]);
   const [focusRCPathData, setFocusRCPathData] = useState<RCPathData | null>(null);
@@ -157,6 +144,23 @@ export default function PersonalBrain({
     () => new Set(personalBrain.map((c) => c.eid)),
     [personalBrain],
   );
+
+  // ── BERTopic 座標查表 + 全域重心（供 HourglassViz 算方位角）──
+  const bertopicPosByEid = useMemo(() => {
+    const map = new Map<string, { x: number; y: number }>();
+    if (!bertopicLayout) return map;
+    for (const n of bertopicLayout.nodes) {
+      if (n.eid) map.set(n.eid, { x: n.x, y: n.y });
+    }
+    return map;
+  }, [bertopicLayout]);
+
+  const bertopicCentroid = useMemo(() => {
+    if (!bertopicLayout || bertopicLayout.nodes.length === 0) return { x: 0, y: 0 };
+    let sx = 0, sy = 0;
+    for (const n of bertopicLayout.nodes) { sx += n.x; sy += n.y; }
+    return { x: sx / bertopicLayout.nodes.length, y: sy / bertopicLayout.nodes.length };
+  }, [bertopicLayout]);
 
   // ── 統一的聚焦函式:不論是 Top-3 標籤或鎖鏈上任一節點,都走這裡 ──
   const focusOn = useCallback(async (
@@ -189,7 +193,7 @@ export default function PersonalBrain({
     focusOn(rc.eid, rc.label, { resetBreadcrumb: true });
   }, [breadcrumb, focusOn]);
 
-  // ── 鎖鏈 / 剖面圖上的 downstream 節點點擊 → 一律重新聚焦 ──
+  // ── 沙漏上 downstream 節點點擊 → 一律重新聚焦 ──
   const handleFocusNode = useCallback((eid: string, label: string) => {
     focusOn(eid, label);
   }, [focusOn]);
@@ -232,8 +236,8 @@ export default function PersonalBrain({
         zIndex: 10, pointerEvents: "auto",
       }}>
         {([
-          { key: "lineage", label: "剖面" },
-          { key: "2d",      label: "分佈" },
+          { key: "hourglass", label: "沙漏" },
+          { key: "2d",        label: "分佈" },
         ] as const).map((v) => (
           <button
             key={v.key}
@@ -251,14 +255,16 @@ export default function PersonalBrain({
         ))}
       </div>
 
-      {/* ── 垂直剖面圖 ── */}
-      {view === "lineage" && (
-        <RCLineageViz
+      {/* ── 沙漏剖面圖 ── */}
+      {view === "hourglass" && (
+        <HourglassViz
           focusedEid={focused?.eid ?? ""}
           focusedLabel={focused?.label ?? ""}
           foundationTree={focusFoundation}
           downstreamChains={downstreamChains}
           personalBrainEids={personalBrainEids}
+          bertopicPosByEid={bertopicPosByEid}
+          bertopicCentroid={bertopicCentroid}
           loading={loadingFocus}
           onFocusNode={handleFocusNode}
           width={width}
