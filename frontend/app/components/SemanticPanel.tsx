@@ -8,9 +8,17 @@ export type SemanticContextData = {
   summary:      string;
 };
 
+export type RecommendedFoundation = {
+  element_id: string;
+  label:      string;
+  score:      number;
+};
+
 type Props = {
-  context:  SemanticContextData | null;
-  rcScores: RCSemanticScore[];   // 已按 score 由高到低排序
+  context:                SemanticContextData | null;
+  rcScores:               RCSemanticScore[];   // 已按 score 由高到低排序
+  recommendedFoundations: RecommendedFoundation[];
+  onAddFoundation:        (eid: string, label: string) => void;
 };
 
 const INTENT_LABELS: Record<string, string> = {
@@ -24,7 +32,44 @@ const INTENT_LABELS: Record<string, string> = {
   descriptive:           "描述性分析",
 };
 
-export default function SemanticPanel({ context, rcScores }: Props) {
+function RecommendedFoundationsRow({
+  items, onAdd,
+}: {
+  items: RecommendedFoundation[];
+  onAdd: (eid: string, label: string) => void;
+}) {
+  if (!items.length) return null;
+  return (
+    <div style={{ flexShrink: 0 }}>
+      <div className="detail-section-label" style={{ marginBottom: 4 }}>
+        語意推薦 Foundation
+        <span style={{ color: "var(--muted)", marginLeft: 6, fontWeight: 400 }}>
+          · 依對話語意匹配 · 點擊加入
+        </span>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+        {items.map((f) => (
+          <span
+            key={f.element_id}
+            style={{
+              fontSize: "0.62rem", padding: "2px 8px", borderRadius: 12,
+              border:     "1px solid rgba(0,212,170,0.35)",
+              background: "rgba(0,212,170,0.06)",
+              color:      "var(--teal)",
+              cursor:     "pointer",
+            }}
+            title={`語意分數 ${f.score.toFixed(2)}`}
+            onClick={() => onAdd(f.element_id, f.label)}
+          >
+            + {f.label}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export default function SemanticPanel({ context, rcScores, recommendedFoundations, onAddFoundation }: Props) {
   const topScores = rcScores.slice(0, 5);
   const maxScore  = Math.max(0.01, ...topScores.map((s) => s.score));
 
@@ -35,6 +80,7 @@ export default function SemanticPanel({ context, rcScores }: Props) {
     <div className="detail-panel semantic-panel" style={{ gap: 10 }}>
       <div className="detail-label" style={{ flexShrink: 0 }}>Semantic Panel</div>
 
+      {/* ── 上半部：對話語意脈絡 ── */}
       {!hasContext ? (
         <div className="detail-empty">
           <span>對話開始後</span>
@@ -123,6 +169,9 @@ export default function SemanticPanel({ context, rcScores }: Props) {
           )}
         </>
       )}
+
+      {/* ── 下半部：操作區（語意推薦 Foundation → 加入 Personal Brain）── */}
+      <RecommendedFoundationsRow items={recommendedFoundations} onAdd={onAddFoundation} />
     </div>
   );
 }

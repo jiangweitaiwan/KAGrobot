@@ -17,8 +17,9 @@ import type { RCRankedItem, RCPathData } from "./components/PersonalBrain";
 import type { BertopicLayoutData } from "./components/BertopicMap";
 
 import SemanticPanel from "./components/SemanticPanel";
-import type { SemanticContextData } from "./components/SemanticPanel";
-import type { RecommendedFoundation } from "./components/DetailPanel";
+
+import type { SemanticContextData, RecommendedFoundation } from "./components/SemanticPanel";
+
 
 const GlobalBrainExplorer = dynamic(() => import("./components/GlobalBrainExplorer"), { ssr: false });
 const PersonalBrain       = dynamic(() => import("./components/PersonalBrain"),       { ssr: false });
@@ -514,6 +515,18 @@ export default function Page() {
       return null;
     }
   }, []);
+  
+  const fetchConceptDetail = useCallback(async (eid: string): Promise<ConceptDetail | null> => {
+    if (!API_BASE) return null;
+    try {
+      const r = await fetch(`${API_BASE.replace(/\/$/, "")}/concept/detail/${eid}`);
+      if (!r.ok) throw new Error(`${r.status}`);
+      return await r.json();
+    } catch (err) {
+      console.warn("[concept/detail]", err);
+      return null;
+    }
+  }, []);
 
   // ──────────────────────────────────────────────────────────
   // PersonalBrain: fetch foundation tree(垂直剖面圖用)
@@ -789,13 +802,19 @@ export default function Page() {
           rcSemanticScores={rcSemanticScores}
           rcFoundationMap={rcFoundationMap}
           alpha={ALPHA}
+          fetchConceptDetail={fetchConceptDetail}
           onAddFoundations={addFoundationsToBrain}
           onRemove={removeFromBrain}
           onUpdateWeight={updateWeight}
-          recommendedFoundations={recommendedFoundations}
+          
         />
 
-        <SemanticPanel context={semanticContext} rcScores={rcSemanticScores} />
+        <SemanticPanel
+          context={semanticContext}
+          rcScores={rcSemanticScores}
+          recommendedFoundations={recommendedFoundations}
+          onAddFoundation={(eid, label) => addFoundationsToBrain([{ eid, label }])}
+        />
 
         {/* ══ PersonalBrain ══ */}
         <div className="brain-panel" ref={personalColRef}>
