@@ -8,15 +8,9 @@ from orchestrator.state import OrchestratorState
 
 def entry_router(state: OrchestratorState) -> str:
     phase = state.get("phase") or "socratic"
-    if phase in ("socratic", "concept_resolved"):
-        return "socratic"
-    if phase in ("path_confirmed", "main_agent"):
-        return "main_agent"
-    return "socratic"
+    return "main_agent" if phase in ("path_confirmed", "main_agent") else "socratic"
 
 
 def socratic_router(state: OrchestratorState) -> str:
     phase = state.get("phase") or "socratic"
-    if phase == "path_confirmed":
-        return "main_agent"
-    return "end"
+    return "main_agent" if phase == "path_confirmed" else "end"

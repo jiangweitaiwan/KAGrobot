@@ -64,6 +64,7 @@ type Props = {
   onAddFoundations:  (eids: { eid: string; label: string }[]) => void;
   onRemove:          (eid: string) => void;
   onUpdateWeight:    (eid: string, weight: number) => void;
+  onAskAboutNode:    (eid: string, label: string) => void;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -724,6 +725,7 @@ export default function DetailPanel({
   onAddFoundations,
   onRemove,
   onUpdateWeight,
+  onAskAboutNode,
 }: Props) {
   const [activeTab, setActiveTab] = useState<"browse" | "brain">("browse");
 
@@ -853,6 +855,22 @@ export default function DetailPanel({
                 {detail?.rc_name ?? node.name}
               </span>
             </div>
+            <button
+              className="detail-btn-secondary"
+              style={{
+                flexShrink: 0,
+                alignSelf:  "flex-start",
+                border:     "1px solid var(--teal)",
+                background: "transparent",
+                color:      "var(--teal)",
+                whiteSpace: "nowrap",
+              }}
+              onClick={() => onAskAboutNode(node.id, detail?.rc_name ?? node.name)}
+              title="把此概念的 eid 帶入對話框，讓 socrates 精確查詢"
+            >
+              💬 詢問這個
+            </button>
+
             {isInBrain && (
               <span style={{
                 fontSize: "0.6rem", color: "var(--teal)",

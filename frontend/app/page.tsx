@@ -36,25 +36,7 @@ type ChatResponse = {
   reply:          string;
   phase:          string;
   socrates_phase?: string | null;
-  all_graphs?:    Record<string, GraphDataLite | null> | null;
-};
-
-type GraphDataLite = {
-  query_concepts?: { id: string; name: string }[];
-  nodes?:          { id: string; node_type: string; matched?: boolean }[];
-  paths?: {
-    path_id:       number;
-    node_ids:      string[];
-    edge_ids:      string[];
-    final_concept: string;
-    final_label:   string;
-    foundations?:  { element_id: string; label: string }[];
-  }[];
-  foundations?: { element_id: string; label: string }[];
-  foundation_tree?: {
-    nodes: { element_id: string; label: string }[];
-    edges: { source: string; target: string }[];
-  };
+  skill_used?:    string | null;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -69,19 +51,15 @@ const MAX_HISTORY = 60;
 const ALPHA       = 0.5;
 
 // ── 打字機效能參數 ───────────────────────────────────────────
-// 原本每 10ms 輸出 1 個字元 → React re-render 次數 = 文字長度。
-// 改為每 20ms 輸出 3 個字元,視覺速度相近(甚至略快),
-// 但 re-render 次數降到約三分之一,減少與 3D 渲染搶主執行緒的情況。
 const TYPEWRITER_CHARS_PER_TICK = 3;
 const TYPEWRITER_TICK_MS        = 20;
 
 // ── Resize 防抖(毫秒)──────────────────────────────────────
-// 避免使用者拖曳視窗邊框、或瀏覽器縮放比例變動時,
-// 每個 resize 事件都觸發一次完整 3D 場景重建。
 const RESIZE_DEBOUNCE_MS = 200;
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 const RC_RANKING_POOL_SIZE = 15;
+
 // ─────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────
@@ -99,48 +77,6 @@ function saveHistory(msgs: ChatMessage[]): void {
   const trimmed = msgs.slice(-MAX_HISTORY);
   try { localStorage.setItem(HISTORY_KEY, JSON.stringify(trimmed)); }
   catch { localStorage.removeItem(HISTORY_KEY); }
-}
-
-function extractCandidateEids(allGraphs: Record<number, GraphDataLite | null>): string[] {
-  const eids: string[] = [];
-  for (const g of Object.values(allGraphs)) {
-    if (!g) continue;
-    const qc = (g.query_concepts ?? [])[0];
-    if (qc?.id && !eids.includes(qc.id)) eids.push(qc.id);
-    for (const node of g.nodes ?? []) {
-      if (node.matched && !eids.includes(node.id)) eids.push(node.id);
-    }
-  }
-  return eids;
-}
-
-function buildRCFoundationMap(allGraphs: Record<number, GraphDataLite | null>): RCFoundationMap {
-  const map: RCFoundationMap = new Map();
-  for (const g of Object.values(allGraphs)) {
-    if (!g) continue;
-    const graphFoundations = (g.foundations ?? []).map((f) => f.element_id);
-    for (const path of g.paths ?? []) {
-      if (!path.final_concept) continue;
-      const fEids = graphFoundations.length > 0
-        ? graphFoundations
-        : (path.foundations ?? []).map((f) => f.element_id);
-      if (!map.has(path.final_concept)) {
-        map.set(path.final_concept, {
-          label:          path.final_label || path.final_concept,
-          foundationEids: fEids,
-          treeNodes:      (g.foundation_tree?.nodes ?? []).map((n: any) => ({
-            element_id: n.element_id,
-            label:      n.label,
-          })),
-          treeEdges:      (g.foundation_tree?.edges ?? []).map((e: any) => ({
-            source: e.source,
-            target: e.target,
-          })),
-        });
-      }
-    }
-  }
-  return map;
 }
 
 function computeRCRanking(
@@ -171,11 +107,6 @@ function computeRCRanking(
 
 // ─────────────────────────────────────────────────────────────
 // usePanelSize(加入 resize 防抖)
-//
-// 原本 ResizeObserver 每次觸發都立即 setSize,使用者拖曳視窗邊框
-// 時會連續觸發大量 resize callback,每次都讓下游的 Three.js 元件
-// 整個場景重建(init useEffect 依賴 width/height)。
-// 改用 debounce:拖曳結束後 200ms 才真正更新尺寸,過程中只重建一次。
 // ─────────────────────────────────────────────────────────────
 
 function usePanelSize(ref: React.RefObject<HTMLDivElement>) {
@@ -204,10 +135,7 @@ function usePanelSize(ref: React.RefObject<HTMLDivElement>) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 混合策略:fetchSemanticScores
-//
-// 只在 concept_resolved 時呼叫一次,把 query 傳進去取得 SBERT 分數。
-// 後續 foundation 勾選的互動排名仍在前端計算(零延遲)。
+// Semantic 機制 fetch helpers
 // ─────────────────────────────────────────────────────────────
 
 async function fetchSemanticContextData(sessionId: string): Promise<SemanticContextData | null> {
@@ -255,9 +183,6 @@ async function fetchFoundationRecommendations(sessionId: string): Promise<Recomm
   }
 }
 
-
-
-
 async function fetchExpandBatch(
   eids: string[],
 ): Promise<Record<string, {
@@ -282,6 +207,7 @@ async function fetchExpandBatch(
     return {};
   }
 }
+
 // ─────────────────────────────────────────────────────────────
 // Page
 // ─────────────────────────────────────────────────────────────
@@ -303,12 +229,11 @@ export default function Page() {
   // ── BERTopic 2D layout ─────────────────────────────────────
   const [bertopicLayout, setBertopicLayout] = useState<BertopicLayoutData | null>(null);
   const [globalLayoutFetched, setGlobalLayoutFetched] = useState(false);
-  const [activeCandidateEids, setActiveCandidateEids] = useState<string[]>([]);
 
   // ── RC Intelligence ────────────────────────────────────────
+  // rcFoundationMap 一律由 /graph/expand/batch 補齊(不再有 all_graphs 直接建構的分支)。
   const [rcSemanticScores, setRCSemanticScores] = useState<RCSemanticScore[]>([]);
   const [rcFoundationMap,  setRCFoundationMap]  = useState<RCFoundationMap>(new Map());
-  const allGraphsRef = useRef<Record<number, GraphDataLite | null>>({});
   const [semanticContext, setSemanticContext] = useState<SemanticContextData | null>(null);
   const [recommendedFoundations, setRecommendedFoundations] = useState<RecommendedFoundation[]>([]);
 
@@ -331,13 +256,25 @@ export default function Page() {
   const explorerSize   = usePanelSize(explorerColRef as React.RefObject<HTMLDivElement>);
   const personalSize   = usePanelSize(personalColRef  as React.RefObject<HTMLDivElement>);
 
+  // ── 避免同一個 eid 重複觸發 batch expand ──────────────────
+  const expandFetchedRef = useRef<Set<string>>(new Set());
+
+  // ── activeCandidateEids：不再依賴 chat response 的 all_graphs，
+  //    直接從 rcSemanticScores 取 Top-3（GlobalBrainExplorer 點亮用）──
+  const activeCandidateEids = useMemo(
+    () => [...rcSemanticScores]
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 3)
+      .map((s) => s.eid),
+    [rcSemanticScores],
+  );
+
   // ── RC Ranking (derived, 前端即時計算) ────────────────────
   const rcRanking = useMemo(
     () => computeRCRanking(personalBrain, rcSemanticScores, rcFoundationMap, ALPHA),
     [personalBrain, rcSemanticScores, rcFoundationMap],
   );
-  // ── 避免同一個 eid 重複觸發 batch expand ──────────────────
-  const expandFetchedRef = useRef<Set<string>>(new Set());
+
   // ──────────────────────────────────────────────────────────
   // Init from localStorage
   // ──────────────────────────────────────────────────────────
@@ -383,8 +320,6 @@ export default function Page() {
       .catch((err) => console.warn("[GlobalBrain] layout fetch failed:", err));
   }, [messages, globalLayoutFetched]);
 
-
-
   // ── Fetch BERTopic layout(一次性,和 globalLayout 同步觸發)──
   useEffect(() => {
     if (!API_BASE || bertopicLayout !== null) return;
@@ -394,19 +329,19 @@ export default function Page() {
       .catch((err) => console.warn("[BertopicLayout] fetch failed:", err));
   }, [bertopicLayout]);
 
-
-
-  // ── Phase 2:用 rcSemanticScores 補全 rcFoundationMap,
-  //    讓推薦 RC 不再侷限於 all_graphs 裡的候選 ────────────
+  // ── RCFoundationMap 統一補齊：一律走 /graph/expand/batch，merge-only，
+  //    不再有「先用 all_graphs 建、再補洞」的雙軌邏輯。
+  //    wanted 集合 = 目前點亮的 Top-3 anchor ∪ semantic pool 前 15 名。──
   useEffect(() => {
-    if (rcSemanticScores.length === 0) return;
+    if (rcSemanticScores.length === 0 && activeCandidateEids.length === 0) return;
 
-    const topK = [...rcSemanticScores]
+    const wanted = new Set<string>(activeCandidateEids);
+    [...rcSemanticScores]
       .sort((a, b) => b.score - a.score)
       .slice(0, RC_RANKING_POOL_SIZE)
-      .map((s) => s.eid);
+      .forEach((s) => wanted.add(s.eid));
 
-    const missing = topK.filter(
+    const missing = [...wanted].filter(
       (eid) => !rcFoundationMap.has(eid) && !expandFetchedRef.current.has(eid),
     );
     if (missing.length === 0) return;
@@ -418,8 +353,6 @@ export default function Page() {
       setRCFoundationMap((prev) => {
         const next = new Map(prev);
         for (const [eid, r] of Object.entries(results)) {
-          // all_graphs 來源的條目已含完整 downstream 資訊,不覆蓋
-          if (next.has(eid)) continue;
           next.set(eid, {
             label:          r.anchor_label || eid,
             foundationEids: r.foundations.map((f) => f.element_id),
@@ -430,8 +363,7 @@ export default function Page() {
         return next;
       });
     });
-  }, [rcSemanticScores, rcFoundationMap]);
-
+  }, [activeCandidateEids, rcSemanticScores, rcFoundationMap]);
 
   // ──────────────────────────────────────────────────────────
   // GlobalBrainExplorer node click
@@ -454,6 +386,16 @@ export default function Page() {
     if (detailRes.status === "fulfilled") setDetail(detailRes.value);
     if (treeRes.status === "fulfilled")   setFoundationTree(treeRes.value);
     setLoadingTree(false);
+  }, []);
+
+  // ──────────────────────────────────────────────────────────
+  // 方案 B：「詢問這個」→ 把 eid 以人類可讀明文預填進輸入框，
+  // 讓 socrates 在下一輪呼叫 retrieve_concept_detail 時能精確帶入 eid，
+  // 不需要模糊比對 rc_name。
+  // ──────────────────────────────────────────────────────────
+
+  const handleAskAboutNode = useCallback((eid: string, label: string) => {
+    setInput(`關於「${label}」(eid: ${eid})，`);
   }, []);
 
   // ──────────────────────────────────────────────────────────
@@ -515,7 +457,7 @@ export default function Page() {
       return null;
     }
   }, []);
-  
+
   const fetchConceptDetail = useCallback(async (eid: string): Promise<ConceptDetail | null> => {
     if (!API_BASE) return null;
     try {
@@ -568,12 +510,12 @@ export default function Page() {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({
-          session_id:       sessionId,
-          message:          confirmMsg.content,
-          phase:            phase === "main_agent" ? "main_agent" : "concept_resolved",
-          selected_path_id: pathId,
-          selected_rc_eid:    rcEid,     // ← 新增
-          selected_rc_label:  rcLabel,   // ← 新增
+          session_id:        sessionId,
+          message:           confirmMsg.content,
+          phase:             phase === "main_agent" ? "main_agent" : "socratic",
+          selected_path_id:  pathId,
+          selected_rc_eid:   rcEid,
+          selected_rc_label: rcLabel,
         }),
       });
       if (!resp.ok) throw new Error(`API error ${resp.status}`);
@@ -597,12 +539,6 @@ export default function Page() {
 
   const canSend = !!input.trim() && !isLoading && !!sessionId;
 
-  // ── 打字機效果(批次輸出版)──────────────────────────────
-  // 原本每 10ms append 1 個字元,AI 回覆越長,React re-render 次數
-  // 就越多,與兩個常駐的 3D 渲染迴圈疊加時會放大主執行緒負擔。
-  // 改為每 20ms 一次輸出 TYPEWRITER_CHARS_PER_TICK 個字元,
-  // 視覺上的「逐字浮現」速度幾乎相同(甚至略快),
-  // 但 re-render 次數降到約三分之一。
   async function typewriterAppend(fullText: string): Promise<void> {
     isTypingRef.current = true;
     const aiId = createId();
@@ -615,7 +551,6 @@ export default function Page() {
       );
       await wait(TYPEWRITER_TICK_MS);
     }
-    // 補上最後不滿一批的尾段,確保完整文字一定會顯示
     setMessages((prev) =>
       prev.map((msg) => msg.id === aiId ? { ...msg, content: fullText } : msg),
     );
@@ -644,7 +579,7 @@ export default function Page() {
         body:    JSON.stringify({
           session_id: sessionId,
           message:    text,
-          phase:      phase === "concept_resolved" ? "concept_resolved" : "socratic",
+          phase:      phase === "main_agent" ? "main_agent" : "socratic",
         }),
       });
       if (!response.ok) throw new Error(`API error ${response.status}`);
@@ -654,21 +589,12 @@ export default function Page() {
       setPhase(nextPhase);
       localStorage.setItem(PHASE_KEY, nextPhase);
 
-      // ── Semantic 機制：每輪都刷新（不依賴 all_graphs）──────────
+      // ── Semantic 機制：每輪都刷新。GlobalBrain 點亮 / RCFoundationMap 補齊
+      //    / SemanticPanel 顯示，全部由這三支 fetch 驅動，不再依賴 chat
+      //    response 裡的任何圖譜欄位。──
       fetchSemanticContextData(sessionId).then(setSemanticContext);
       fetchSemanticScores(sessionId).then(setRCSemanticScores);
       fetchFoundationRecommendations(sessionId).then(setRecommendedFoundations);
-
-      if (data.all_graphs) {
-        const parsed: Record<number, GraphDataLite | null> = {};
-        for (const [k, v] of Object.entries(data.all_graphs)) parsed[Number(k)] = v;
-        allGraphsRef.current = parsed;
-
-        const newMap = buildRCFoundationMap(parsed);
-        setRCFoundationMap(newMap);
-        setActiveCandidateEids(extractCandidateEids(parsed));
-        // 舊的 fetchSemanticScores(text) 呼叫已移除，改用上方 session 版本
-      }
 
       await typewriterAppend(data.reply || "");
     } catch (err) {
@@ -687,11 +613,9 @@ export default function Page() {
     setPhase("socratic");
     setMessages([]);
     setError("");
-    allGraphsRef.current = {};
-    setActiveCandidateEids([]);
     setRCFoundationMap(new Map());
     setRCSemanticScores([]);
-    expandFetchedRef.current = new Set();   // ← 新增
+    expandFetchedRef.current = new Set();
     setSelectedNode(null);
     setDetail(null);
     setFoundationTree(null);
@@ -703,9 +627,7 @@ export default function Page() {
   }
 
   const inputPlaceholder =
-    phase === "concept_resolved" ? "詢問路徑含義…" :
-    phase === "main_agent"       ? "繼續詢問分析…" :
-                                   "輸入你的問題…";
+    phase === "main_agent" ? "繼續詢問分析…" : "輸入你的問題…";
 
   // ──────────────────────────────────────────────────────────
   // Render
@@ -806,7 +728,7 @@ export default function Page() {
           onAddFoundations={addFoundationsToBrain}
           onRemove={removeFromBrain}
           onUpdateWeight={updateWeight}
-          
+          onAskAboutNode={handleAskAboutNode}
         />
 
         <SemanticPanel

@@ -16,10 +16,8 @@ class OrchestratorState(TypedDict, total=False):
     main_state:        Annotated[List[BaseMessage], add_messages]
     handoff_task:      Optional[str]
     selected_path_id:  Optional[int]
-    selected_rc_eid:   Optional[str]    # ← 新增
-    selected_rc_label: Optional[str]    # ← 新增
+    selected_rc_eid:   Optional[str]
+    selected_rc_label: Optional[str]
     confirmed_path_id: Optional[int]
-    confirmed_rc_eid:  Optional[str]    # ← 新增
-    all_graphs:        Optional[Dict[int, Any]]
-    graph_context:     Optional[str]
+    confirmed_rc_eid:  Optional[str]
     skill_sandbox_id:  Optional[str]

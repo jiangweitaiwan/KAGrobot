@@ -39,8 +39,6 @@ from retrieval.concept_retriever   import ConceptDetailRetriever
 
 class _InternalState(TypedDict):
     messages:   Annotated[List[BaseMessage], add_messages]
-    candidates: Optional[List[dict]]
-    query:      Optional[str]
     
 
 
@@ -49,38 +47,27 @@ class _InternalState(TypedDict):
 # ═══════════════════════════════════════════════════════════════
 
 _SYSTEM_PROMPT = """\
-你是一位專業經濟學顧問，協助使用者從知識圖譜的推理路徑中，
-選出最符合其分析需求的模型或方法。
+你是一位專業經濟學顧問，協助使用者釐清分析需求。
 
-## 工作流程
+## 工作內容
 
-### 階段 1：需求釐清
-- 了解使用者的分析目標（1-2 輪即可，避免過度追問）。
-
-### 階段 2：查詢知識圖譜（retrieve_concepts）
-- 釐清需求後，主動呼叫 `retrieve_concepts`，傳入精確的**英文**查詢語句。
-- 若結果為空（found=false），告知使用者並請重新描述需求後再試。
-- retrieve 完成後，向使用者說明找到的候選概念，並告知圖譜正在載入至右側面板。
-
-### 階段 3：路徑說明與引導（圖譜已展開後）
-- 若 system prompt 包含「目前已展開的知識圖譜路徑」區塊，代表圖譜已展開。
-- 根據各候選的下游終點與基礎概念向使用者說明各候選的分析方向。
-- 若使用者想了解某個概念的理論細節，主動呼叫 `retrieve_concept_detail`。
-- 若使用者希望換一個分析方向，重新呼叫 `retrieve_concepts`。
-- 引導使用者在右側圖譜點選路徑後按確認按鈕，路徑確認由前端完成。
+- 透過對話了解使用者的分析目標，1-2 輪即可，避免過度追問。
+- 若使用者提及某個具體概念（訊息中可能帶有「(eid: ...)」標記，代表使用者
+  在圖譜介面上點選了該節點），呼叫 retrieve_concept_detail 並帶入該 eid，
+  向使用者說明其定義、機制、關鍵假設等理論背景。
+- 若下方提供「目前語意上最相關的候選概念」區塊，那只是系統內部參考，
+  不需要，也不應該在回覆中列出這份清單或提及其存在。
+- 不需要主動引導使用者選路徑——路徑選擇由前端圖譜介面完成，
+  你只需要專注於需求釐清與概念說明。
 
 ## 輸出格式（強制）
 每輪必須輸出合法 JSON，不得有任何前綴文字或 markdown code block：
 {"ai_message": "<繁體中文回覆>", "intent_types": [...], "context_summary": "<英文摘要>"}
 
-- 對話以繁體中文；retrieve_concepts 的查詢語句用英文。
-- intent_types：在使用者需求已足夠清晰時，填入對應的分析類型標籤（可複數）。
-  需求尚不明確時填入空列表 []。
-  候選值：causal_mechanism, equilibrium_analysis, forecasting, event_study,
-          structural_estimation, policy_evaluation, asset_pricing, descriptive
-- context_summary：用一到兩句**英文**重新總結「使用者目前完整的分析需求」，
-  每輪都根據目前為止的完整對話重寫（不是逐輪疊加），供後端 Semantic 機制
-  做 embedding 相似度比對。需求尚不明確時，摘要目前已知的線索即可。
+- intent_types：候選值同前（causal_mechanism, equilibrium_analysis, forecasting,
+  event_study, structural_estimation, policy_evaluation, asset_pricing, descriptive）。
+- context_summary：每輪重寫的英文摘要，總結使用者目前完整的分析需求，
+  供後端 Semantic 機制做 embedding 相似度比對（前端排名、圖譜點亮皆依賴此欄位）。
 """
 
 
@@ -141,7 +128,6 @@ class SocratesChatBot:
             api_key=api_key,
         )
 
-        self._retrieve_tool       = self._make_retrieve_tool()
         self._concept_detail_tool = self._make_concept_detail_tool()
 
     # ------------------------------------------------------------------
@@ -154,68 +140,58 @@ class SocratesChatBot:
             messages       = [],
             agent_messages = [],
             phase          = ConversationPhase.RUNNING.value,
-            query          = None,
-            candidates     = None,
-            selected_index = None,
-            tools          = None,
-            parameters     = None,
             intent_types   = None,
             context_summary = None,   # ← 新增            
         )
 
-    def process_message(
-        self,
-        state:         ChatState,
-        user_input:    str,
-        graph_context: Optional[str] = None,
-    ) -> ChatState:
-        if state.get("phase") == ConversationPhase.PATH_CONFIRMED.value:
-            return state
-
-        state["messages"].append(HumanMessage(content=user_input))
-
-        effective_prompt = self._build_effective_prompt(state, graph_context)
-        prior_msgs       = self._normalize_prior_messages(
-            state.get("agent_messages") or []
-        )
-
-        llm_with_tools = self._base_llm.bind_tools([
-            self._retrieve_tool,
-            self._concept_detail_tool,
-        ])
-
-        graph_result = self._build_graph(llm_with_tools).invoke({
-            "messages":   [SystemMessage(content=effective_prompt)]
-                          + prior_msgs
-                          + [HumanMessage(content=user_input)],
-            "candidates": state.get("candidates") or [],
-            "query":      state.get("query"),
-        })
-
-        state["agent_messages"] = graph_result["messages"]
-
-        if graph_result.get("query"):
-            state["query"] = graph_result["query"]
-
-        new_candidates = graph_result.get("candidates")
-        if new_candidates:
-            state["candidates"] = new_candidates
-            tools, params = resolve_tools_from_candidates(new_candidates)
-            state["tools"]      = tools
-            state["parameters"] = params
-            state["phase"]      = ConversationPhase.CONCEPT_RESOLVED.value
-
-        bot_resp    = self._parse_bot_response(graph_result["messages"])
-        ai_text     = bot_resp.get("ai_message", "")
-        new_intents = bot_resp.get("intent_types", [])
-        new_summary = bot_resp.get("context_summary", "")
-        if new_intents:
-            state["intent_types"] = new_intents
-        if new_summary:
-            state["context_summary"] = new_summary   # ← 新增：每輪覆蓋重寫            
-
-        state["messages"].append(AIMessage(content=ai_text))
+    def process_message(self, state: ChatState, user_input: str) -> ChatState:
+    if state.get("phase") == ConversationPhase.PATH_CONFIRMED.value:
         return state
+
+    state["messages"].append(HumanMessage(content=user_input))
+
+    grounding = self._build_candidate_grounding(state)
+    effective_prompt = self._build_effective_prompt(state, grounding)
+    prior_msgs = self._normalize_prior_messages(state.get("agent_messages") or [])
+
+    llm_with_tools = self._base_llm.bind_tools([self._concept_detail_tool])
+
+    graph_result = self._build_graph(llm_with_tools).invoke({
+        "messages": [SystemMessage(content=effective_prompt)]
+                    + prior_msgs
+                    + [HumanMessage(content=user_input)],
+    })
+
+    state["agent_messages"] = graph_result["messages"]
+
+    bot_resp    = self._parse_bot_response(graph_result["messages"])
+    ai_text     = bot_resp.get("ai_message", "")
+    new_intents = bot_resp.get("intent_types", [])
+    new_summary = bot_resp.get("context_summary", "")
+    if new_intents:
+        state["intent_types"] = new_intents
+    if new_summary:
+        state["context_summary"] = new_summary
+
+    state["messages"].append(AIMessage(content=ai_text))
+    return state
+
+    def _build_candidate_grounding(self, state: ChatState) -> str:
+        """用上一輪的 context_summary 查一次 top-k candidates，
+        僅供 LLM 內部參考不對使用者展示，也不佔用一次 tool call。"""
+        query_text = (state.get("context_summary") or "").strip()
+        if not query_text:
+            return ""
+        candidates = self._candidate_retriever.retrieve_candidates(query_text, top_k=5)
+        if not candidates:
+            return ""
+        lines = [f"- {c['rc_name']} (eid={c['eid']})" for c in candidates]
+        return (
+            "\n\n══════════════════════════════\n"
+            "內部參考：目前語意上最相關的候選概念（不對使用者展示此清單）\n"
+            "══════════════════════════════\n"
+            + "\n".join(lines)
+        )
 
     def confirm_path(self, state: ChatState) -> ChatState:
         """標記路徑已確認，凍結 socratic 階段。"""
@@ -236,7 +212,7 @@ class SocratesChatBot:
     @staticmethod
     def _build_effective_prompt(
         state:         ChatState,
-        graph_context: Optional[str],
+        grounding: Optional[str],
     ) -> str:
         prior          = state.get("agent_messages") or []
         first_system   = next(
@@ -244,18 +220,14 @@ class SocratesChatBot:
         )
         base_prompt    = first_system.content if first_system else _SYSTEM_PROMPT
 
-        if not graph_context:
+        if not grounding:
             return base_prompt
 
         return (
             base_prompt
-            + "\n\n══════════════════════════════\n"
-            + "目前已展開的知識圖譜路徑\n"
             + "══════════════════════════════\n"
-            + graph_context
-            + "\n\n請根據上方各候選的下游終點與基礎概念向使用者說明分析方向。"
+            + grounding
             + "若使用者追問特定概念的理論細節，呼叫 retrieve_concept_detail。\n"
-            + "引導使用者在右側圖譜點選路徑後按確認按鈕。"
         )
 
     @staticmethod
@@ -271,7 +243,6 @@ class SocratesChatBot:
 
     def _build_graph(self, llm_with_tools):
         tool_map = {
-            self._retrieve_tool.name:       self._retrieve_tool,
             self._concept_detail_tool.name: self._concept_detail_tool,
         }
 
@@ -337,16 +308,6 @@ class SocratesChatBot:
         except (json.JSONDecodeError, TypeError):
             data = {}
 
-        if tool_name == self._retrieve_tool.name:
-            if data.get("found"):
-                return (
-                    data.get("display") or "（查無結果）",
-                    {
-                        "candidates": data.get("candidates", []),
-                        "query":      data.get("query", ""),
-                    },
-                )
-            return data.get("message") or raw_result, {}
 
         if tool_name == self._concept_detail_tool.name:
             if data.get("found"):
@@ -359,71 +320,32 @@ class SocratesChatBot:
     # Tool factories
     # ------------------------------------------------------------------
 
-    def _make_retrieve_tool(self) -> StructuredTool:
-        candidate_retriever = self._candidate_retriever
-        top_k               = self._top_k
 
-        def retrieve_concepts(query: str) -> str:
-            """查詢知識圖譜，找出與使用者需求最相關的 concept 候選清單。"""
-            candidates = candidate_retriever.retrieve_candidates(
-                query, top_k=top_k
-            )
-            if not candidates:
-                return json.dumps({
-                    "found":      False,
-                    "message":    "No relevant concepts found in the knowledge graph.",
-                    "candidates": [],
-                    "display":    "",
-                    "query":      query,
-                }, ensure_ascii=False)
-
-            lines = [
-                f"[{c['index']}] {c['rc_name'] or '（未命名）'}"
-                f"  （相似度 {c['score']}）"
-                for c in candidates
-            ]
-            return json.dumps({
-                "found":      True,
-                "query":      query,
-                "candidates": candidates,
-                "display":    "\n".join(lines),
-            }, ensure_ascii=False)
-
-        return StructuredTool.from_function(
-            func=retrieve_concepts,
-            name="retrieve_concepts",
-            description=(
-                "查詢知識圖譜，找出與使用者需求最相關的 concept 候選清單。"
-                "需求釐清完成後呼叫此 tool，傳入精確的英文查詢語句。"
-                "若使用者希望換分析方向，亦可再次呼叫。"
-            ),
-        )
 
     def _make_concept_detail_tool(self) -> StructuredTool:
-        concept_retriever = self._concept_retriever
+    concept_retriever = self._concept_retriever
 
-        def retrieve_concept_detail(rc_name: str) -> str:
-            """查詢指定 concept 的定義、機制、關鍵假設及所屬論文的理論前提與模型約束。"""
+    def retrieve_concept_detail(eid: str = "", rc_name: str = "") -> str:
+        """查詢指定 Concept 的詳細資訊(定義/機制/關鍵假設/功能/論文背景)。
+        若使用者訊息帶有「(eid: ...)」標記(代表在圖譜上明確點選過該節點)，
+        務必傳入該 eid 以確保精確查詢；只有在使用者純粹用文字描述、
+        沒有明確 eid 可用時，才退回用 rc_name 模糊比對。"""
+        if eid:
+            result = concept_retriever.retrieve_by_eid(eid)
+        else:
             result = concept_retriever.retrieve(rc_name)
-            return json.dumps(result, ensure_ascii=False)
+        return json.dumps(result, ensure_ascii=False)
 
-        return StructuredTool.from_function(
-            func=retrieve_concept_detail,
-            name="retrieve_concept_detail",
-            description=(
-                "查詢指定 Concept 的詳細資訊，包含：\n"
-                "  - concept 的 definition（概念定義）\n"
-                "  - concept 的 mechanism（作用機制）\n"
-                "  - concept 的 key_assumptions（關鍵假設）\n"
-                "  - concept 的 function（功能說明，僅 Resulting Concept 才有值，"
-                "一般 concept 此欄位為空，可用以判斷是否為 RC）\n"
-                "  - 產生此 concept 的 paper 標題\n"
-                "  - paper 的 conceptual_premises（理論前提假設）\n"
-                "  - paper 的 contextual_model_constraints（模型情境約束）\n"
-                "當使用者詢問某個概念或路徑的理論背景、適用條件時呼叫。\n"
-                "輸入 rc_name 為 Concept 的名稱（允許部分匹配）。"
-            ),
-        )
+    return StructuredTool.from_function(
+        func=retrieve_concept_detail,
+        name="retrieve_concept_detail",
+        description=(
+            "查詢指定 Concept 的詳細資訊：definition / mechanism / "
+            "key_assumptions / function（僅 RC 有值）/ 所屬論文的理論前提與模型約束。"
+            "優先傳入 eid（使用者訊息中帶有「(eid: ...)」標記時一定要帶），"
+            "查無 eid 才用 rc_name 模糊比對。"
+        ),
+    )
 
     # ------------------------------------------------------------------
     # JSON parsing helpers

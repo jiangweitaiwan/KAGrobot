@@ -420,40 +420,7 @@ class MainAgent:
 
 
 
-    @staticmethod
-    def _fallback_tool_lines(socrates_state: ChatState) -> List[str]:
-        tools_info = socrates_state.get("tools") or []
-        params     = socrates_state.get("parameters") or []
-        param_map  = {p["tool_name"]: p.get("parameters", {}) for p in params}
-        lines: List[str] = []
 
-        for idx, t in enumerate(tools_info, 1):
-            tname      = t["tool_name"]
-            desc       = t.get("description", "")
-            concept    = t.get("matched_concept", "")
-            skills     = ", ".join(t.get("skills", []))
-            from_agent = t.get("from_agent", "")
-            dep_tag    = " [依賴工具]" if t.get("is_dependency", False) else ""
-
-            pschema    = param_map.get(tname)
-            param_hint = ""
-            if pschema:
-                props    = pschema.get("properties", {})
-                required = pschema.get("required", [])
-                param_parts = [
-                    f"     - {pname}: {pdef.get('description', '')} "
-                    f"{'（必填）' if pname in required else '（選填）'}"
-                    for pname, pdef in props.items()
-                ]
-                if param_parts:
-                    param_hint = "\n" + "\n".join(param_parts)
-
-            lines.append(
-                f"{idx}. **{tname}**{dep_tag} — {desc}\n"
-                f"   來源: {from_agent} ｜ 概念: {concept} ｜ 技能: {skills}"
-                f"{param_hint}"
-            )
-        return lines
 
     # ------------------------------------------------------------------
     # Tool 清單組裝（私有）
@@ -477,7 +444,6 @@ class MainAgent:
                 )
             ]            
         else:
-            langchain_tools = self._fallback_tools(socrates_state)
 
             # 沒有 script → 沒有 sandbox，references 改由 host-side 工具直接讀本機檔案
             if skill and skill.has_references and skill.skill_dir is not None:
@@ -507,37 +473,7 @@ class MainAgent:
         s = re.sub(r"\s+", "_", s.strip())
         return re.sub(r"_+", "_", s) or "skill"
 
-    @staticmethod
-    def _fallback_tools(socrates_state: ChatState) -> List[StructuredTool]:
-        resolved_tools = socrates_state.get("tools") or []
-        seen: set      = set()
-        result: List[StructuredTool] = []
 
-        for tool_info in resolved_tools:
-            tname = tool_info["tool_name"]
-            if tname in seen:
-                continue
-            seen.add(tname)
-
-            impl = _TOOL_IMPLEMENTATIONS.get(tname)
-            if impl is None:
-                continue
-
-            registry_entry = TOOLS_REGISTRY.get(tname, {})
-            description    = (
-                tool_info.get("description") or registry_entry.get("description", "")
-            )
-
-            if isinstance(impl, BaseTool):
-                result.append(impl)
-            else:
-                result.append(StructuredTool.from_function(
-                    func=impl,
-                    name=tname,
-                    description=description,
-                ))
-
-        return result
 
 
 # ═══════════════════════════════════════════════════════════════

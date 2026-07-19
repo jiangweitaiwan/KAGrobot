@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from graph_service.projector import GraphProjector
 
 router = APIRouter()
-_projector = GraphProjector()
+
 
 
 # ── Schema ────────────────────────────────────────────────────────────
@@ -22,16 +22,15 @@ class ChatRequest(BaseModel):
     message:           str
     phase:             Optional[str] = None
     selected_path_id:  Optional[int] = None
-    selected_rc_eid:   Optional[str] = None   # ← 新增
-    selected_rc_label: Optional[str] = None   # ← 新增（cache 冷啟動時的 fallback 標籤）
+    selected_rc_eid:   Optional[str] = None
+    selected_rc_label: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
     reply:          str
     phase:          str
-    socrates_phase: Optional[str]            = None
-    all_graphs:     Optional[Dict[int, Any]] = None
-    skill_used:     Optional[str]            = None
+    socrates_phase: Optional[str] = None
+    skill_used:     Optional[str] = None
 
 
 # ── Route ─────────────────────────────────────────────────────────────
@@ -73,22 +72,12 @@ async def chat_endpoint(
         else None
     )
 
-    # all_graphs（只在 concept_resolved 且未選定路徑時回傳投影結果）
-    all_graphs_out: Optional[Dict[int, Any]] = None
-    if (
-        result.get("phase") == "concept_resolved"
-        and body.selected_path_id is None
-    ):
-        raw = result.get("all_graphs") or {}
-        all_graphs_out = {
-            idx: (_projector.project(g) if g else None)
-            for idx, g in raw.items()
-        }
+
+
 
     return ChatResponse(
         reply          = reply_text,
         phase          = result.get("phase", initial_phase),
         socrates_phase = socrates_phase,
-        all_graphs     = all_graphs_out,
         skill_used     = result.get("skill_used"),
     )

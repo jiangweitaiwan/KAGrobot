@@ -34,8 +34,6 @@ from retrieval import (
 )
 from graph_service.bfs_cache       import AdjacencyCache
 from graph_service.bfs_coordinator import BFSCoordinator
-from graph_service                 import GraphContextBuilder, PathScorer
-from graph_service.expander        import GraphExpander   # 已更新版
 from graph_service.foundation_recommender import FoundationRecommender
 from core.socrates_bot             import SocratesChatBot
 from core.main_agent               import MainAgent
@@ -85,10 +83,7 @@ async def lifespan(app: FastAPI):
         path_selector=path_selector,
     )
 
-    # ── GraphExpander 改用 Coordinator ───────────────────────
-    scorer          = PathScorer()
-    graph_expander  = GraphExpander(coordinator=coordinator, scorer=scorer)
-    context_builder = GraphContextBuilder()
+
 
     socrates_bot = SocratesChatBot(
         candidate_retriever=candidate_retriever,
@@ -113,8 +108,6 @@ async def lifespan(app: FastAPI):
     nodes = OrchestratorNodes(
         socrates_bot        = socrates_bot,
         main_agent          = main_agent,
-        graph_expander       = graph_expander,
-        context_builder      = context_builder,
         skill_loader         = skill_loader,
         sandbox_provisioner  = sandbox_provisioner,
         coordinator          = coordinator,   # ← 新增
