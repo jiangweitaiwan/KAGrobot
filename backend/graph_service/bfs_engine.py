@@ -83,21 +83,21 @@ class CachedDownstreamBFS:
         kind = self._cache.get_concept_kind(start_eid)
 
         if kind == "resulting_concept":
-            effective_eid = start_eid
+            effective_eid, effective_name = start_eid, rc_name
         elif kind == "sub_concept":
             parent = self._cache.get_parent_rc(start_eid)
             if parent:
                 _upsert_concept_node(
                     nodes_map, parent.element_id, parent.name, parent.node_type
                 )
-                effective_eid = parent.element_id
+                effective_eid, effective_name = parent.element_id, parent.name
             else:
-                effective_eid = start_eid
+                effective_eid, effective_name = start_eid, rc_name
         else:
-            effective_eid = None
+            effective_eid, effective_name = None, ""
 
         if effective_eid:
-            raw_paths = self._walk(effective_eid, max_depth_down)
+            raw_paths = self._walk(effective_eid, effective_name, max_depth_down)
         else:
             raw_paths = self._walk_from_other(start_eid, max_depth_down)
 
@@ -132,11 +132,12 @@ class CachedDownstreamBFS:
 
     def _walk(
         self,
-        start_eid: str,
-        max_depth: int = 8,
+        start_eid:  str,
+        start_name: str,
+        max_depth:  int = 8,
     ) -> List[Dict[str, Any]]:
         """從 RC 向下展開，透過 cache 取鄰接關係。"""
-        start_concept = {"element_id": start_eid, "name": "", "type": "Resulting_Concept"}
+        start_concept = {"element_id": start_eid, "name": start_name, "type": "Resulting_Concept"}
         queue         = deque([(start_concept, [], frozenset([start_eid]))])
         completed:    List[Dict[str, Any]] = []
 
@@ -188,17 +189,17 @@ class CachedDownstreamBFS:
         max_depth: int = 8,
     ) -> List[Dict[str, Any]]:
         """非 RC 節點：先找所有可達的 RC，再各自展開。"""
-        # 取下游鄰居中屬於 RC 的節點
+        # 取下游鄰居中屬於 RC 的節點（連同 name 一併保留，避免 leaf RC 遺失 label）
         neighbors = self._cache.get_downstream_neighbors(eid)
-        rc_eids   = [
-            n.to_concept.element_id
+        rc_infos  = [
+            n.to_concept
             for n in neighbors
             if (n.to_concept.node_type or "").lower() == "resulting_concept"
         ]
 
         all_paths: List[Dict[str, Any]] = []
-        for rc_eid in rc_eids:
-            all_paths.extend(self._walk(rc_eid, max_depth))
+        for rc_info in rc_infos:
+            all_paths.extend(self._walk(rc_info.element_id, rc_info.name, max_depth))
         return all_paths
 
 

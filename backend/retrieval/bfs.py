@@ -187,13 +187,17 @@ def _integrate_path(
             node_ids.append(final_p["element_id"])
             edge_ids.append(efp)
 
+    final_label = final_c.get("name") or nodes_map.get(
+        final_c["element_id"], {}
+    ).get("label", "")
+
     all_paths.append({
         "path_id":       len(all_paths),
         "direction":     direction,
         "node_ids":      node_ids,
         "edge_ids":      edge_ids,
         "final_concept": final_c["element_id"],
-        "final_label":   final_c.get("name", ""),
+        "final_label":   final_label,
         "intent_score":  0.0,
     })
 
