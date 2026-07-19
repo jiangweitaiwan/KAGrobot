@@ -37,18 +37,18 @@ class OrchestratorNodes:
 
 
     def __init__(
-    self,
-    socrates_bot:        SocratesChatBot,
-    main_agent:          MainAgent,
-    skill_loader:        SkillLoader,
-    sandbox_provisioner: "SkillSandboxProvisioner",
-    coordinator:         BFSCoordinator,
+        self,
+        socrates_bot:        SocratesChatBot,
+        main_agent:          MainAgent,
+        skill_loader:        SkillLoader,
+        sandbox_provisioner: "SkillSandboxProvisioner",
+        coordinator:         BFSCoordinator,
     ) -> None:
-    self._socrates_bot        = socrates_bot
-    self._main_agent          = main_agent
-    self._skill_loader        = skill_loader
-    self._sandbox_provisioner = sandbox_provisioner
-    self._coordinator         = coordinator
+        self._socrates_bot        = socrates_bot
+        self._main_agent          = main_agent
+        self._skill_loader        = skill_loader
+        self._sandbox_provisioner = sandbox_provisioner
+        self._coordinator         = coordinator
 
 
     # ------------------------------------------------------------------
@@ -56,31 +56,31 @@ class OrchestratorNodes:
     # ------------------------------------------------------------------
 
     async def socratic(self, state: OrchestratorState) -> OrchestratorState:
-    messages         = state.get("messages") or []
-    user_msg         = self._last_human_content(messages)
-    selected_path_id = state.get("selected_path_id")
+        messages         = state.get("messages") or []
+        user_msg         = self._last_human_content(messages)
+        selected_path_id = state.get("selected_path_id")
 
-    if not user_msg:
-        return {}
+        if not user_msg:
+            return {}
 
-    old_socrates_state = state.get("socrates_state") or SocratesChatBot.init_state()
+        old_socrates_state = state.get("socrates_state") or SocratesChatBot.init_state()
 
-    if selected_path_id is not None:
-        new_socrates_state = self._socrates_bot.confirm_path(old_socrates_state)
+        if selected_path_id is not None:
+            new_socrates_state = self._socrates_bot.confirm_path(old_socrates_state)
+            return OrchestratorState(
+                messages       = [AIMessage(content="路徑已確認，開始執行分析…")],
+                phase          = "path_confirmed",
+                socrates_state = new_socrates_state,
+            )
+
+        new_socrates_state = self._socrates_bot.process_message(old_socrates_state, user_msg)
+        reply_text = self._socrates_bot.get_last_reply(new_socrates_state)
+
         return OrchestratorState(
-            messages       = [AIMessage(content="路徑已確認，開始執行分析…")],
-            phase          = "path_confirmed",
+            messages       = [AIMessage(content=reply_text)],
+            phase          = "socratic",
             socrates_state = new_socrates_state,
         )
-
-    new_socrates_state = self._socrates_bot.process_message(old_socrates_state, user_msg)
-    reply_text = self._socrates_bot.get_last_reply(new_socrates_state)
-
-    return OrchestratorState(
-        messages       = [AIMessage(content=reply_text)],
-        phase          = "socratic",
-        socrates_state = new_socrates_state,
-    )
 
     # ------------------------------------------------------------------
     # Node: main_agent
@@ -182,22 +182,22 @@ class OrchestratorNodes:
     # ------------------------------------------------------------------
 
     async def _resolve_selected_path(
-    self, state, selected_rc_eid, selected_rc_label, selected_path_id,
-) -> Optional[Dict[str, Any]]:
-    """定位使用者選定的路徑，透過 coordinator 的 rcpath cache 取得。
-    這與前端 /graph/rc-paths/{eid} 走同一個 _rcpath_cache，
-    保證 path_id 定址空間一致。"""
-    if not selected_rc_eid or selected_path_id is None:
+        self, state, selected_rc_eid, selected_rc_label, selected_path_id,
+    ) -> Optional[Dict[str, Any]]:
+        """定位使用者選定的路徑，透過 coordinator 的 rcpath cache 取得。
+        這與前端 /graph/rc-paths/{eid} 走同一個 _rcpath_cache，
+        保證 path_id 定址空間一致。"""
+        if not selected_rc_eid or selected_path_id is None:
+            return None
+        raw = await self._coordinator.get_rcpath_cached_async(
+            selected_rc_eid, selected_rc_label, max_depth=6
+        )
+        for p in raw.get("paths", []):
+            if p.get("path_id") == selected_path_id:
+                return p
+        print(f"[OrchestratorNodes] path_id={selected_path_id} 在 "
+            f"rc_eid='{selected_rc_eid}' 的快取路徑中找不到")
         return None
-    raw = await self._coordinator.get_rcpath_cached_async(
-        selected_rc_eid, selected_rc_label, max_depth=6
-    )
-    for p in raw.get("paths", []):
-        if p.get("path_id") == selected_path_id:
-            return p
-    print(f"[OrchestratorNodes] path_id={selected_path_id} 在 "
-          f"rc_eid='{selected_rc_eid}' 的快取路徑中找不到")
-    return None
 
 
     def _load_skill(self, selected_path: Optional[Dict[str, Any]]):

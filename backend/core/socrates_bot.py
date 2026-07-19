@@ -145,36 +145,36 @@ class SocratesChatBot:
         )
 
     def process_message(self, state: ChatState, user_input: str) -> ChatState:
-    if state.get("phase") == ConversationPhase.PATH_CONFIRMED.value:
+        if state.get("phase") == ConversationPhase.PATH_CONFIRMED.value:
+            return state
+
+        state["messages"].append(HumanMessage(content=user_input))
+
+        grounding = self._build_candidate_grounding(state)
+        effective_prompt = self._build_effective_prompt(state, grounding)
+        prior_msgs = self._normalize_prior_messages(state.get("agent_messages") or [])
+
+        llm_with_tools = self._base_llm.bind_tools([self._concept_detail_tool])
+
+        graph_result = self._build_graph(llm_with_tools).invoke({
+            "messages": [SystemMessage(content=effective_prompt)]
+                        + prior_msgs
+                        + [HumanMessage(content=user_input)],
+        })
+
+        state["agent_messages"] = graph_result["messages"]
+
+        bot_resp    = self._parse_bot_response(graph_result["messages"])
+        ai_text     = bot_resp.get("ai_message", "")
+        new_intents = bot_resp.get("intent_types", [])
+        new_summary = bot_resp.get("context_summary", "")
+        if new_intents:
+            state["intent_types"] = new_intents
+        if new_summary:
+            state["context_summary"] = new_summary
+
+        state["messages"].append(AIMessage(content=ai_text))
         return state
-
-    state["messages"].append(HumanMessage(content=user_input))
-
-    grounding = self._build_candidate_grounding(state)
-    effective_prompt = self._build_effective_prompt(state, grounding)
-    prior_msgs = self._normalize_prior_messages(state.get("agent_messages") or [])
-
-    llm_with_tools = self._base_llm.bind_tools([self._concept_detail_tool])
-
-    graph_result = self._build_graph(llm_with_tools).invoke({
-        "messages": [SystemMessage(content=effective_prompt)]
-                    + prior_msgs
-                    + [HumanMessage(content=user_input)],
-    })
-
-    state["agent_messages"] = graph_result["messages"]
-
-    bot_resp    = self._parse_bot_response(graph_result["messages"])
-    ai_text     = bot_resp.get("ai_message", "")
-    new_intents = bot_resp.get("intent_types", [])
-    new_summary = bot_resp.get("context_summary", "")
-    if new_intents:
-        state["intent_types"] = new_intents
-    if new_summary:
-        state["context_summary"] = new_summary
-
-    state["messages"].append(AIMessage(content=ai_text))
-    return state
 
     def _build_candidate_grounding(self, state: ChatState) -> str:
         """用上一輪的 context_summary 查一次 top-k candidates，
@@ -323,30 +323,29 @@ class SocratesChatBot:
 
 
     def _make_concept_detail_tool(self) -> StructuredTool:
-    concept_retriever = self._concept_retriever
+        concept_retriever = self._concept_retriever
 
-    def retrieve_concept_detail(eid: str = "", rc_name: str = "") -> str:
-        """查詢指定 Concept 的詳細資訊(定義/機制/關鍵假設/功能/論文背景)。
-        若使用者訊息帶有「(eid: ...)」標記(代表在圖譜上明確點選過該節點)，
-        務必傳入該 eid 以確保精確查詢；只有在使用者純粹用文字描述、
-        沒有明確 eid 可用時，才退回用 rc_name 模糊比對。"""
-        if eid:
-            result = concept_retriever.retrieve_by_eid(eid)
-        else:
-            result = concept_retriever.retrieve(rc_name)
-        return json.dumps(result, ensure_ascii=False)
+        def retrieve_concept_detail(eid: str = "", rc_name: str = "") -> str:
+            """查詢指定 Concept 的詳細資訊(定義/機制/關鍵假設/功能/論文背景)。
+            若使用者訊息帶有「(eid: ...)」標記(代表在圖譜上明確點選過該節點)，
+            務必傳入該 eid 以確保精確查詢；只有在使用者純粹用文字描述、
+            沒有明確 eid 可用時，才退回用 rc_name 模糊比對。"""
+            if eid:
+                result = concept_retriever.retrieve_by_eid(eid)
+            else:
+                result = concept_retriever.retrieve(rc_name)
+            return json.dumps(result, ensure_ascii=False)
 
-    return StructuredTool.from_function(
-        func=retrieve_concept_detail,
-        name="retrieve_concept_detail",
-        description=(
-            "查詢指定 Concept 的詳細資訊：definition / mechanism / "
-            "key_assumptions / function（僅 RC 有值）/ 所屬論文的理論前提與模型約束。"
-            "優先傳入 eid（使用者訊息中帶有「(eid: ...)」標記時一定要帶），"
-            "查無 eid 才用 rc_name 模糊比對。"
-        ),
-    )
-
+        return StructuredTool.from_function(
+            func=retrieve_concept_detail,
+            name="retrieve_concept_detail",
+            description=(
+                "查詢指定 Concept 的詳細資訊：definition / mechanism / "
+                "key_assumptions / function（僅 RC 有值）/ 所屬論文的理論前提與模型約束。"
+                "優先傳入 eid（使用者訊息中帶有「(eid: ...)」標記時一定要帶），"
+                "查無 eid 才用 rc_name 模糊比對。"
+            ),
+        )
     # ------------------------------------------------------------------
     # JSON parsing helpers
     # ------------------------------------------------------------------

@@ -105,44 +105,44 @@ class ConceptDetailRetriever:
 
 
     def retrieve_by_eid(self, eid: str) -> Dict[str, Any]:
-    """依 elementId 精確查詢，供 UI 節點按鈕觸發時使用（eid 唯一確定，無需模糊比對）。"""
-    with self._driver.session() as session:
-        rows = session.run(
-            """
-            MATCH (c:Concept) WHERE elementId(c) = $eid
-            OPTIONAL MATCH (p:Paper)-[:PRODUCES]->(c)
-            RETURN
-                c.name             AS name,
-                c.definition       AS definition,
-                c.mechanism        AS mechanism,
-                c.key_assumptions  AS key_assumptions,
-                c.function         AS function,
-                c.analysis_types   AS analysis_types,
-                collect({
-                    title:       p.title,
-                    premises:    p.conceptual_premises,
-                    constraints: p.contextual_model_constraints
-                }) AS papers
-            LIMIT 1
-            """,
-            eid=eid,
-        ).data()
+        """依 elementId 精確查詢，供 UI 節點按鈕觸發時使用（eid 唯一確定，無需模糊比對）。"""
+        with self._driver.session() as session:
+            rows = session.run(
+                """
+                MATCH (c:Concept) WHERE elementId(c) = $eid
+                OPTIONAL MATCH (p:Paper)-[:PRODUCES]->(c)
+                RETURN
+                    c.name             AS name,
+                    c.definition       AS definition,
+                    c.mechanism        AS mechanism,
+                    c.key_assumptions  AS key_assumptions,
+                    c.function         AS function,
+                    c.analysis_types   AS analysis_types,
+                    collect({
+                        title:       p.title,
+                        premises:    p.conceptual_premises,
+                        constraints: p.contextual_model_constraints
+                    }) AS papers
+                LIMIT 1
+                """,
+                eid=eid,
+            ).data()
 
-    if not rows:
+        if not rows:
+            return {
+                "found": False, "rc_name": "", "eid": eid,
+                "message": f"找不到 eid={eid} 對應的 concept。",
+                "papers": [],
+            }
+
+        row    = rows[0]
+        papers = [
+            {"title": p["title"], "premises": p["premises"], "constraints": p["constraints"]}
+            for p in (row["papers"] or []) if p.get("title")
+        ]
         return {
-            "found": False, "rc_name": "", "eid": eid,
-            "message": f"找不到 eid={eid} 對應的 concept。",
-            "papers": [],
+            "found": True, "eid": eid, "rc_name": row["name"],
+            "definition": row["definition"], "mechanism": row["mechanism"],
+            "key_assumptions": row["key_assumptions"], "function": row["function"],
+            "analysis_types": row["analysis_types"] or [], "papers": papers,
         }
-
-    row    = rows[0]
-    papers = [
-        {"title": p["title"], "premises": p["premises"], "constraints": p["constraints"]}
-        for p in (row["papers"] or []) if p.get("title")
-    ]
-    return {
-        "found": True, "eid": eid, "rc_name": row["name"],
-        "definition": row["definition"], "mechanism": row["mechanism"],
-        "key_assumptions": row["key_assumptions"], "function": row["function"],
-        "analysis_types": row["analysis_types"] or [], "papers": papers,
-    }   
