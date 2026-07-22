@@ -68,7 +68,13 @@ from tools.knowledge import (
     make_trace_rc_logic_tool,
     make_read_skill_reference_tool,
 )
-from tools.skill_code import make_run_skill_code_tool
+from core.skill_sandbox import SandboxComputer
+from tools.skill_code import (
+    make_get_sandbox_file_tool,
+    make_run_bash_tool,
+    make_run_skill_code_tool,
+    make_write_file_tool,
+)
 
 import tools  # noqa: F401  確保所有工具副作用式註冊已執行
 
@@ -121,9 +127,10 @@ class MainAgent:
     def __init__(
         self,
         *,
-        model:               str = "gemini-2.5-flash",
-        api_key:             str = "",
-        sandbox_provisioner: Optional[SkillSandboxProvisioner] = None,
+        model:                str = "gemini-2.5-flash",
+        api_key:              str = "",
+        sandbox_provisioner:  Optional[SkillSandboxProvisioner] = None,
+        skill_outputs_bucket: str = "",
     ) -> None:
         self._model_name = model
         self._base_llm   = create_chat_google_generative_ai(
@@ -131,7 +138,8 @@ class MainAgent:
             temperature=0,
             api_key=api_key,
         )
-        self._sandbox_provisioner = sandbox_provisioner
+        self._sandbox_provisioner  = sandbox_provisioner
+        self._skill_outputs_bucket = skill_outputs_bucket
 
     # ------------------------------------------------------------------
     # Public API
@@ -319,12 +327,8 @@ class MainAgent:
         trace_hint = (
             "\n此外，你始終可使用 **trace_rc_logic** 工具查詢 concept 中的理論背景。"
         )
-        if skill and skill.has_functions:
-            trace_hint += (
-                "\n若需要執行上方列出的函式、進行數值運算、模擬或繪圖，"
-                "請呼叫 **run_skill_code** 工具，直接撰寫可執行的 Python 程式碼"
-                "（可直接 import 上方函式，不需自行處理路徑）。"
-            )
+        if skill and skill.has_functions and self._sandbox_provisioner is not None:
+            trace_hint += self._build_sandbox_tools_hint()
 
         reference_hint = self._build_reference_hint(skill)
         resolve_hint    = self._build_resolve_params_hint(skill)
@@ -432,19 +436,40 @@ class MainAgent:
         skill:          Optional["RCSkill"],
         sandbox_state:  dict,
     ) -> List[StructuredTool]:
+        langchain_tools: List[StructuredTool] = []   # ← 修正：搬到最上面，兩個分支都能安全 append
+
         if skill and skill.has_functions and skill.skill_dir is not None:
-            remote_root = f"/home/user/skills/{self._skill_slug(skill.rc_name)}"
-            langchain_tools: List[StructuredTool] = [
-                make_run_skill_code_tool(
+            if self._sandbox_provisioner is not None:
+                remote_root = f"/home/user/skills/{self._skill_slug(skill.rc_name)}"
+                computer = SandboxComputer(
                     provisioner=self._sandbox_provisioner,
                     sandbox_state=sandbox_state,
                     skill_dir=skill.skill_dir,
                     remote_root=remote_root,
-                    code_dirs=skill.code_dirs,   # ← 新增：告知 sandbox 要掛哪些目錄到 sys.path
+                    code_dirs=skill.code_dirs,
                 )
-            ]            
-        else:
+                langchain_tools.append(
+                    make_run_skill_code_tool(computer, skill.rc_name, skill.code_dirs)
+                )
+                langchain_tools.append(make_run_bash_tool(computer, skill.rc_name))
+                langchain_tools.append(make_write_file_tool(computer, skill.rc_name))
 
+                if self._skill_outputs_bucket:
+                    langchain_tools.append(
+                        make_get_sandbox_file_tool(
+                            computer, skill.rc_name, self._skill_outputs_bucket
+                        )
+                    )
+                else:
+                    print(f"[MainAgent] skill_outputs_bucket 未設定，"
+                          f"跳過 get_sandbox_file 工具（skill='{skill.rc_name}'）。")
+                # references 已隨 skill_dir 一起上傳進沙盒，run_bash/run_skill_code
+                # 內即可直接 cat/open 讀取，不需要額外的 host-side 工具。
+            else:
+                print(f"[MainAgent] skill '{skill.rc_name}' has_functions=True 但未設定 "
+                      f"sandbox_provisioner，跳過沙盒工具掛載（僅適用於完全不需要"
+                      f"程式碼執行能力的部署情境）。")
+        else:
             # 沒有 script → 沒有 sandbox，references 改由 host-side 工具直接讀本機檔案
             if skill and skill.has_references and skill.skill_dir is not None:
                 allowed_files = [r.name for r in skill.reference_paths]
@@ -452,18 +477,42 @@ class MainAgent:
                     make_read_skill_reference_tool(skill.skill_dir, allowed_files)
                 )
 
-        # resolve_params：只要有 skill_dir 就掛載（不判斷 manifest 存不存在，
-        # 有沒有 manifest 由工具被呼叫「當下」自己去讀檔案決定，見
-        # tools/params_resolver.py 的說明）。
+        # resolve_params：只要有 skill_dir 就掛載
         if skill and skill.skill_dir is not None:
             langchain_tools.append(make_resolve_params_tool(skill.skill_dir))
 
-        # retrieve_param：與 skill/manifest 完全無關的一般查詢工具，
-        # 無條件掛載（跟 trace_rc_logic 同一層級）。
+        # retrieve_param：與 skill/manifest 完全無關的一般查詢工具
         langchain_tools.append(retrieve_param)
 
         langchain_tools.append(make_trace_rc_logic_tool())
         return langchain_tools
+
+
+    # ------------------------------------------------------------------
+    # Sandbox 工具提示（新增，供 _build_system_prompt 呼叫）
+    # ------------------------------------------------------------------
+
+    def _build_sandbox_tools_hint(self) -> str:
+        hint = (
+            "\n此 Skill 已掛載沙盒環境，以下工具彼此共用同一個沙盒："
+            "\n- **run_skill_code**：執行 Python，適合數值運算、模擬、繪圖，"
+            "跨多次呼叫保留變數狀態。"
+            "\n- **run_bash**：執行 shell 指令，適合安裝套件、瀏覽/搜尋檔案。"
+            "每次呼叫是獨立 process，不與 run_skill_code 共享變數，"
+            "不適合用來做數值運算。"
+            "\n- **write_file**：建立/覆寫沙盒內檔案。內容含特殊字元、引號、"
+            "或大量非 ASCII 文字時，優先用此工具，不要在 run_bash 裡用 "
+            "heredoc（cat > file << EOF）寫檔，容易轉義出錯。"
+        )
+        if self._skill_outputs_bucket:
+            hint += (
+                "\n- **get_sandbox_file**：把 run_skill_code 產出的檔案"
+                "（例如圖表，先存到 outputs/ 目錄）取出並取得可下載連結，"
+                "取得連結後直接附在回覆中給使用者。"
+            )
+        return hint
+
+
 
     @staticmethod
     def _skill_slug(rc_name: str) -> str:

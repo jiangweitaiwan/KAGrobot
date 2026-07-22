@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional, TypeVar
 
 from e2b_code_interpreter import Sandbox
 
@@ -123,6 +123,39 @@ class SkillSandboxProvisioner:
             results = [str(r) for r in execution.results],
         )
 
+    def run_command(
+        self,
+        sandbox_id: str,
+        command:    str,
+        cwd:        Optional[str] = None,
+    ) -> SandboxRunResult:
+        """在既有 sandbox 內執行 shell 指令，回傳標準化結果。
+
+        注意：commands.run 與 run_code 是兩條不同機制（前者每次獨立
+        process，後者是有狀態 Jupyter kernel），彼此不共享 shell 狀態，
+        因此每次呼叫都需要顯式傳入 cwd，不能依賴「上次 cd 過」的假設。
+        """
+        sbx    = Sandbox.connect(sandbox_id, api_key=self._api_key)
+        result = sbx.commands.run(command, cwd=cwd, timeout=0)
+        return SandboxRunResult(
+            stdout  = result.stdout or "",
+            stderr  = result.stderr or "",
+            error   = None if result.exit_code == 0 else f"exit_code={result.exit_code}",
+            results = [],
+        )
+
+    def write_file(self, sandbox_id: str, remote_path: str, content: str) -> None:
+        """在既有 sandbox 內建立/覆寫單一檔案（上層目錄不存在會自動建立）。"""
+        sbx = Sandbox.connect(sandbox_id, api_key=self._api_key)
+        sbx.files.write(remote_path, content)
+
+    def read_file(self, sandbox_id: str, remote_path: str) -> bytes:
+        """從既有 sandbox 內讀出檔案原始內容（bytes）。"""
+        sbx = Sandbox.connect(sandbox_id, api_key=self._api_key)
+        return bytes(sbx.files.read(remote_path, format="bytes"))
+
+
+
     # ── Private ──────────────────────────────────────────────
 
 
@@ -168,3 +201,138 @@ class SkillSandboxProvisioner:
             except Exception as exc:
                 print(f"[SkillSandboxProvisioner] kill failed "
                     f"sandbox={sandbox_id}: {exc}")                
+
+
+# ══════════════════════════════════════════════════════════════
+# SandboxComputer — 單一 skill session 的沙盒執行門面
+# ══════════════════════════════════════════════════════════════
+
+import posixpath
+
+
+_T = TypeVar("_T")
+
+
+class SandboxPathError(ValueError):
+    """write_file 傳入越界路徑（跳出 remote_root）時拋出。"""
+
+
+class SandboxComputer:
+    """單一 skill session 的沙盒執行門面。
+
+    由 MainAgent._build_tools() 每次 chat() 呼叫建立一個實例，包住
+    sandbox_state（mutable dict，跨工具共享、chat() 結束後讀出寫回
+    OrchestratorState.skill_sandbox_id）。run_skill_code / run_bash /
+    write_file / get_sandbox_file 四個工具的工廠函數皆透過此物件操作，
+    確保「lazy create、cwd/sys.path 設置、連線失敗重置」這三件事只有
+    一份實作，不會在四個工具的 closure 裡各自複製一次而逐漸走鐘。
+
+    Parameters
+    ----------
+    provisioner   : SkillSandboxProvisioner（app 級單例，e2b 綁定層）
+    sandbox_state : {"id": Optional[str]}
+    skill_dir     : 本地已解壓的 skill 根目錄（RCSkill.skill_dir）
+    remote_root   : sandbox 內此 skill 的根目錄
+    code_dirs     : SkillLoader 掃描到的相對目錄清單（例如 ["scripts"]），
+                    run_python 時逐一加入 sys.path；"." 已由 remote_root
+                    本身涵蓋，會被過濾掉
+    """
+
+    def __init__(
+        self,
+        provisioner:   SkillSandboxProvisioner,
+        sandbox_state: dict,
+        skill_dir:     Path,
+        remote_root:   str,
+        code_dirs:     Optional[List[str]] = None,
+    ) -> None:
+        self._provisioner   = provisioner
+        self._sandbox_state = sandbox_state
+        self._skill_dir     = skill_dir
+        self._remote_root   = remote_root.rstrip("/")
+        self._extra_paths   = [d for d in (code_dirs or []) if d and d != "."]
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def run_python(self, code: str) -> SandboxRunResult:
+        """以 Python 執行程式碼（有狀態，跨呼叫保留變數）。
+
+        自動處理 sys.path（remote_root 本身 + code_dirs）與 cwd，
+        呼叫端只需要提供業務邏輯本身的程式碼。
+        """
+        path_setup = "".join(
+            f"sys.path.insert(0, '{self._remote_root}/{d}')\n"
+            for d in self._extra_paths
+        )
+        full_code = (
+            f"import sys, os\n"
+            f"sys.path.insert(0, '{self._remote_root}')\n"
+            f"{path_setup}"
+            f"os.chdir('{self._remote_root}')\n"
+            f"{code}"
+        )
+        return self._run(lambda sid: self._provisioner.run_code(sid, full_code))
+
+    def run_bash(self, command: str) -> SandboxRunResult:
+        """執行 shell 指令（無狀態，每次獨立 process，不與 run_python 共享狀態）。
+
+        用於系統操作、pip install、檔案瀏覽等；數值運算仍應走 run_python。
+        """
+        return self._run(
+            lambda sid: self._provisioner.run_command(sid, command, cwd=self._remote_root)
+        )
+
+    def write_file(self, rel_path: str, content: str) -> None:
+        target = self._resolve_path(rel_path)
+        self._run(lambda sid: self._provisioner.write_file(sid, target, content))
+
+    def get_file(self, rel_path: str) -> bytes:
+        """讀出 sandbox 內檔案原始內容，rel_path 相對於 remote_root。"""
+        target = self._resolve_path(rel_path)
+        return self._run(lambda sid: self._provisioner.read_file(sid, target))
+
+    # ------------------------------------------------------------------
+    # Private — lazy create / 錯誤重置（四個 public 方法共用）
+    # ------------------------------------------------------------------
+
+    def _ensure(self) -> str:
+        if self._sandbox_state["id"] is None:
+            self._sandbox_state["id"] = self._provisioner.create(
+                self._skill_dir, self._remote_root
+            )
+        return self._sandbox_state["id"]
+
+    def _run(self, fn: Callable[[str], _T]) -> _T:
+        """統一包裝：確保 sandbox 存在 → 執行 → 連線失敗時重置狀態。
+
+        重置後不在此處重試；由呼叫端（工具層）決定是否讓 LLM 自行
+        重新呼叫一次，避免隱性重試掩蓋真正的錯誤原因。
+        """
+        sandbox_id = self._ensure()
+        try:
+            return fn(sandbox_id)
+        except Exception:
+            self._sandbox_state["id"] = None
+            raise
+
+   
+    # core/skill_sandbox.py — SandboxComputer 內修改
+
+    @property
+    def sandbox_id(self) -> Optional[str]:
+        """目前綁定的 sandbox_id（尚未建立時為 None）。"""
+        return self._sandbox_state["id"]
+
+
+
+    def _resolve_path(self, rel_path: str) -> str:
+        """組出絕對路徑並確認落在 remote_root 內，防止越界讀寫。"""
+        candidate = posixpath.normpath(posixpath.join(self._remote_root, rel_path))
+        if candidate != self._remote_root and not candidate.startswith(self._remote_root + "/"):
+            raise SandboxPathError(
+                f"路徑越界：'{rel_path}' 解析後為 '{candidate}'，"
+                f"須落在 '{self._remote_root}/' 之內"
+            )
+        return candidate

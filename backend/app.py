@@ -98,6 +98,7 @@ async def lifespan(app: FastAPI):
     main_agent = MainAgent(
         model=s.main_agent_model,
         sandbox_provisioner=sandbox_provisioner,
+        skill_outputs_bucket=s.skill_outputs_bucket_name,   # ← 新增
     )
 
     skill_loader = SkillLoader(
