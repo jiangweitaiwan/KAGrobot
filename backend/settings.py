@@ -92,6 +92,12 @@ class Settings(BaseSettings):
         description="Path to results_dict.pkl for GlobalBrain layout",
     )    
 
+    skill_outputs_bucket_name: str = Field(
+        default = "skill_outputs_bucket",
+        description = "GCS bucket for sandbox output"
+
+    )
+
     def resolved_sbert_paths(self, *, base_dir: Optional[Path] = None) -> tuple[str, str]:
         """Return (model_path, tokenizer_dir) with sane defaults."""
         bd = base_dir or Path(".").resolve()
