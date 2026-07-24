@@ -11,9 +11,7 @@ data-retriever 生態系角色，但整合進 KAGrobot 後端，
      （不透過額外一次 LLM tool call，省一次來回，
      也不會因為 LLM 忘記呼叫而漏掉 tool_retrieval）。
 
-  2. retrieve_param（LangChain tool）：掛給 LLM 直接呼叫，
-     用於一般對話中查詢單一經濟數據（不限於任何 Skill 的
-     params_manifest.yaml），例如使用者臨時問「日本現在利率多少」。
+
 
 新增資料源步驟見 tools/connectors/__init__.py 的說明。
 """
@@ -110,4 +108,4 @@ def retrieve_param(retriever_id: str, kwargs_json: str = "{}") -> str:
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
-register_langchain_tool("retrieve_param", retrieve_param)
+

@@ -53,21 +53,7 @@ from google.cloud import storage  # ── 引入 GCS SDK ──
 # Dataclasses
 # ══════════════════════════════════════════════════════════════
 
-@dataclass
-class SkillFunctionSpec:
-    """SKILL.md frontmatter 中單一函式的描述（選用，純文件用途，不再動態 import）。
 
-    此函式實際存在於 skill_dir 底下的 script 檔案中，
-    由 LLM 透過 run_skill_code 工具在 sandbox 內自行 import 呼叫，
-    此處只用來組裝 prompt_context 中的說明文字。
-    frontmatter 未宣告時，function_specs 為空列表，
-    此時改用目錄掃描結果（RCSkill.code_dirs）產生通用提示，
-    不影響是否掛載 sandbox 的判斷。
-    """
-    name:        str   # 顯示名稱（供 prompt 說明用，預設等同 function）
-    script:      str   # 相對於 skill_dir 的路徑
-    function:    str   # 函數名稱
-    description: str = ""
 
 
 @dataclass
@@ -87,7 +73,6 @@ class RCSkill:
     """
     rc_name:         str
     prompt_context:  str                                 # 注入 system prompt 的動態區塊（不含 references 全文）
-    function_specs:  List[SkillFunctionSpec] = field(default_factory=list)  # frontmatter 選用宣告，僅供更精細的 prompt 說明
     reference_paths: List[ReferenceEntry]    = field(default_factory=list)  # references 索引（lazy）
     code_dirs:       List[str]               = field(default_factory=list)  # 新增：含 .py 檔案的一級子目錄清單（相對 skill_dir），
                                                                               # "." 代表根目錄本身，供 sandbox 掛載 sys.path 使用
@@ -293,77 +278,32 @@ def _scan_references(skill_dir: Path) -> List[ReferenceEntry]:
     return entries
 
 
-def _list_references(skill_dir: Path, ref_paths: List[str]) -> List[ReferenceEntry]:
-    """向後相容 fallback：依 frontmatter 宣告的檔名清單列出 references。
 
-    僅在 _scan_references() 掃描為空、但 frontmatter 仍有宣告時使用，
-    處理 references 檔案不在 references/ 目錄底下的邊界情況。
+def _build_resource_index_text(
+    code_dirs:  List[str],
+    references: List[ReferenceEntry],
+) -> str:
+    """列出此 Skill 附帶的資源（純 inventory：只說「有什麼」，
+    不描述存取方式或工具名——是否掛載沙盒、怎麼存取，
+    由 MainAgent 依實際 deployment 狀態決定，避免兩邊語意打架。
     """
-    entries: List[ReferenceEntry] = []
-    for ref_rel in ref_paths:
-        ref_path = skill_dir / ref_rel
-        if not ref_path.exists():
-            print(f"[SkillLoader] reference not found: {ref_path}")
-            continue
-        entries.append(ReferenceEntry(rel_path=ref_rel, name=ref_path.name))
-    return entries
-
-
-def _build_reference_index_text(entries: List[ReferenceEntry]) -> str:
-    """將 reference 清單格式化為索引文字，附加在 prompt_context 末尾。"""
-    if not entries:
+    if not code_dirs and not references:
         return ""
-    lines = "\n".join(f"- {e.name}" for e in entries)
-    return (
-        "\n\n## 可查閱的參考資料\n\n"
-        f"{lines}\n\n"
-        "如需查閱以上任一份文件的完整內容，請呼叫 read_skill_reference 工具。"
-    )
+
+    lines = ["\n\n## 此 Skill 附帶的資源"]
+
+    if code_dirs:
+        dir_names = [d for d in code_dirs if d != "."]
+        dir_hint  = "、".join(f"`{d}/`" for d in dir_names) if dir_names else "skill 根目錄"
+        lines.append(f"- 程式碼：{dir_hint}")
+
+    if references:
+        file_list = "、".join(f"`{r.name}`" for r in references)
+        lines.append(f"- 參考文件（references/）：{file_list}")
+
+    return "\n".join(lines)
 
 
-# ══════════════════════════════════════════════════════════════
-# Functions — frontmatter 精細宣告（選用加分項）
-# ══════════════════════════════════════════════════════════════
-
-def _build_function_index_text(specs: List[SkillFunctionSpec]) -> str:
-    """將 frontmatter 宣告的函式清單格式化為索引文字，附加在 prompt_context 末尾。
-
-    此清單只用於告知 LLM「sandbox 內有哪些函式可以 import 呼叫」，
-    實際執行由 run_skill_code 工具在 e2b sandbox 內完成
-    （見 tools/skill_code.py）。frontmatter 未宣告時改用
-    _build_generic_sandbox_hint()。
-    """
-    if not specs:
-        return ""
-    lines = "\n".join(
-        f"- `{s.function}`（{s.script}） — {s.description}" if s.description
-        else f"- `{s.function}`（{s.script}）"
-        for s in specs
-    )
-    return (
-        "\n\n## 此 Skill 沙盒內可直接 import 的函式\n\n"
-        f"{lines}\n\n"
-        "呼叫 run_skill_code 執行程式碼時，這些模組已可直接 import 使用"
-        "（不需自行處理 sys.path）。"
-    )
-
-
-def _build_generic_sandbox_hint(code_dirs: List[str]) -> str:
-    """frontmatter 未宣告 tools 時的通用 sandbox 提示（新增）。
-
-    此時 prompt_context 已包含 SKILL.md body 全文（通常含使用範例與
-    檔案結構說明），LLM 可直接依該說明撰寫程式碼；這裡只需告知
-    「整個目錄已掛載，且相關程式碼目錄已在 Python path 上」，
-    不需要重複列出精確函式清單。
-    """
-    dir_names = [d for d in code_dirs if d != "."]
-    dir_hint  = "、".join(f"`{d}/`" for d in dir_names) if dir_names else "skill 根目錄"
-    return (
-        "\n\n## Sandbox 使用提示\n\n"
-        f"此 Skill 的完整目錄（含 {dir_hint} 等）已掛載到沙盒環境，"
-        "其中的程式碼目錄已加入 Python path，可依照上方說明直接 import "
-        "對應模組或執行程式碼，不需要額外處理路徑設定。"
-    )
 
 
 # ══════════════════════════════════════════════════════════════
@@ -480,53 +420,24 @@ class SkillLoader:
             print(f"[SkillLoader] failed to read SKILL.md for '{rc_name}': {exc}")
             return None
 
-        # ── references：優先掃描實際目錄，frontmatter 宣告清單僅作向後相容 fallback ──
+        # ── references：直接掃描實際目錄 ──
         reference_entries = _scan_references(local_skill_dir)
-        if not reference_entries and frontmatter.get("references"):
-            ref_paths_raw = [
-                r.get("value", r) if isinstance(r, dict) else r
-                for r in frontmatter.get("references", [])
-            ]
-            reference_entries = _list_references(local_skill_dir, ref_paths_raw)
 
-        # ── functions：優先掃描目錄結構，決定是否需要掛載 sandbox ──
+        # ── functions：掃描目錄結構，決定是否需要掛載 sandbox ──
         code_dirs = _scan_code_dirs(local_skill_dir)
 
-        # frontmatter 的 tools: 宣告若存在，仍解析出來，
-        # 用於在 prompt 中提供更精細的函式說明（選用加分項，
-        # 不影響 has_functions／是否掛載 sandbox 的判斷）
-        function_specs: List[SkillFunctionSpec] = []
-        for t in frontmatter.get("tools", []):
-            if not isinstance(t, dict):
-                continue
-            if not t.get("script") or not t.get("function"):
-                continue
-            function_specs.append(SkillFunctionSpec(
-                name=t.get("name", t["function"]),
-                script=t["script"],
-                function=t["function"],
-                description=t.get("description", ""),
-            ))
-
-        prompt_context = body
-        if function_specs:
-            prompt_context += _build_function_index_text(function_specs)
-        elif code_dirs:
-            prompt_context += _build_generic_sandbox_hint(code_dirs)
-        prompt_context += _build_reference_index_text(reference_entries)
+        prompt_context = body + _build_resource_index_text(code_dirs, reference_entries)
 
         actual_rc_name = frontmatter.get("rc_name", rc_name)
 
         print(f"[SkillLoader] successfully loaded from GCS '{actual_rc_name}': "
               f"code_dirs={code_dirs}, "
-              f"{len(function_specs)} declared functions, "
               f"{len(reference_entries)} references, "
               f"{len(prompt_context)} chars of context")
 
         return RCSkill(
             rc_name=actual_rc_name,
             prompt_context=prompt_context,
-            function_specs=function_specs,
             reference_paths=reference_entries,
             code_dirs=code_dirs,
             skill_dir=local_skill_dir,

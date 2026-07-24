@@ -61,7 +61,6 @@ from core.llm_retry  import call_with_retry
 from core.registry   import AGENTS_REGISTRY, TOOLS_REGISTRY, collect_tools_with_deps
 from core.skill_sandbox import SkillSandboxProvisioner
 from tools.base      import _TOOL_IMPLEMENTATIONS
-from tools.data_retriever import retrieve_param
 from tools.params_resolver import make_resolve_params_tool
 from tools.knowledge import (
     make_knowledge_qa_tool,
@@ -291,13 +290,13 @@ class MainAgent:
         socrates_state: ChatState,
         skill:          Optional["RCSkill"],
     ) -> str:
-        query = socrates_state.get("query") or "（未提供）"
+        summary = socrates_state.get("context_summary") or "（未提供）"
 
         need_section = textwrap.dedent(f"""\
             ══════════════════════════════
             使用者需求
             ══════════════════════════════
-            {query}
+            {summary}
         """)
 
         skill_section = ""
@@ -310,28 +309,7 @@ class MainAgent:
             {skill.prompt_context.strip()}
             """)
 
-        if skill and skill.has_functions:
-            tool_lines  = self._tool_lines_from_skill(skill)
-            tool_header = "此 Skill 提供的分析函式（透過 run_skill_code 呼叫）"
-        else:
-            tool_lines  = self._fallback_tool_lines(socrates_state)
-            tool_header = "可用工具"
-
-        tool_section = (
-            f"══════════════════════════════\n"
-            f"{tool_header}\n"
-            f"══════════════════════════════\n"
-            + ("\n".join(tool_lines) if tool_lines else "（無額外工具）")
-        )
-
-        trace_hint = (
-            "\n此外，你始終可使用 **trace_rc_logic** 工具查詢 concept 中的理論背景。"
-        )
-        if skill and skill.has_functions and self._sandbox_provisioner is not None:
-            trace_hint += self._build_sandbox_tools_hint()
-
-        reference_hint = self._build_reference_hint(skill)
-        resolve_hint    = self._build_resolve_params_hint(skill)
+        tool_section = self._build_tool_usage_section(skill)
 
         return (
             _BASE_SYSTEM_PROMPT
@@ -340,87 +318,85 @@ class MainAgent:
             + skill_section
             + "\n"
             + tool_section
-            + trace_hint
-            + reference_hint
-            + resolve_hint
         )
 
-    @staticmethod
-    def _build_reference_hint(skill: Optional["RCSkill"]) -> str:
-        if not skill or not skill.has_references:
-            return ""
-
-        file_list = "、".join(f"`{r.name}`" for r in skill.reference_paths)
-
-        if skill.has_functions:
-            # references 已隨 skill_dir 一起上傳進沙盒，不需要額外的 host-side 工具
-            return (
-                f"\n若上方「分析方法」說明中提及需要查閱的補充文件"
-                f"（目前此 Skill 提供：{file_list}），"
-                f"這些檔案已放在沙盒內的 references/ 目錄，"
-                f"可在 **run_skill_code** 中直接讀取，"
-                f"例如 `print(open('references/檔名').read())`。"
-                f"若當前需求不需要更多細節，則不必主動讀取。"
-            )
-
-        return (
-            f"\n若上方「分析方法」說明中提及需要查閱的補充文件"
-            f"（目前此 Skill 提供：{file_list}），"
-            f"可呼叫 **read_skill_reference** 工具，傳入確切檔名讀取完整內容。"
-            f"若當前需求不需要更多細節，則不必主動呼叫。"
-        )
-
-    @staticmethod
-    def _build_resolve_params_hint(skill: Optional["RCSkill"]) -> str:
-        """resolve_params / retrieve_param 的使用規則說明。
-
-        resolve_params 只在有 skill_dir 時掛載（見 _build_tools），
-        故此提示也只在該情境下加入；retrieve_param 無條件掛載，
-        提示文字放在最後一句、不受 skill 是否存在影響。
+    def _build_tool_usage_section(self, skill: Optional["RCSkill"]) -> str:
+        """組裝『可用工具』區塊，唯一負責解釋通用工具怎麼用、彼此怎麼分工。
+        Skill 帶了哪些資源（code_dirs / references）已由 SkillLoader
+        列在上方「分析方法」區塊，這裡只講存取方式。
         """
-        resolve_part = ""
-        if skill and skill.skill_dir is not None:
-            resolve_part = (
-                "\n若此 Skill 有提供 params_manifest.yaml，"
-                "執行模型前應先呼叫 **resolve_params** 工具，"
-                "傳入你已從對話中確認的參數，取得 resolved／provenance／unresolved。"
-                "若 unresolved 非空，先跟使用者確認清單裡的問題，"
-                "答案齊全後再重新呼叫一次確認 unresolved 為空，"
-                "才可以呼叫 run_skill_code 執行模型。"
-                "回覆時若 provenance 顯示 tool_retrieval 失敗改用 "
-                "calibrated_default（見 _fallback_log），"
-                "或某個數值超出 valid_range 而附上 warning，"
-                "務必向使用者說明數據來源、時效性與可靠性風險，"
-                "不要讓使用者誤以為是即時或無風險的數據。"
-                "若此 Skill 未提供 manifest，呼叫 resolve_params 會直接說明，"
-                "不影響你照舊自行判斷參數並執行 run_skill_code。"
-            )
+        header = "══════════════════════════════\n可用工具\n══════════════════════════════"
+        parts: List[str] = [header]
 
-        retrieve_part = (
-            "\n你也可以隨時呼叫 **retrieve_param** 查詢單一經濟數據序列"
-            "（FRED / World Bank / OECD / BEA，不限於此 Skill 的 manifest），"
-            "例如使用者臨時想知道其他國家或指標的現況。"
+        if skill and skill.has_functions and self._sandbox_provisioner is not None:
+            parts.append(self._sandbox_tools_description())
+        elif skill and skill.has_functions:
+            parts.append(
+                "（此 Skill 含程式碼，但目前未設定沙盒環境，無法執行——"
+                "僅能依「分析方法」說明自行推理，不要嘗試呼叫沙盒工具。）"
+            )
+        elif skill and skill.has_references:
+            parts.append(self._read_skill_reference_description())
+        else:
+            parts.append("（此對話目前無額外分析工具。）")
+
+        parts.append(
+            "\n你也隨時可呼叫 **trace_rc_logic** 工具查詢 concept 的理論背景。"
         )
 
-        return resolve_part + retrieve_part
+        if skill and skill.skill_dir is not None:
+            parts.append(self._resolve_params_description())
+
+        return "\n".join(parts)
+
+    def _sandbox_tools_description(self) -> str:
+        desc = (
+            "此 Skill 已掛載沙盒環境（含上方「附帶的資源」列出的程式碼與參考文件），"
+            "以下工具共用同一個沙盒：\n"
+            "- **run_skill_code**：執行 Python，適合數值運算、模擬、繪圖，"
+            "跨多次呼叫保留變數狀態。資源清單中的程式碼目錄已加入 Python path，"
+            "可直接 import 對應模組；references 檔案可用 "
+            "`open('references/檔名').read()` 直接讀取。\n"
+            "- **run_bash**：執行 shell 指令，適合安裝套件、瀏覽/搜尋檔案。"
+            "每次呼叫是獨立 process，不與 run_skill_code 共享變數，"
+            "不適合用來做數值運算。\n"
+            "- **write_file**：建立/覆寫沙盒內檔案。內容含特殊字元、引號、"
+            "或大量非 ASCII 文字時，優先用此工具，不要在 run_bash 裡用 "
+            "heredoc（cat > file << EOF）寫檔，容易轉義出錯。"
+        )
+        if self._skill_outputs_bucket:
+            desc += (
+                "\n- **get_sandbox_file**：把 run_skill_code 產出的檔案"
+                "（例如圖表，先存到 outputs/ 目錄）取出並取得可下載連結，"
+                "取得連結後直接附在回覆中給使用者。"
+            )
+        return desc
 
     @staticmethod
-    def _tool_lines_from_skill(skill: "RCSkill") -> List[str]:
-        if skill.function_specs:
-            return [
-                f"{i}. **{spec.function}**（{spec.script}） — {spec.description}"
-                for i, spec in enumerate(skill.function_specs, 1)
-            ]
-        # frontmatter 未宣告個別函式時，實際函式清單已在
-        # skill.prompt_context（SKILL.md body + sandbox 使用提示）中說明，
-        # 這裡只需提示程式碼實際位置即可。
-        dirs = [d for d in skill.code_dirs if d != "."]
-        dir_hint = "、".join(f"`{d}/`" for d in dirs) if dirs else "skill 根目錄"
-        return [
-            f"（此 Skill 未在 frontmatter 逐一宣告函式，"
-            f"完整程式碼已掛載於 {dir_hint}，"
-            f"請參考上方「分析方法」說明中的使用範例與檔案結構。）"
-        ]
+    def _read_skill_reference_description() -> str:
+        return (
+            "此 Skill 提供補充參考文件（見上方「附帶的資源」），"
+            "可呼叫 **read_skill_reference** 工具，傳入確切檔名讀取完整內容。"
+            "若當前需求不需要更多細節，則不必主動呼叫。"
+        )
+
+    @staticmethod
+    def _resolve_params_description() -> str:
+        return (
+            "\n若此 Skill 有提供 params_manifest.yaml，"
+            "執行模型前應先呼叫 **resolve_params** 工具，"
+            "傳入你已從對話中確認的參數，取得 resolved／provenance／unresolved。"
+            "若 unresolved 非空，先跟使用者確認清單裡的問題，"
+            "答案齊全後再重新呼叫一次確認 unresolved 為空，"
+            "才可以呼叫 run_skill_code 執行模型。"
+            "回覆時若 provenance 顯示 tool_retrieval 失敗改用 "
+            "calibrated_default（見 _fallback_log），"
+            "或某個數值超出 valid_range 而附上 warning，"
+            "務必向使用者說明數據來源、時效性與可靠性風險，"
+            "不要讓使用者誤以為是即時或無風險的數據。"
+            "若此 Skill 未提供 manifest，呼叫 resolve_params 會直接說明，"
+            "不影響你照舊自行判斷參數並執行 run_skill_code。"
+        )
 
 
 
@@ -481,36 +457,14 @@ class MainAgent:
         if skill and skill.skill_dir is not None:
             langchain_tools.append(make_resolve_params_tool(skill.skill_dir))
 
-        # retrieve_param：與 skill/manifest 完全無關的一般查詢工具
-        langchain_tools.append(retrieve_param)
 
         langchain_tools.append(make_trace_rc_logic_tool())
         return langchain_tools
 
 
-    # ------------------------------------------------------------------
-    # Sandbox 工具提示（新增，供 _build_system_prompt 呼叫）
-    # ------------------------------------------------------------------
 
-    def _build_sandbox_tools_hint(self) -> str:
-        hint = (
-            "\n此 Skill 已掛載沙盒環境，以下工具彼此共用同一個沙盒："
-            "\n- **run_skill_code**：執行 Python，適合數值運算、模擬、繪圖，"
-            "跨多次呼叫保留變數狀態。"
-            "\n- **run_bash**：執行 shell 指令，適合安裝套件、瀏覽/搜尋檔案。"
-            "每次呼叫是獨立 process，不與 run_skill_code 共享變數，"
-            "不適合用來做數值運算。"
-            "\n- **write_file**：建立/覆寫沙盒內檔案。內容含特殊字元、引號、"
-            "或大量非 ASCII 文字時，優先用此工具，不要在 run_bash 裡用 "
-            "heredoc（cat > file << EOF）寫檔，容易轉義出錯。"
-        )
-        if self._skill_outputs_bucket:
-            hint += (
-                "\n- **get_sandbox_file**：把 run_skill_code 產出的檔案"
-                "（例如圖表，先存到 outputs/ 目錄）取出並取得可下載連結，"
-                "取得連結後直接附在回覆中給使用者。"
-            )
-        return hint
+
+
 
 
 
