@@ -208,8 +208,8 @@ class OrchestratorNodes:
             return None
         skill = self._skill_loader.load(final_rc_name)
         if skill:
-            print(f"[OrchestratorNodes] skill loaded: '{skill.rc_name}' "
-                  f"(functions={len(skill.function_specs)})")   # ← skill.tools 改成 skill.function_specs
+            print(f"[OrchestratorNodes] skill loaded: '{skill.rc_name}' ")
+                    
         else:
             print(f"[OrchestratorNodes] no skill for rc='{final_rc_name}', "
                   f"using fallback")
