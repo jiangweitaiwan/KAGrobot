@@ -108,7 +108,7 @@ class Settings(BaseSettings):
     # --- e2b sandbox (per-skill 隔離執行環境) ---
     e2b_api_key: str = Field(default="", alias="E2B_API_KEY")
     e2b_skill_template: str = Field(
-        default="kagrobot-skill-base", alias="E2B_SKILL_TEMPLATE"
+        default="code-interpreter-v1", alias="E2B_SKILL_TEMPLATE"
     )
 
     rc_ranking_pool_size: int = Field(
