@@ -26,10 +26,10 @@ Skill 注入：
   的 manifest。
 
 Sandbox 生命週期：
-  - Sandbox 採 lazy 建立：只有在 LLM 第一次真的呼叫 run_skill_code 時才建立，
+  - Sandbox 採 lazy 建立：只有在 LLM 第一次真的呼叫沙盒工具時才建立，
     由 SkillSandboxProvisioner.create() 完成（見 core/skill_sandbox.py）。
-  - 每次 chat() 呼叫開頭，若傳入既有 sandbox_id，會先嘗試 keep_alive() 續命；
-    續命失敗（sandbox 已過期）視同不存在，交由下一次 run_skill_code 呼叫時重建。
+  - 續命併入第一次工具操作的 connect(timeout=...)；單輪 chat() 內快取
+    Sandbox 連線，避免反覆 reconnect。sandbox 明確不可用時才清空 id 並重建。
   - sandbox_id 本身不由 MainAgent 持有狀態，而是每次 chat() 回傳最新值，
     由呼叫端（OrchestratorNodes）寫回 OrchestratorState.skill_sandbox_id 逐 session 保存。
 
@@ -180,16 +180,10 @@ class MainAgent:
                 f"目前為 {socrates_state.get('phase')}"
             )
 
-        # 每次呼叫都幫既有 sandbox 續命；續命失敗（sandbox 已過期）
-        # 視同不存在，交由 run_skill_code 第一次被呼叫時 lazy 重建。
-        if sandbox_id and self._sandbox_provisioner:
-            if not self._sandbox_provisioner.keep_alive(sandbox_id):
-                print(f"[MainAgent] sandbox '{sandbox_id}' keep_alive failed, "
-                      f"will lazily recreate on next run_skill_code call.")
-                sandbox_id = None
-
-        # 可變容器：run_skill_code 內部第一次執行時會寫入新建立的 sandbox_id，
+        # 可變容器：沙盒工具第一次執行時會寫入／更新 sandbox_id，
         # chat() 結束後從這裡讀出回傳給呼叫端保存。
+        # 續命與探活改由 SandboxComputer 在實際操作時 connect(timeout=...) 完成，
+        # 不再於 chat() 開頭額外打一輪 keep_alive。
         sandbox_state: dict = {"id": sandbox_id}
 
         system_prompt = self._build_system_prompt(socrates_state, skill)

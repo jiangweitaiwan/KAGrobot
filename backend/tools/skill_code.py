@@ -3,7 +3,7 @@
 
 四個工具（run_skill_code / run_bash / write_file / get_sandbox_file）
 共用同一個 SandboxComputer 實例（見 core/skill_sandbox.py），確保
-lazy create、cwd/sys.path 設置、連線失敗重置三件事只有一份實作。
+lazy create、連線快取、僅在 sandbox 不可用時重置三件事只有一份實作。
 
 分工原則（寫進各工具 description，供 LLM 判斷該用哪個）：
   - run_skill_code : 數值運算、模擬、繪圖，有狀態（跨呼叫保留變數）

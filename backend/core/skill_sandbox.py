@@ -2,14 +2,16 @@
 """core/skill_sandbox.py — Skill 專屬 e2b sandbox 生命週期管理。
 
 設計原則：
-  - 本類別不持有任何 per-session 狀態（不快取 sandbox_id）。
+  - SkillSandboxProvisioner 不持有任何 per-session 狀態（不快取 sandbox_id）。
     sandbox_id 由呼叫端（OrchestratorState.skill_sandbox_id）逐 session 保存，
     確保不同 session／不同 RC 之間不會共用同一個 sandbox 實例。
   - create()：lazy，只在 MainAgent 第一次真的需要執行 skill 程式碼時才呼叫
     （見 tools/skill_code.py 的 make_run_skill_code_tool）。
-  - keep_alive()：每次 MainAgent.chat() 呼叫開頭執行一次，延長既有 sandbox 的
-    timeout。失敗（多半代表 sandbox 已過期或被回收）回傳 False，
-    呼叫端應視同 sandbox 不存在，交由下一次 run_skill_code 呼叫時 lazy 重建。
+  - 續命併入 connect(timeout=...)：單輪 chat() 內第一次真正操作 sandbox 時
+    才連線並延長 timeout，不再在 chat() 開頭額外打一輪 keep_alive。
+  - SandboxComputer 在單次 chat() 生命週期內快取已連線的 Sandbox 實例，
+    避免同一輪多次工具呼叫反覆 reconnect；僅在 sandbox 明確不可用時才
+    清空 id、交由下一次呼叫 lazy 重建。
 
 模板（template）與圖表回傳機制暫緩優化，先以 e2b 預設 template 運作，
 後續視實際 skill 依賴需求再建立自訂 template（見討論記錄）。
@@ -17,6 +19,7 @@
 
 from __future__ import annotations
 
+import posixpath
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional, TypeVar
@@ -24,6 +27,13 @@ from typing import Callable, List, Optional, TypeVar
 from e2b_code_interpreter import Sandbox
 
 _DEFAULT_TIMEOUT_S = 600  # 10 分鐘
+
+_IGNORED_DIR_NAMES = {
+    "__pycache__", ".git", ".ipynb_checkpoints", "node_modules", ".pytest_cache",
+}
+_IGNORED_FILE_SUFFIXES = {".pyc", ".pyo"}
+
+_T = TypeVar("_T")
 
 
 @dataclass
@@ -47,15 +57,53 @@ class SandboxRunResult:
         return "\n\n".join(parts) if parts else "（無輸出）"
 
 
+def is_sandbox_unavailable(exc: BaseException) -> bool:
+    """判斷例外是否代表 sandbox 已死／不可再連（應清空 id 並 lazy 重建）。
+
+    一般執行錯誤、檔案不存在、request/execution timeout 不應觸發重建。
+    """
+    try:
+        from e2b.exceptions import SandboxNotFoundException, TimeoutException
+    except ImportError:  # pragma: no cover — SDK 極舊或未安裝時的後備
+        SandboxNotFoundException = ()  # type: ignore[misc, assignment]
+        TimeoutException = ()  # type: ignore[misc, assignment]
+
+    if isinstance(exc, SandboxNotFoundException):
+        return True
+
+    if isinstance(exc, TimeoutException):
+        t = getattr(exc, "type", None)
+        t_key = (
+            getattr(t, "name", None)
+            or getattr(t, "value", None)
+            or (str(t) if t is not None else None)
+        )
+        if t_key and str(t_key).upper() in {"SANDBOX", "UNAVAILABLE"}:
+            return True
+        msg = str(exc).lower()
+        # 舊版 SDK 無 type 欄位時，僅在訊息明確指向 sandbox idle timeout 才重建
+        return "sandbox timeout" in msg or (
+            t is None and "unavailable" in msg
+        )
+
+    msg = str(exc).lower()
+    return (
+        "sandbox not found" in msg
+        or "no longer running" in msg
+        or ("sandbox" in msg and "does not exist" in msg)
+        or ("sandbox" in msg and "doesn't exist" in msg)
+    )
+
+
 class SkillSandboxProvisioner:
-    """管理 skill 專屬 e2b sandbox 的建立、續命與程式碼執行。
+    """管理 skill 專屬 e2b sandbox 的建立、連線與程式碼執行。
 
     Parameters
     ----------
     api_key   : e2b API key
     template  : e2b sandbox 模板名稱（預設用 e2b 官方基礎模板，
                 之後可換成自訂、預裝 numpy/pandas/matplotlib 的模板）
-    timeout_s : sandbox 閒置逾時秒數，keep_alive() 每次呼叫都會重設回此值
+    timeout_s : sandbox 閒置逾時秒數；connect() 會以此值延長 timeout
     """
 
     def __init__(
@@ -68,18 +116,11 @@ class SkillSandboxProvisioner:
         self._template  = template
         self._timeout_s = timeout_s
 
-    # ── 建立（lazy，由 run_skill_code 第一次呼叫時觸發）─────────
+    # ── 建立（lazy，由 SandboxComputer 第一次操作時觸發）─────────
 
-    def create(self, skill_dir: Path, remote_root: str) -> str:
-        """建立新 sandbox，上傳 skill 目錄，回傳 sandbox_id。
-
-        Parameters
-        ----------
-        skill_dir   : 本地已解壓的 skill 根目錄（RCSkill.skill_dir）
-        remote_root : 上傳到 sandbox 內的目標路徑，
-                      例如 "/home/user/skills/dsge_model"
-        """
-        sbx = Sandbox(
+    def create(self, skill_dir: Path, remote_root: str) -> Sandbox:
+        """建立新 sandbox，上傳 skill 目錄，回傳已連線的 Sandbox。"""
+        sbx = Sandbox.create(
             template=self._template,
             api_key=self._api_key,
             timeout=self._timeout_s,
@@ -95,26 +136,20 @@ class SkillSandboxProvisioner:
 
         print(f"[SkillSandboxProvisioner] created sandbox={sbx.sandbox_id} "
               f"root={remote_root}")
-        return sbx.sandbox_id
+        return sbx
 
-    # ── 續命（每次 MainAgent.chat() 呼叫開頭執行）───────────────
+    def connect(self, sandbox_id: str) -> Sandbox:
+        """連線既有 sandbox，並以 timeout_s 延長其生命週期。"""
+        return Sandbox.connect(
+            sandbox_id,
+            api_key=self._api_key,
+            timeout=self._timeout_s,
+        )
 
-    def keep_alive(self, sandbox_id: str) -> bool:
-        """延長既有 sandbox 的 timeout。失敗代表 sandbox 已不可用。"""
-        try:
-            sbx = Sandbox.connect(sandbox_id, api_key=self._api_key)
-            sbx.set_timeout(self._timeout_s)
-            return True
-        except Exception as exc:
-            print(f"[SkillSandboxProvisioner] keep_alive failed "
-                  f"sandbox={sandbox_id}: {exc}")
-            return False
+    # ── 執行（呼叫端傳入已快取的 Sandbox 實例）────────────────
 
-    # ── 執行 ─────────────────────────────────────────────────
-
-    def run_code(self, sandbox_id: str, code: str) -> SandboxRunResult:
+    def run_code(self, sbx: Sandbox, code: str) -> SandboxRunResult:
         """在既有 sandbox 內執行程式碼，回傳標準化結果。"""
-        sbx       = Sandbox.connect(sandbox_id, api_key=self._api_key)
         execution = sbx.run_code(code)
         return SandboxRunResult(
             stdout  = execution.logs.stdout or "",
@@ -125,9 +160,9 @@ class SkillSandboxProvisioner:
 
     def run_command(
         self,
-        sandbox_id: str,
-        command:    str,
-        cwd:        Optional[str] = None,
+        sbx:     Sandbox,
+        command: str,
+        cwd:     Optional[str] = None,
     ) -> SandboxRunResult:
         """在既有 sandbox 內執行 shell 指令，回傳標準化結果。
 
@@ -135,7 +170,6 @@ class SkillSandboxProvisioner:
         process，後者是有狀態 Jupyter kernel），彼此不共享 shell 狀態，
         因此每次呼叫都需要顯式傳入 cwd，不能依賴「上次 cd 過」的假設。
         """
-        sbx    = Sandbox.connect(sandbox_id, api_key=self._api_key)
         result = sbx.commands.run(command, cwd=cwd, timeout=0)
         return SandboxRunResult(
             stdout  = result.stdout or "",
@@ -144,32 +178,34 @@ class SkillSandboxProvisioner:
             results = [],
         )
 
-    def write_file(self, sandbox_id: str, remote_path: str, content: str) -> None:
+    def write_file(self, sbx: Sandbox, remote_path: str, content: str) -> None:
         """在既有 sandbox 內建立/覆寫單一檔案（上層目錄不存在會自動建立）。"""
-        sbx = Sandbox.connect(sandbox_id, api_key=self._api_key)
         sbx.files.write(remote_path, content)
 
-    def read_file(self, sandbox_id: str, remote_path: str) -> bytes:
+    def read_file(self, sbx: Sandbox, remote_path: str) -> bytes:
         """從既有 sandbox 內讀出檔案原始內容（bytes）。"""
-        sbx = Sandbox.connect(sandbox_id, api_key=self._api_key)
         return bytes(sbx.files.read(remote_path, format="bytes"))
 
+    def kill(self, sandbox_id: str) -> None:
+        """Best-effort 終止一個即將被捨棄的 sandbox（例如重新選路時）。
 
+        失敗（sandbox 已過期、已被 e2b 回收等）不拋出例外，
+        純粹是盡力清理，避免呼叫端因為這個非關鍵動作而中斷主流程。
+        """
+        try:
+            sbx = self.connect(sandbox_id)
+            sbx.kill()
+            print(f"[SkillSandboxProvisioner] killed sandbox={sandbox_id}")
+        except Exception as exc:
+            print(f"[SkillSandboxProvisioner] kill failed "
+                  f"sandbox={sandbox_id}: {exc}")
 
     # ── Private ──────────────────────────────────────────────
 
-
-
-    _IGNORED_DIR_NAMES = {
-        "__pycache__", ".git", ".ipynb_checkpoints", "node_modules", ".pytest_cache",
-    }
-    _IGNORED_FILE_SUFFIXES = {".pyc", ".pyo"}
-    
-    
     @staticmethod
-    def _upload_dir(sbx: "Sandbox", local_dir: Path, remote_root: str) -> None:
+    def _upload_dir(sbx: Sandbox, local_dir: Path, remote_root: str) -> None:
         """遞迴上傳 skill 目錄，保留相對路徑，並過濾快取/版控等雜訊檔案。
-    
+
         過濾規則與 skill_loader._scan_code_dirs / _scan_references 一致，
         避免把 __pycache__、.pyc、隱藏檔等上傳進 sandbox
         （既浪費頻寬，也可能造成 import 到過期 bytecode 的問題）。
@@ -177,40 +213,20 @@ class SkillSandboxProvisioner:
         for p in local_dir.rglob("*"):
             if not p.is_file():
                 continue
-    
+
             rel = p.relative_to(local_dir)
-    
+
             if any(part in _IGNORED_DIR_NAMES for part in rel.parts):
                 continue
             if p.name.startswith(".") or p.suffix in _IGNORED_FILE_SUFFIXES:
                 continue
-    
+
             sbx.files.write(f"{remote_root}/{rel}", p.read_bytes())
-
-
-    def kill(self, sandbox_id: str) -> None:
-            """Best-effort 終止一個即將被捨棄的 sandbox（例如重新選路時）。
-
-            失敗（sandbox 已過期、已被 e2b 回收等）不拋出例外，
-            純粹是盡力清理，避免呼叫端因為這個非關鍵動作而中斷主流程。
-            """
-            try:
-                sbx = Sandbox.connect(sandbox_id, api_key=self._api_key)
-                sbx.kill()
-                print(f"[SkillSandboxProvisioner] killed sandbox={sandbox_id}")
-            except Exception as exc:
-                print(f"[SkillSandboxProvisioner] kill failed "
-                    f"sandbox={sandbox_id}: {exc}")                
 
 
 # ══════════════════════════════════════════════════════════════
 # SandboxComputer — 單一 skill session 的沙盒執行門面
 # ══════════════════════════════════════════════════════════════
-
-import posixpath
-
-
-_T = TypeVar("_T")
 
 
 class SandboxPathError(ValueError):
@@ -224,8 +240,8 @@ class SandboxComputer:
     sandbox_state（mutable dict，跨工具共享、chat() 結束後讀出寫回
     OrchestratorState.skill_sandbox_id）。run_skill_code / run_bash /
     write_file / get_sandbox_file 四個工具的工廠函數皆透過此物件操作，
-    確保「lazy create、cwd/sys.path 設置、連線失敗重置」這三件事只有
-    一份實作，不會在四個工具的 closure 裡各自複製一次而逐漸走鐘。
+    確保「lazy create、連線快取、僅在 sandbox 不可用時重置」這三件事
+    只有一份實作，不會在四個工具的 closure 裡各自複製一次而逐漸走鐘。
 
     Parameters
     ----------
@@ -251,6 +267,8 @@ class SandboxComputer:
         self._skill_dir     = skill_dir
         self._remote_root   = remote_root.rstrip("/")
         self._extra_paths   = [d for d in (code_dirs or []) if d and d != "."]
+        # 單輪 chat() 內快取；跨 chat 不保留（Computer 本身隨 chat 銷毀）
+        self._sbx: Optional[Sandbox] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -273,7 +291,7 @@ class SandboxComputer:
             f"os.chdir('{self._remote_root}')\n"
             f"{code}"
         )
-        return self._run(lambda sid: self._provisioner.run_code(sid, full_code))
+        return self._run(lambda sbx: self._provisioner.run_code(sbx, full_code))
 
     def run_bash(self, command: str) -> SandboxRunResult:
         """執行 shell 指令（無狀態，每次獨立 process，不與 run_python 共享狀態）。
@@ -281,51 +299,73 @@ class SandboxComputer:
         用於系統操作、pip install、檔案瀏覽等；數值運算仍應走 run_python。
         """
         return self._run(
-            lambda sid: self._provisioner.run_command(sid, command, cwd=self._remote_root)
+            lambda sbx: self._provisioner.run_command(
+                sbx, command, cwd=self._remote_root
+            )
         )
 
     def write_file(self, rel_path: str, content: str) -> None:
         target = self._resolve_path(rel_path)
-        self._run(lambda sid: self._provisioner.write_file(sid, target, content))
+        self._run(lambda sbx: self._provisioner.write_file(sbx, target, content))
 
     def get_file(self, rel_path: str) -> bytes:
         """讀出 sandbox 內檔案原始內容，rel_path 相對於 remote_root。"""
         target = self._resolve_path(rel_path)
-        return self._run(lambda sid: self._provisioner.read_file(sid, target))
-
-    # ------------------------------------------------------------------
-    # Private — lazy create / 錯誤重置（四個 public 方法共用）
-    # ------------------------------------------------------------------
-
-    def _ensure(self) -> str:
-        if self._sandbox_state["id"] is None:
-            self._sandbox_state["id"] = self._provisioner.create(
-                self._skill_dir, self._remote_root
-            )
-        return self._sandbox_state["id"]
-
-    def _run(self, fn: Callable[[str], _T]) -> _T:
-        """統一包裝：確保 sandbox 存在 → 執行 → 連線失敗時重置狀態。
-
-        重置後不在此處重試；由呼叫端（工具層）決定是否讓 LLM 自行
-        重新呼叫一次，避免隱性重試掩蓋真正的錯誤原因。
-        """
-        sandbox_id = self._ensure()
-        try:
-            return fn(sandbox_id)
-        except Exception:
-            self._sandbox_state["id"] = None
-            raise
-
-   
-    # core/skill_sandbox.py — SandboxComputer 內修改
+        return self._run(lambda sbx: self._provisioner.read_file(sbx, target))
 
     @property
     def sandbox_id(self) -> Optional[str]:
         """目前綁定的 sandbox_id（尚未建立時為 None）。"""
         return self._sandbox_state["id"]
 
+    # ------------------------------------------------------------------
+    # Private — lazy create / 連線快取 / 條件式重置
+    # ------------------------------------------------------------------
 
+    def _ensure(self) -> Sandbox:
+        if self._sbx is not None:
+            return self._sbx
+
+        sandbox_id = self._sandbox_state["id"]
+        if sandbox_id is None:
+            self._sbx = self._provisioner.create(self._skill_dir, self._remote_root)
+            self._sandbox_state["id"] = self._sbx.sandbox_id
+            return self._sbx
+
+        try:
+            self._sbx = self._provisioner.connect(sandbox_id)
+            return self._sbx
+        except Exception as exc:
+            if not is_sandbox_unavailable(exc):
+                raise
+            # 既有 id 已失效：清空後當場重建，讓本輪工具呼叫仍可成功
+            print(f"[SandboxComputer] sandbox '{sandbox_id}' unavailable "
+                  f"({exc}); recreating.")
+            self._invalidate()
+            self._sbx = self._provisioner.create(self._skill_dir, self._remote_root)
+            self._sandbox_state["id"] = self._sbx.sandbox_id
+            return self._sbx
+
+    def _invalidate(self) -> None:
+        self._sbx = None
+        self._sandbox_state["id"] = None
+
+    def _run(self, fn: Callable[[Sandbox], _T]) -> _T:
+        """統一包裝：確保連線 → 執行 → 僅在 sandbox 不可用時重置狀態。
+
+        重置後不在此處重試；由呼叫端（工具層／LLM）決定是否再呼叫一次，
+        避免隱性重試掩蓋真正的錯誤原因。_ensure() 內對「連線時發現已死」
+        會當場重建一次，那是探活路徑，與此處操作期失敗分開處理。
+        """
+        sbx = self._ensure()
+        try:
+            return fn(sbx)
+        except Exception as exc:
+            if is_sandbox_unavailable(exc):
+                print(f"[SandboxComputer] sandbox became unavailable "
+                      f"during operation ({exc}); clearing id.")
+                self._invalidate()
+            raise
 
     def _resolve_path(self, rel_path: str) -> str:
         """組出絕對路徑並確認落在 remote_root 內，防止越界讀寫。"""
