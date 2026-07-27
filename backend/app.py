@@ -27,8 +27,6 @@ from retrieval import (
     SbertOnnxEncoder,
     CandidateRetriever,
     ConceptDetailRetriever,
-    DownstreamBFS,
-    UpstreamBFS,
     PathSelector,
     GlobalLayoutBuilder,
 )
@@ -67,9 +65,6 @@ async def lifespan(app: FastAPI):
     concept_retriever = ConceptDetailRetriever(driver)
     path_selector     = PathSelector()
 
-    # ── 原有 BFS（保留供其他用途）────────────────────────────
-    downstream_bfs = DownstreamBFS(driver)
-    upstream_bfs   = UpstreamBFS(driver, path_selector)
     layout_builder = GlobalLayoutBuilder(driver, encoder, s)
 
     # ── 新增：鄰接層 cache + BFS Coordinator ─────────────────
@@ -126,8 +121,6 @@ async def lifespan(app: FastAPI):
     app.state.settings        = s
     app.state.driver          = driver
     app.state.encoder         = encoder
-    app.state.upstream_bfs    = upstream_bfs    # 保留（GlobalLayoutBuilder 等使用）
-    app.state.downstream_bfs  = downstream_bfs  # 保留
     app.state.coordinator     = coordinator     # 新增：統一 BFS 排程器
     app.state.candidate_retriever   = candidate_retriever      # ← 新增
     app.state.foundation_recommender = foundation_recommender  # ← 新增

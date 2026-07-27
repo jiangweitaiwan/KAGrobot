@@ -28,7 +28,6 @@ from pydantic import BaseModel, Field
 from core.chat_state import ChatState, ConversationPhase
 from core.google_llm import create_chat_google_generative_ai
 from core.llm_retry  import call_with_retry
-from core.registry   import resolve_tools_from_candidates
 from retrieval.candidate_retriever import CandidateRetriever
 from retrieval.concept_retriever   import ConceptDetailRetriever
 

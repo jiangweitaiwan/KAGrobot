@@ -21,7 +21,7 @@ _TOOL_IMPLEMENTATIONS: Dict[str, Any] = {}
 def register_tool(tool_name: str) -> Callable:
     """裝飾器：將函式註冊為某個 tool name 的實作。
 
-    tool_name 須與 core/registry.py 中 TOOLS_REGISTRY 的 key 一致。
+    tool_name 須在專案內唯一，且與 LangChain 工具掛載時使用的名稱一致。
 
     Example::
 

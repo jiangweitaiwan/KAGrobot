@@ -58,7 +58,6 @@ from typing_extensions import Annotated
 from core.chat_state import ChatState, ConversationPhase
 from core.google_llm import create_chat_google_generative_ai
 from core.llm_retry  import call_with_retry
-from core.registry   import AGENTS_REGISTRY, TOOLS_REGISTRY, collect_tools_with_deps
 from core.skill_sandbox import SkillSandboxProvisioner
 from tools.base      import _TOOL_IMPLEMENTATIONS
 from tools.params_resolver import make_resolve_params_tool

@@ -14,7 +14,7 @@ DSGE 宏觀經濟分析工具集（Smets-Wouters 2007 核心）。
     - fetch_economic_data   自動抓取各國經濟指標
 
 新增 DSGE 相關工具請在本檔案繼續添加，並在底部的「工具註冊」區塊補充
-register_langchain_tool 呼叫，以及在 core/registry.py 補充描述。
+register_langchain_tool 呼叫。
 """
 
 from __future__ import annotations
