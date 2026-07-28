@@ -147,6 +147,30 @@ export function makeHollowDotSprite(strokeHex: string, lineWidth = 3): THREE.Spr
   return spr;
 }
 
+/** 小閃電圖示，標記「此節點有可執行的 RC Skill」。 */
+export function makeBadgeSprite(colorHex: string, strokeHex = "#fff3c4"): THREE.Sprite {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 32;
+  const ctx = canvas.getContext("2d")!;
+  ctx.fillStyle = colorHex;
+  ctx.beginPath();
+  ctx.moveTo(18, 3);
+  ctx.lineTo(9, 18);
+  ctx.lineTo(15, 18);
+  ctx.lineTo(13, 29);
+  ctx.lineTo(24, 13);
+  ctx.lineTo(17, 13);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = strokeHex;
+  ctx.lineWidth = 1.2;
+  ctx.stroke();
+  const tex = new THREE.CanvasTexture(canvas);
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+  const spr = new THREE.Sprite(mat);
+  spr.scale.set(0.045, 0.045, 1);
+  return spr;
+}
 // ─────────────────────────────────────────────────────────────
 // Dispose helper
 // ─────────────────────────────────────────────────────────────

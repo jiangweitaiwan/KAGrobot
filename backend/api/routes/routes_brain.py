@@ -53,6 +53,7 @@ class PathNode(BaseModel):
     node_type:    str
     concept_type: Optional[str]
     matched:      bool
+    has_skill:    bool = False    
 
 class PathEdge(BaseModel):
     id:          str
@@ -158,6 +159,29 @@ def _anchor_label_from_neo4j(driver, eid: str) -> str:
             eid=eid,
         ).single()
     return (rec["name"] if rec and rec["name"] else None) or eid
+
+
+def _attach_skill_flags(nodes_raw: List[Dict[str, Any]], skill_loader) -> List["PathNode"]:
+    """把 raw BFS 節點轉成 PathNode，附上 has_skill。
+
+    只對 concept_type 命中 Resulting_Concept 的節點查詢
+    （foundation / 中繼概念不會綁定 skill）。skill_loader.skill_exists()
+    本身有 cache，這裡即使重複跑也幾乎零成本。
+    """
+    out: List[PathNode] = []
+    for n in nodes_raw:
+        concept_type = n.get("concept_type")
+        is_rc = "resulting" in (concept_type or "").lower()
+        has_skill = skill_loader.skill_exists(n["label"]) if is_rc else False
+        out.append(PathNode(
+            id=n["id"],
+            label=n["label"],
+            node_type=n["node_type"],
+            concept_type=concept_type,
+            matched=n.get("matched", False),
+            has_skill=has_skill,
+        ))
+    return out
 
 
 def _get_anchor_label(request: Request, eid: str) -> str:
@@ -285,16 +309,9 @@ async def rc_paths(eid: str, request: Request) -> RCPathsResponse:
         coordinator.get_rcpath_cached, eid, rc_label, max_depth=6
     )
 
-    nodes = [
-        PathNode(
-            id=n["id"],
-            label=n["label"],
-            node_type=n["node_type"],
-            concept_type=n.get("concept_type"),
-            matched=n.get("matched", False),
-        )
-        for n in raw.get("nodes", [])
-    ]
+    skill_loader = request.app.state.skill_loader
+    nodes = await asyncio.to_thread(_attach_skill_flags, raw.get("nodes", []), skill_loader)
+    
     edges = [
         PathEdge(
             id=e["id"],

@@ -56,16 +56,16 @@ class OrchestratorNodes:
     # ------------------------------------------------------------------
 
     async def socratic(self, state: OrchestratorState) -> OrchestratorState:
-        messages         = state.get("messages") or []
-        user_msg         = self._last_human_content(messages)
-        selected_path_id = state.get("selected_path_id")
+        messages        = state.get("messages") or []
+        user_msg        = self._last_human_content(messages)
+        selected_rc_eid = state.get("selected_rc_eid")
 
         if not user_msg:
             return {}
 
         old_socrates_state = state.get("socrates_state") or SocratesChatBot.init_state()
 
-        if selected_path_id is not None:
+        if selected_rc_eid is not None:
             new_socrates_state = self._socrates_bot.confirm_path(old_socrates_state)
             return OrchestratorState(
                 messages       = [AIMessage(content="路徑已確認，開始執行分析…")],
@@ -105,26 +105,19 @@ class OrchestratorNodes:
                 attachments=[],
             )
 
-        selected_path_id  = state.get("selected_path_id")
         selected_rc_eid   = state.get("selected_rc_eid")
         selected_rc_label = state.get("selected_rc_label") or ""
-        confirmed_path_id = state.get("confirmed_path_id")
         confirmed_rc_eid  = state.get("confirmed_rc_eid")
 
+        # skill 綁定的是 RC，不是 path——同一個 RC 不管走哪條 path
+        # 到達，都是同一顆 skill，不該觸發 sandbox 重建。
         is_reselect = (
-            selected_path_id is not None
-            and (
-                selected_path_id != confirmed_path_id
-                or selected_rc_eid != confirmed_rc_eid
-            )
-        )
-
-        selected_path = await self._resolve_selected_path(
-            state, selected_rc_eid, selected_rc_label, selected_path_id
+            selected_rc_eid is not None
+            and selected_rc_eid != confirmed_rc_eid
         )
 
         # skill_loader.load() 內部是同步 GCS 下載 + zip 解壓，避免卡住 event loop
-        skill = await asyncio.to_thread(self._load_skill, selected_path)
+        skill = await asyncio.to_thread(self._load_skill, selected_rc_label)
 
         # 重新選路時捨棄舊 sandbox：best-effort 通知 e2b 直接 kill，
         # 失敗（sandbox 已過期/不存在）不影響流程，純粹避免堆積孤兒 sandbox
@@ -137,10 +130,8 @@ class OrchestratorNodes:
         if is_reselect:
             user_msg        = socrates_state.get("query") or "請開始執行分析。"
             history:  List[BaseMessage] = []
-            path_label      = (selected_path or {}).get("final_label") \
-                              or f"路徑 {selected_path_id}"
             reselect_notice = AIMessage(
-                content=f"已切換至新路徑「{path_label}」，重新開始分析。"
+                content=f"已切換至「{selected_rc_label or selected_rc_eid}」，重新開始分析。"
             )
         else:
             user_msg        = self._last_human_content(
@@ -172,16 +163,10 @@ class OrchestratorNodes:
             socrates_state    = socrates_state,
             handoff_task      = None,
             main_state        = result.get("messages") or [],
-            confirmed_path_id = (
-                selected_path_id if is_reselect else confirmed_path_id
-            ),
             confirmed_rc_eid  = (
                 selected_rc_eid if is_reselect else confirmed_rc_eid
             ),
             skill_sandbox_id  = result.get("sandbox_id"),
-            # 本輪 get_sandbox_file 產出的結構化附件（ref/kind/url/filename/
-            # created_at/expires_in_hours），由 chat_endpoint 讀出組成
-            # ChatResponse.attachments，交給前端依 ref 渲染縮圖／檔案卡片。
             attachments       = result.get("attachments") or [],
         )
 
@@ -193,37 +178,16 @@ class OrchestratorNodes:
     # Private helpers
     # ------------------------------------------------------------------
 
-    async def _resolve_selected_path(
-        self, state, selected_rc_eid, selected_rc_label, selected_path_id,
-    ) -> Optional[Dict[str, Any]]:
-        """定位使用者選定的路徑，透過 coordinator 的 rcpath cache 取得。
-        這與前端 /graph/rc-paths/{eid} 走同一個 _rcpath_cache，
-        保證 path_id 定址空間一致。"""
-        if not selected_rc_eid or selected_path_id is None:
-            return None
-        raw = await self._coordinator.get_rcpath_cached_async(
-            selected_rc_eid, selected_rc_label, max_depth=6
-        )
-        for p in raw.get("paths", []):
-            if p.get("path_id") == selected_path_id:
-                return p
-        print(f"[OrchestratorNodes] path_id={selected_path_id} 在 "
-            f"rc_eid='{selected_rc_eid}' 的快取路徑中找不到")
-        return None
 
 
-    def _load_skill(self, selected_path: Optional[Dict[str, Any]]):
-        if not selected_path:
+    def _load_skill(self, rc_label: str):
+        if not rc_label:
             return None
-        final_rc_name = selected_path.get("final_label") or ""
-        if not final_rc_name:
-            return None
-        skill = self._skill_loader.load(final_rc_name)
+        skill = self._skill_loader.load(rc_label)
         if skill:
             print(f"[OrchestratorNodes] skill loaded: '{skill.rc_name}' ")
-                    
         else:
-            print(f"[OrchestratorNodes] no skill for rc='{final_rc_name}', "
+            print(f"[OrchestratorNodes] no skill for rc='{rc_label}', "
                   f"using fallback")
         return skill
 

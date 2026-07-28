@@ -36,6 +36,7 @@ export type RCPathNode = {
   node_type:    string;
   concept_type?: string | null;
   matched:      boolean;
+  has_skill:    boolean;
 };
 
 export type RCPathData = {
@@ -57,7 +58,7 @@ type Props = {
   bertopicLayout: BertopicLayoutData | null;
   personalBrain: PersonalBrainConcept[];
   rcRanking:     RCRankedItem[];           // Top-3 from page.tsx
-  onConfirmRC:   (rcEid: string, rcLabel: string, pathId: number) => void;
+  onLaunchSkill: (rcEid: string, rcLabel: string) => void;
   fetchRCPaths:  (eid: string) => Promise<RCPathData | null>;
   fetchFoundationTree: (eid: string) => Promise<FoundationTreeData | null>;
   width?:        number;
@@ -106,15 +107,7 @@ function buildDownstreamChains(
   return [...byFinal.values()];
 }
 
-/** Confirm 時的預設路徑:intent_score 較高者優先,其次選較短(較直接)的路徑。*/
-function pickDefaultPath(paths: RCPathData["paths"]): RCPathData["paths"][number] | undefined {
-  if (!paths.length) return undefined;
-  return [...paths].sort((a, b) => {
-    const scoreDiff = (b.intent_score ?? 0) - (a.intent_score ?? 0);
-    if (scoreDiff !== 0) return scoreDiff;
-    return a.node_ids.length - b.node_ids.length;
-  })[0];
-}
+
 
 // ─────────────────────────────────────────────────────────────
 // PersonalBrain
@@ -125,7 +118,7 @@ export default function PersonalBrain({
   bertopicLayout,
   personalBrain,
   rcRanking,
-  onConfirmRC,
+  onLaunchSkill,
   fetchRCPaths,
   fetchFoundationTree,
   width  = 480,
@@ -217,12 +210,19 @@ export default function PersonalBrain({
     [focusRCPathData, focused],
   );
 
-  const handleConfirm = useCallback(() => {
-    if (!focused || !focusRCPathData) return;
-    const path = pickDefaultPath(focusRCPathData.paths);
-    if (!path) return;
-    onConfirmRC(focused.eid, path.final_label || focused.label, path.path_id);
-  }, [focused, focusRCPathData, onConfirmRC]);
+  // 目前展開拓墣中,所有帶 skill 的 RC eid(waist + downstream 皆可能命中)
+  const skillEids = useMemo(
+    () => new Set(
+      (focusRCPathData?.nodes ?? [])
+        .filter((n) => n.has_skill)
+        .map((n) => n.id),
+    ),
+    [focusRCPathData],
+  );
+
+  const handleLaunchSkill = useCallback((eid: string, label: string) => {
+    onLaunchSkill(eid, label);
+  }, [onLaunchSkill]);
 
   return (
     <div style={{
@@ -265,6 +265,8 @@ export default function PersonalBrain({
           personalBrainEids={personalBrainEids}
           bertopicPosByEid={bertopicPosByEid}
           bertopicCentroid={bertopicCentroid}
+          skillEids={skillEids}
+          onLaunchSkill={handleLaunchSkill}
           loading={loadingFocus}
           onFocusNode={handleFocusNode}
           width={width}
@@ -353,7 +355,7 @@ export default function PersonalBrain({
       {/* ── 鎖鏈麵包屑(顯示目前鑽到第幾層,可點回上一層)── */}
       {breadcrumb.length > 1 && (
         <div style={{
-          position: "absolute", bottom: 52, left: 0, right: 0, padding: "0 12px",
+          position: "absolute", bottom: 14, left: 0, right: 0, padding: "0 12px",
           display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 4,
           pointerEvents: "auto",
         }}>
@@ -377,26 +379,7 @@ export default function PersonalBrain({
         </div>
       )}
 
-      {/* ── Confirm button ── */}
-      {focused && focusRCPathData && (
-        <div style={{ position: "absolute", bottom: 10, left: 12, right: 12, pointerEvents: "auto" }}>
-          <button
-            onClick={handleConfirm}
-            style={{
-              width: "100%", padding: "8px",
-              background: "linear-gradient(135deg, rgba(48,16,96,0.85), rgba(13,48,80,0.85))",
-              border: "1px solid #7f77dd", color: "#afa9ec",
-              fontSize: "0.75rem", fontWeight: 600, fontFamily: "monospace",
-              borderRadius: 8, cursor: "pointer", letterSpacing: "0.04em",
-              backdropFilter: "blur(6px)", transition: "box-shadow 0.2s",
-            }}
-            onMouseEnter={(e) => (e.currentTarget.style.boxShadow = "0 0 14px rgba(127,119,221,0.3)")}
-            onMouseLeave={(e) => (e.currentTarget.style.boxShadow = "none")}
-          >
-            確認「{focused.label}」→ 開始分析
-          </button>
-        </div>
-      )}
+
     </div>
   );
 }

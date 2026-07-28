@@ -380,6 +380,13 @@ class SkillLoader:
         # 讓下一次呼叫可以重試，而不是被永久記成「沒有 skill」。
         self._cache:      Dict[str, RCSkill] = {}
         self._cache_lock  = Lock()
+        # ── skill_exists 專用：輕量 client + 獨立 cache ──────────
+        # 與 _cache 分開，因為呼叫頻率與用途不同：單一 rc-paths 請求
+        # 內可能對同一個 rc_name 被多個不同 anchor 展開路徑重複詢問。
+        self._gcs_client:       Optional[storage.Client] = None
+        self._gcs_client_lock   = Lock()
+        self._exists_cache:      Dict[str, bool] = {}
+        self._exists_cache_lock  = Lock()
 
     def load(self, rc_name: str) -> Optional[RCSkill]:
         with self._cache_lock:
@@ -442,6 +449,39 @@ class SkillLoader:
             code_dirs=code_dirs,
             skill_dir=local_skill_dir,
         )
+
+    def _get_client(self) -> storage.Client:
+        if self._gcs_client is None:
+            with self._gcs_client_lock:
+                if self._gcs_client is None:
+                    self._gcs_client = storage.Client()
+        return self._gcs_client
+
+    def skill_exists(self, rc_name: str) -> bool:
+        """輕量檢查：此 rc_name 是否有對應的 .skill 存在於 GCS。
+
+        只做 metadata 查詢（blob.exists()），不下載、不解壓，
+        成本遠低於 load()。結果快取於記憶體；失敗（GCS 抖動等）
+        不快取，允許下次重試,同 load() 的 _cache 設計哲學一致。
+        """
+        with self._exists_cache_lock:
+            cached = self._exists_cache.get(rc_name)
+        if cached is not None:
+            return cached
+
+        try:
+            client = self._get_client()
+            bucket = client.bucket(self.bucket_name)
+            blob   = bucket.blob(f"{self.gcs_prefix}/{rc_name}.skill")
+            exists = blob.exists()
+        except Exception as exc:
+            print(f"[SkillLoader] skill_exists check failed for '{rc_name}': {exc}")
+            return False
+
+        with self._exists_cache_lock:
+            self._exists_cache[rc_name] = exists
+        return exists
+
 
     @staticmethod
     def _slug(rc_name: str) -> str:

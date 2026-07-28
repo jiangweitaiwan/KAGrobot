@@ -41,6 +41,7 @@ import {
   makeGlowSprite,
   makeFlatDotSprite,
   makeHollowDotSprite,
+  makeBadgeSprite,
   disposeObject3D,
   disposeGroupChildren,
   hashStr,
@@ -68,6 +69,7 @@ type HNode = {
   label: string;
   kind: HKind;
   depth: number;      // 負 = foundation（下半錐）、0 = waist、正 = downstream（上半錐）
+  hasSkill: boolean;  // 是否有對應的 RC Skill（僅 waist / downstream 可能為 true）
   x: number; y: number; z: number;
 };
 
@@ -81,6 +83,8 @@ type Props = {
   personalBrainEids: Set<string>;
   bertopicPosByEid: Map<string, BertopicPos>;
   bertopicCentroid: BertopicPos;
+  skillEids: Set<string>;
+  onLaunchSkill: (eid: string, label: string) => void;
   loading?: boolean;
   onFocusNode: (eid: string, label: string) => void;
   width: number;
@@ -106,6 +110,8 @@ const T = {
   text_downstream:    "#a8c8ff",
   text_foundation:    "#c9aaff",
   text_dim:           "#6a7a9a",
+  skill_badge:        "#ffcc4d",
+  skill_badge_stroke: "#fff3c4",
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -133,6 +139,7 @@ export function buildHourglassGraph(
   personalBrainEids: Set<string>,
   bertopicPosByEid: Map<string, BertopicPos>,
   bertopicCentroid: BertopicPos,
+  skillEids: Set<string> = new Set(),
 ): { nodes: HNode[]; edges: HEdge[] } {
   type Draft = { id: string; label: string; kind: HKind; depth: number };
   const draftMap = new Map<string, Draft>();
@@ -222,8 +229,9 @@ export function buildHourglassGraph(
 
   const nodes: HNode[] = [];
   draftMap.forEach((d) => {
+    const hasSkill = skillEids.has(d.id);
     if (d.depth === 0) {
-      nodes.push({ ...d, x: 0, y: 0, z: 0 });
+      nodes.push({ ...d, hasSkill, x: 0, y: 0, z: 0 });
       return;
     }
     const maxAbs = d.depth < 0 ? maxFoundationDepth : maxDownstreamDepth;
@@ -233,6 +241,7 @@ export function buildHourglassGraph(
     const angle = resolveAngle(d.id);
     nodes.push({
       ...d,
+      hasSkill,
       x: radius * Math.cos(angle),
       y,
       z: radius * Math.sin(angle),
@@ -328,6 +337,8 @@ export default function HourglassViz({
   personalBrainEids,
   bertopicPosByEid,
   bertopicCentroid,
+  skillEids,
+  onLaunchSkill,
   loading = false,
   onFocusNode,
   width,
@@ -354,9 +365,9 @@ export default function HourglassViz({
   const graph = useMemo(
     () => buildHourglassGraph(
       focusedEid, focusedLabel, foundationTree, downstreamChains,
-      personalBrainEids, bertopicPosByEid, bertopicCentroid,
+      personalBrainEids, bertopicPosByEid, bertopicCentroid, skillEids,
     ),
-    [focusedEid, focusedLabel, foundationTree, downstreamChains, personalBrainEids, bertopicPosByEid, bertopicCentroid],
+    [focusedEid, focusedLabel, foundationTree, downstreamChains, personalBrainEids, bertopicPosByEid, bertopicCentroid, skillEids],
   );
 
   useEffect(() => {
@@ -409,6 +420,7 @@ export default function HourglassViz({
     const nodeGroup = new THREE.Group();
     rg.add(nodeGroup);
     const spritesById = new Map<string, THREE.Sprite>();
+    const badgePositions = new Map<string, { x: number; y: number; z: number }>();
 
     graph.nodes.forEach((n) => {
       const spr = spriteForKind(n.kind);
@@ -435,6 +447,18 @@ export default function HourglassViz({
         label.position.set(n.x, n.y + lift, n.z);
         label.scale.set(0.5, 0.11, 1);
         nodeGroup.add(label);
+      }
+
+      // ── skill 徽章：獨立於 kind 的小閃電圖示，標記「可啟動分析」──
+      if (n.hasSkill) {
+        const badge = makeBadgeSprite(T.skill_badge, T.skill_badge_stroke);
+        const bx = n.x + scale * 0.9;
+        const by = n.y + scale * 0.9;
+        const bz = n.z;
+        badge.position.set(bx, by, bz);
+        badge.userData.eid = n.id;
+        nodeGroup.add(badge);
+        badgePositions.set(n.id, { x: bx, y: by, z: bz });
       }
     });
 
@@ -465,6 +489,27 @@ export default function HourglassViz({
       return best;
     }
 
+
+    const BADGE_PICK_PIXEL_RADIUS = 12;
+
+    function findNearestSkillBadge(px: number, py: number): HNode | null {
+      if (!rotGroupRef.current) return null;
+      let bestDist = BADGE_PICK_PIXEL_RADIUS * BADGE_PICK_PIXEL_RADIUS;
+      let best: HNode | null = null;
+      graph.nodes.forEach((n) => {
+        if (!n.hasSkill) return;
+        const pos = badgePositions.get(n.id);
+        if (!pos) return;
+        const wp = new THREE.Vector3(pos.x, pos.y, pos.z);
+        rotGroupRef.current!.localToWorld(wp);
+        const sp = worldToScreenPx(wp);
+        if (!sp) return;
+        const dx = sp.x - px, dy = sp.y - py;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < bestDist) { bestDist = d2; best = n; }
+      });
+      return best;
+    }
     // ── render loop（按需渲染，沿用 GlobalBrainExplorer 節流策略）──
     function animate(now: number) {
       animFrameRef.current = requestAnimationFrame(animate);
@@ -497,9 +542,15 @@ export default function HourglassViz({
         const r  = getRect();
         const px = e.clientX - r.left;
         const py = e.clientY - r.top;
-        const hit = findNearestNode(px, py);
-        if (hit && (hit.kind === "downstream" || hit.kind === "downstream-final")) {
-          onFocusNode(hit.id, hit.label);
+
+        const badgeHit = findNearestSkillBadge(px, py);
+        if (badgeHit) {
+          onLaunchSkill(badgeHit.id, badgeHit.label);
+        } else {
+          const hit = findNearestNode(px, py);
+          if (hit && (hit.kind === "downstream" || hit.kind === "downstream-final")) {
+            onFocusNode(hit.id, hit.label);
+          }
         }
       }
       isDragging.current = false;
@@ -560,7 +611,11 @@ export default function HourglassViz({
     function onMouseMoveForTooltip(e: MouseEvent) {
       if (isDragging.current || !tooltipRef.current) return;
       const r  = getRect();
-      const hit = findNearestNode(e.clientX - r.left, e.clientY - r.top);
+      const px = e.clientX - r.left;
+      const py = e.clientY - r.top;
+
+      const badgeHit = findNearestSkillBadge(px, py);
+      const hit = badgeHit ?? findNearestNode(px, py);
       if (hit) {
         const kindLabel =
           hit.kind === "waist" ? "◉ 目前聚焦" :
@@ -569,11 +624,14 @@ export default function HourglassViz({
           hit.kind === "foundation-selected" ? "◆ foundation · 已在 Personal Brain" :
           hit.kind === "foundation-other" ? "◇ foundation · 尚未加入" :
           "· 中繼概念";
-        tooltipRef.current.innerHTML = `<strong>${hit.label}</strong><br/><span style="opacity:0.65">${kindLabel}</span>`;
+        const skillLine = hit.hasSkill
+          ? `<br/><span style="opacity:0.85;color:${T.skill_badge}">⚡ 點擊圖示可執行此 skill</span>`
+          : "";
+        tooltipRef.current.innerHTML = `<strong>${hit.label}</strong><br/><span style="opacity:0.65">${kindLabel}</span>${skillLine}`;
         tooltipRef.current.style.display = "block";
         tooltipRef.current.style.opacity = "1";
-        tooltipRef.current.style.left = `${e.clientX - r.left + 12}px`;
-        tooltipRef.current.style.top  = `${e.clientY - r.top - 8}px`;
+        tooltipRef.current.style.left = `${px + 12}px`;
+        tooltipRef.current.style.top  = `${py - 8}px`;
       } else {
         tooltipRef.current.style.opacity = "0";
       }
@@ -622,7 +680,7 @@ export default function HourglassViz({
       renderer.dispose();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graph, width, height, focusedEid, onFocusNode]);
+  }, [graph, width, height, focusedEid, onFocusNode, onLaunchSkill]);
 
   return (
     <div style={{ position: "relative", width, height }}>

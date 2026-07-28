@@ -15,10 +15,8 @@ class OrchestratorState(TypedDict, total=False):
     socrates_state:    Any
     main_state:        Annotated[List[BaseMessage], add_messages]
     handoff_task:      Optional[str]
-    selected_path_id:  Optional[int]
     selected_rc_eid:   Optional[str]
     selected_rc_label: Optional[str]
-    confirmed_path_id: Optional[int]
     confirmed_rc_eid:  Optional[str]
     skill_sandbox_id:  Optional[str]
     attachments:       List[Dict[str, Any]]

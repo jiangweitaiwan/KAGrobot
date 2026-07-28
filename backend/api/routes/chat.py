@@ -24,7 +24,6 @@ class ChatRequest(BaseModel):
     session_id:        str
     message:           str
     phase:             Optional[str] = None
-    selected_path_id:  Optional[int] = None
     selected_rc_eid:   Optional[str] = None
     selected_rc_label: Optional[str] = None
 
@@ -61,8 +60,6 @@ async def chat_endpoint(
         "messages": [HumanMessage(content=body.message)],
         "phase":    initial_phase,
     }
-    if body.selected_path_id is not None:
-        invoke_input["selected_path_id"] = body.selected_path_id
     if body.selected_rc_eid is not None:
         invoke_input["selected_rc_eid"] = body.selected_rc_eid
     if body.selected_rc_label is not None:

@@ -581,18 +581,18 @@ export default function Page() {
   // PersonalBrain: confirm RC → MainAgent
   // ──────────────────────────────────────────────────────────
 
-  const handleConfirmRC = useCallback(async (
-    rcEid: string, rcLabel: string, pathId: number,
+  const handleLaunchSkill = useCallback(async (
+    rcEid: string, rcLabel: string,
   ) => {
     if (!sessionId || isLoading || !API_BASE) return;
 
     addFoundationsToBrain([{ eid: rcEid, label: rcLabel }]);
 
-    const confirmMsg: ChatMessage = {
+    const launchMsg: ChatMessage = {
       id: createId(), role: "user",
-      content: `確認選擇路徑:${rcLabel}`,
+      content: `執行 skill：${rcLabel}`,
     };
-    setMessages((prev) => [...prev, confirmMsg]);
+    setMessages((prev) => [...prev, launchMsg]);
     setIsLoading(true);
     setError("");
 
@@ -602,9 +602,8 @@ export default function Page() {
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({
           session_id:        sessionId,
-          message:           confirmMsg.content,
+          message:           launchMsg.content,
           phase:             phase === "main_agent" ? "main_agent" : "socratic",
-          selected_path_id:  pathId,
           selected_rc_eid:   rcEid,
           selected_rc_label: rcLabel,
         }),
@@ -843,7 +842,7 @@ export default function Page() {
             rcRanking={rcRanking}
             bertopicLayout={bertopicLayout}
             fetchFoundationTree={fetchFoundationTree}
-            onConfirmRC={handleConfirmRC}
+            onLaunchSkill={handleLaunchSkill}
             fetchRCPaths={fetchRCPaths}
             width={personalSize.w}
             height={Math.max(personalSize.h - 32, 280)}

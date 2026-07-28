@@ -124,7 +124,7 @@ async def lifespan(app: FastAPI):
     app.state.coordinator     = coordinator     # 新增：統一 BFS 排程器
     app.state.candidate_retriever   = candidate_retriever      # ← 新增
     app.state.foundation_recommender = foundation_recommender  # ← 新增
-
+    app.state.skill_loader          = skill_loader             # ← 新增：供 routes_brain 查 has_skill
     # detail_cache 維持不變（Concept 詳情查詢，與 BFS 無關）
     app.state.detail_cache = {}
     app.state.bertopic_layout = None   # GET /graph/bertopic-layout 的結果快取
