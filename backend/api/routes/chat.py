@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Request
 from langchain_core.messages import AIMessage, HumanMessage
@@ -13,6 +13,9 @@ from graph_service.projector import GraphProjector
 
 router = APIRouter()
 
+
+# 圖片副檔名判斷同前端渲染邏輯保持一致（見 skill_code.py 的 _IMAGE_SUFFIXES）
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
 
 
 # ── Schema ────────────────────────────────────────────────────────────
@@ -26,8 +29,18 @@ class ChatRequest(BaseModel):
     selected_rc_label: Optional[str] = None
 
 
+class Attachment(BaseModel):
+    ref:              str
+    kind:             Literal["image", "file"]
+    url:              str
+    filename:         str
+    created_at:       int
+    expires_in_hours: int = 24
+
+
 class ChatResponse(BaseModel):
     reply:          str
+    attachments:    List[Attachment] = []
     phase:          str
     socrates_phase: Optional[str] = None
     skill_used:     Optional[str] = None
@@ -72,11 +85,17 @@ async def chat_endpoint(
         else None
     )
 
-
-
+    # ── attachments：MainAgent 透過 get_sandbox_file 產生的結構化附件
+    #    （ref/kind/url/filename/created_at/expires_in_hours），這裡只是
+    #    原樣轉成回應 schema，不做任何文字解析——圖片/檔案是否顯示完全
+    #    不依賴 reply_text 裡有沒有正確寫入 [[attachment:N]] 佔位符。
+    attachments = [
+        Attachment(**a) for a in (result.get("attachments") or [])
+    ]
 
     return ChatResponse(
         reply          = reply_text,
+        attachments    = attachments,
         phase          = result.get("phase", initial_phase),
         socrates_phase = socrates_phase,
         skill_used     = result.get("skill_used"),

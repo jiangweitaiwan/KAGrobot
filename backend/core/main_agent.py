@@ -33,6 +33,18 @@ Sandbox 生命週期：
   - sandbox_id 本身不由 MainAgent 持有狀態，而是每次 chat() 回傳最新值，
     由呼叫端（OrchestratorNodes）寫回 OrchestratorState.skill_sandbox_id 逐 session 保存。
 
+Attachment 收集（新增）：
+  比照 sandbox_id 的「mutable dict closure」pattern，chat() 開頭建立
+  attachment_state = {"items": []}，傳給 _build_tools() 掛載
+  get_sandbox_file 時一併注入。單輪對話中每次成功呼叫 get_sandbox_file
+  都會往裡面 append 一筆結構化紀錄（ref/kind/url/filename/created_at）。
+  graph 執行完畢後，從 attachment_state["items"] 讀出完整清單，放進
+  chat() 的回傳值 "attachments"，交由呼叫端（OrchestratorNodes →
+  ChatResponse）往前端透傳。這樣圖片/檔案的顯示不再依賴 LLM 有沒有把
+  URL 正確寫進回覆文字，而是結構化資料，前端可以穩定渲染；LLM 只需要
+  在文字中插入 [[attachment:{ref}]] 佔位符標記位置（見
+  tools/skill_code.py 的 get_sandbox_file 工具說明）。
+
 References 注入（lazy loading）：
   skill.prompt_context 只含 references 的檔名索引（見 skill_loader.py）。
   若 skill.has_references 為真，會額外掛上 read_skill_reference 工具，
@@ -58,6 +70,7 @@ from typing_extensions import Annotated
 from core.chat_state import ChatState, ConversationPhase
 from core.google_llm import create_chat_google_generative_ai
 from core.llm_retry  import call_with_retry
+
 from core.skill_sandbox import SkillSandboxProvisioner
 from tools.base      import _TOOL_IMPLEMENTATIONS
 from tools.params_resolver import make_resolve_params_tool
@@ -103,6 +116,8 @@ _BASE_SYSTEM_PROMPT = textwrap.dedent("""\
     - **參數確認**：若執行工具所需的參數不完整，先向使用者詢問，再執行
     - **回答結構**：先給結論，再解釋原因；專業但易懂，避免過度學術術語
     - **不確定性**：若分析結果存在前提假設或限制，主動向使用者說明
+    - **附件標記**：若你呼叫 get_sandbox_file 取得圖表或檔案，請在回覆文字中
+      用 [[attachment:{ref}]] 佔位符標記該檔案對應的位置，不要自己貼網址。
 """)
 
 
@@ -171,6 +186,11 @@ class MainAgent:
             "skill_used":      Optional[str],
             "sandbox_id":      Optional[str],  # 本輪結束後最新的 sandbox id，
                                                 # 呼叫端需寫回 OrchestratorState 保存
+            "attachments":     List[dict],     # 本輪 get_sandbox_file 產出的
+                                                # 結構化附件清單（ref/kind/url/
+                                                # filename/created_at/
+                                                # expires_in_hours），呼叫端需
+                                                # 透傳給前端組成 ChatResponse.attachments
         }
         """
         if socrates_state.get("phase") != ConversationPhase.PATH_CONFIRMED.value:
@@ -185,8 +205,12 @@ class MainAgent:
         # 不再於 chat() 開頭額外打一輪 keep_alive。
         sandbox_state: dict = {"id": sandbox_id}
 
+        # 可變容器：get_sandbox_file 每次成功呼叫會往這裡 append 一筆
+        # 結構化 attachment 紀錄（見 tools/skill_code.py）。
+        attachment_state: dict = {"items": []}
+
         system_prompt = self._build_system_prompt(socrates_state, skill)
-        tools         = self._build_tools(socrates_state, skill, sandbox_state)
+        tools         = self._build_tools(socrates_state, skill, sandbox_state, attachment_state)
         has_tools     = bool(tools)
 
         llm_bound = self._base_llm.bind_tools(tools) if has_tools else self._base_llm
@@ -209,6 +233,7 @@ class MainAgent:
             "messages":        updated_messages,
             "skill_used":      skill.rc_name if skill else None,
             "sandbox_id":      sandbox_state["id"],
+            "attachments":     attachment_state["items"],
         }
 
     def describe(
@@ -219,7 +244,8 @@ class MainAgent:
         """回傳 Agent 摘要資訊（供 debug / logging）。"""
         query         = socrates_state.get("query")
         sandbox_state = {"id": None}
-        tools         = self._build_tools(socrates_state, skill, sandbox_state)
+        attachment_state: dict = {"items": []}
+        tools         = self._build_tools(socrates_state, skill, sandbox_state, attachment_state)
         tool_names    = [t.name for t in tools]
         skill_info    = f"  RC Skill: {skill.rc_name}" if skill else "  RC Skill: （無）"
         return "\n".join([
@@ -360,8 +386,10 @@ class MainAgent:
         if self._skill_outputs_bucket:
             desc += (
                 "\n- **get_sandbox_file**：把 run_skill_code 產出的檔案"
-                "（例如圖表，先存到 outputs/ 目錄）取出並取得可下載連結，"
-                "取得連結後直接附在回覆中給使用者。"
+                "（例如圖表，先存到 outputs/ 目錄）取出並登記為附件。"
+                "呼叫成功後會拿到一個 ref 編號，請在回覆文字中用 "
+                "[[attachment:{ref}]] 佔位符標記位置，不要自己貼網址，"
+                "前端會依 ref 自動換成縮圖／檔案卡片。"
             )
         return desc
 
@@ -401,9 +429,10 @@ class MainAgent:
 
     def _build_tools(
         self,
-        socrates_state: ChatState,
-        skill:          Optional["RCSkill"],
-        sandbox_state:  dict,
+        socrates_state:   ChatState,
+        skill:            Optional["RCSkill"],
+        sandbox_state:    dict,
+        attachment_state: dict,
     ) -> List[StructuredTool]:
         langchain_tools: List[StructuredTool] = []   # ← 修正：搬到最上面，兩個分支都能安全 append
 
@@ -426,7 +455,10 @@ class MainAgent:
                 if self._skill_outputs_bucket:
                     langchain_tools.append(
                         make_get_sandbox_file_tool(
-                            computer, skill.rc_name, self._skill_outputs_bucket
+                            computer,
+                            skill.rc_name,
+                            self._skill_outputs_bucket,
+                            attachment_state,
                         )
                     )
                 else:

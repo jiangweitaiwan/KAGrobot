@@ -20,6 +20,8 @@ import SemanticPanel from "./components/SemanticPanel";
 
 import type { SemanticContextData, RecommendedFoundation } from "./components/SemanticPanel";
 
+import { AttachmentCard, AttachmentTray, type Attachment } from "./components/AttachmentCard";
+
 
 const GlobalBrainExplorer = dynamic(() => import("./components/GlobalBrainExplorer"), { ssr: false });
 const PersonalBrain       = dynamic(() => import("./components/PersonalBrain"),       { ssr: false });
@@ -30,10 +32,11 @@ const DetailPanel         = dynamic(() => import("./components/DetailPanel"),   
 // ─────────────────────────────────────────────────────────────
 
 type Role = "user" | "ai";
-type ChatMessage = { id: string; role: Role; content: string };
+type ChatMessage = { id: string; role: Role; content: string; attachments?: Attachment[] };
 
 type ChatResponse = {
   reply:          string;
+  attachments?:   Attachment[];
   phase:          string;
   socrates_phase?: string | null;
   skill_used?:    string | null;
@@ -59,6 +62,49 @@ const RESIZE_DEBOUNCE_MS = 200;
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 const RC_RANKING_POOL_SIZE = 15;
+
+// ─────────────────────────────────────────────────────────────
+// Attachment placeholder helpers
+// ─────────────────────────────────────────────────────────────
+
+// 對應後端 get_sandbox_file 要求 LLM 插入的 [[attachment:N]] 佔位符。
+const ATTACHMENT_TOKEN_RE = /\[\[attachment:(\d+)\]\]/g;
+
+type ContentPart =
+  | { type: "text"; value: string }
+  | { type: "ref"; ref: string };
+
+/** 把訊息文字依 [[attachment:N]] 佔位符切成文字段落與附件參照段落。 */
+function splitByPlaceholder(content: string): ContentPart[] {
+  const parts: ContentPart[] = [];
+  let lastIndex = 0;
+  ATTACHMENT_TOKEN_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = ATTACHMENT_TOKEN_RE.exec(content)) !== null) {
+    if (m.index > lastIndex) parts.push({ type: "text", value: content.slice(lastIndex, m.index) });
+    parts.push({ type: "ref", ref: m[1] });
+    lastIndex = m.index + m[0].length;
+  }
+  if (lastIndex < content.length) parts.push({ type: "text", value: content.slice(lastIndex) });
+  return parts;
+}
+
+/**
+ * 打字機逐字顯示時，若切點剛好落在 [[attachment:N]] 佔位符中間，
+ * 直接跳到該 token 結尾，避免使用者看到一閃而過的 "[[attachm" 這種
+ * 未完成的原始標記文字。
+ */
+function revealUpTo(fullText: string, i: number): string {
+  ATTACHMENT_TOKEN_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = ATTACHMENT_TOKEN_RE.exec(fullText)) !== null) {
+    const start = m.index;
+    const end   = start + m[0].length;
+    if (i > start && i < end) return fullText.slice(0, end);
+    if (i <= start) break;
+  }
+  return fullText.slice(0, i);
+}
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
@@ -209,6 +255,45 @@ async function fetchExpandBatch(
 }
 
 // ─────────────────────────────────────────────────────────────
+// ChatBubble — 拆解 [[attachment:N]] 佔位符為附件卡片
+// ─────────────────────────────────────────────────────────────
+
+function ChatBubble({ msg }: { msg: ChatMessage }) {
+  const attachments = msg.attachments ?? [];
+  const parts        = useMemo(() => splitByPlaceholder(msg.content), [msg.content]);
+  const referencedRefs = useMemo(
+    () => new Set(parts.filter((p): p is Extract<ContentPart, { type: "ref" }> => p.type === "ref").map((p) => p.ref)),
+    [parts],
+  );
+  // 保底：若模型忘記插入佔位符（attachments 非空但文字裡一個都沒引用），
+  // 仍把所有附件附加在回覆最後面，不讓產出的圖片/檔案憑空消失。
+  const unreferenced = attachments.filter((a) => !referencedRefs.has(a.ref));
+
+  return (
+    <div className={`msg ${msg.role}`}>
+      {parts.map((p, i) => {
+        if (p.type === "text") {
+          return p.value ? <span key={i}>{p.value}</span> : null;
+        }
+        const att = attachments.find((a) => a.ref === p.ref);
+        return att ? (
+          <span key={i} style={{ display: "inline-block", verticalAlign: "top" }}>
+            <AttachmentCard attachment={att} />
+          </span>
+        ) : null;
+      })}
+      {unreferenced.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", marginTop: 6 }}>
+          {unreferenced.map((a) => (
+            <AttachmentCard key={a.ref} attachment={a} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
 // Page
 // ─────────────────────────────────────────────────────────────
 
@@ -273,6 +358,12 @@ export default function Page() {
   const rcRanking = useMemo(
     () => computeRCRanking(personalBrain, rcSemanticScores, rcFoundationMap, ALPHA),
     [personalBrain, rcSemanticScores, rcFoundationMap],
+  );
+
+  // ── 本次 session 至今所有附件（供橫向 tray 彙總顯示）───────
+  const allAttachments = useMemo(
+    () => messages.flatMap((m) => m.attachments ?? []),
+    [messages],
   );
 
   // ──────────────────────────────────────────────────────────
@@ -522,7 +613,7 @@ export default function Page() {
       const data = (await resp.json()) as ChatResponse;
       setPhase(data.phase || "main_agent");
       localStorage.setItem(PHASE_KEY, data.phase || "main_agent");
-      await typewriterAppend(data.reply || "");
+      await typewriterAppend(data.reply || "", data.attachments ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "請求失敗,請稍後重試");
       setMessages((prev) => [...prev, { id: createId(), role: "ai", content: "抱歉,連線失敗。" }]);
@@ -539,15 +630,19 @@ export default function Page() {
 
   const canSend = !!input.trim() && !isLoading && !!sessionId;
 
-  async function typewriterAppend(fullText: string): Promise<void> {
+  async function typewriterAppend(fullText: string, attachments: Attachment[] = []): Promise<void> {
     isTypingRef.current = true;
     const aiId = createId();
-    setMessages((prev) => [...prev, { id: aiId, role: "ai", content: "" }]);
+    // attachments 一次性掛上（不隨打字機效果變化），文字則逐字揭露；
+    // revealUpTo 確保揭露切點不會落在 [[attachment:N]] 佔位符中間，
+    // 避免使用者看到一閃而過的原始標記文字。
+    setMessages((prev) => [...prev, { id: aiId, role: "ai", content: "", attachments }]);
 
     let i = TYPEWRITER_CHARS_PER_TICK;
     for (; i <= fullText.length; i += TYPEWRITER_CHARS_PER_TICK) {
+      const revealed = revealUpTo(fullText, i);
       setMessages((prev) =>
-        prev.map((msg) => msg.id === aiId ? { ...msg, content: fullText.slice(0, i) } : msg),
+        prev.map((msg) => msg.id === aiId ? { ...msg, content: revealed } : msg),
       );
       await wait(TYPEWRITER_TICK_MS);
     }
@@ -596,7 +691,7 @@ export default function Page() {
       fetchSemanticScores(sessionId).then(setRCSemanticScores);
       fetchFoundationRecommendations(sessionId).then(setRecommendedFoundations);
 
-      await typewriterAppend(data.reply || "");
+      await typewriterAppend(data.reply || "", data.attachments ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "請求失敗,請稍後重試");
       setMessages((prev) => [...prev, { id: createId(), role: "ai", content: "抱歉,連線失敗,請稍後再試。" }]);
@@ -669,9 +764,7 @@ export default function Page() {
                 輸入問題,開始與知識場域對話
               </div>
             ) : (
-              messages.map((msg) => (
-                <div key={msg.id} className={`msg ${msg.role}`}>{msg.content}</div>
-              ))
+              messages.map((msg) => <ChatBubble key={msg.id} msg={msg} />)
             )}
             {isLoading && (
               <div className="meta">
@@ -679,6 +772,9 @@ export default function Page() {
               </div>
             )}
           </div>
+
+          <AttachmentTray attachments={allAttachments} />
+
           <div className="chat-input-area">
             <form onSubmit={submitMessage}>
               <textarea

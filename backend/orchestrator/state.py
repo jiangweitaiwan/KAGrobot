@@ -21,3 +21,4 @@ class OrchestratorState(TypedDict, total=False):
     confirmed_path_id: Optional[int]
     confirmed_rc_eid:  Optional[str]
     skill_sandbox_id:  Optional[str]
+    attachments:       List[Dict[str, Any]]

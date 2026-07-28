@@ -16,12 +16,24 @@ GCS 路徑分割策略：
   用 sandbox_id（而非 session_id）作為路徑前綴 —— sandbox_id 本身就是
   「此 session + 此 skill」的唯一鍵，不需要額外把 session_id 往下傳，
   也天然避免不同使用者的輸出檔案互相碰撞或覆蓋。
+
+Attachment 結構化回傳（新增）：
+  get_sandbox_file 不再要求 LLM 自己把簽名 URL 貼進回覆文字——那樣做
+  既不穩定（模型可能忘記貼、可能貼錯格式），前端也很難穩定解析。
+  改成：工具把每個成功產出的檔案登記進呼叫端傳入的 attachment_state
+  （與 sandbox_state 同樣的「mutable dict closure」pattern），並回傳
+  一個短編號 ref，要求 LLM 只需要在回覆文字中插入 [[attachment:{ref}]]
+  佔位符來標記「這個檔案跟哪一段敘述有關」，不需要處理實際網址。
+  chat() 結束後從 attachment_state 讀出完整清單，交給呼叫端（
+  OrchestratorNodes → ChatResponse）組成結構化的 attachments 欄位，
+  前端再依 ref 把佔位符換成實際的縮圖/檔案卡片。
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import timedelta
 from typing import List, Optional
 
@@ -139,27 +151,44 @@ def make_write_file_tool(computer: SandboxComputer, skill_name: str) -> Structur
 
 
 # ══════════════════════════════════════════════════════════════
-# get_sandbox_file（取回產出檔案，上傳 GCS）
+# get_sandbox_file（取回產出檔案，上傳 GCS，登記為結構化 attachment）
 # ══════════════════════════════════════════════════════════════
 
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+
+
 def make_get_sandbox_file_tool(
-    computer:    SandboxComputer,
-    skill_name:  str,
-    bucket_name: str,
+    computer:         SandboxComputer,
+    skill_name:       str,
+    bucket_name:      str,
+    attachment_state: dict,
 ) -> StructuredTool:
     """建立 get_sandbox_file 工具。
 
-    bucket_name 由呼叫端傳入（main_agent._build_tools() 從
-    settings.skill_outputs_bucket_name 讀取），此處不直接依賴
-    settings 模組，維持工具工廠的可測試性（可直接傳假 bucket 名測試）。
+    Parameters
+    ----------
+    computer         : SandboxComputer
+    skill_name        : 供 description 顯示用
+    bucket_name       : 由呼叫端傳入（main_agent._build_tools() 從
+                         settings.skill_outputs_bucket_name 讀取），
+                         此處不直接依賴 settings 模組，維持工具工廠的
+                         可測試性（可直接傳假 bucket 名測試）。
+    attachment_state  : {"items": []}，與 sandbox_state 同樣的
+                         mutable dict closure pattern。每次成功呼叫
+                         會 append 一筆 {ref, kind, url, filename,
+                         created_at}，chat() 結束後由 MainAgent 讀出
+                         回傳給呼叫端，最終組成 ChatResponse.attachments。
     """
 
     def get_sandbox_file(rel_path: str) -> str:
-        """把此 Skill 沙盒內的檔案（例如 run_skill_code 產出的圖表）取出，
-        上傳至雲端儲存並回傳可下載的連結，供你在回覆中附給使用者。
+        """把此 Skill 沙盒內的檔案（例如 run_skill_code 產出的圖表或報告）
+        取出，上傳至雲端儲存並登記為一筆 attachment。
         rel_path 為相對於此 Skill 根目錄的路徑，
         例如 run_skill_code 存到 outputs/chart.png 後，這裡傳 'outputs/chart.png'。
-        連結有效期 24 小時。"""
+        呼叫成功後會拿到一個 ref 編號——請在你的回覆文字中，於你認為適合
+        的位置插入 [[attachment:{ref}]] 這個佔位符來標記此檔案，
+        **不要**自己把網址貼進回覆內容（前端會依 ref 自動換成縮圖／檔案卡片，
+        貼原始網址反而會讓顯示重複或格式跑掉）。連結有效期 24 小時。"""
         try:
             data = computer.get_file(rel_path)
         except SandboxPathError as exc:
@@ -180,10 +209,25 @@ def make_get_sandbox_file_tool(
                 {"ok": False, "error": f"上傳雲端儲存失敗：{exc}"}, ensure_ascii=False
             )
 
+        ref  = str(len(attachment_state["items"]) + 1)
+        kind = "image" if os.path.splitext(filename)[1].lower() in _IMAGE_SUFFIXES else "file"
+        attachment_state["items"].append({
+            "ref":              ref,
+            "kind":             kind,
+            "url":              url,
+            "filename":         filename,
+            "created_at":       int(time.time() * 1000),
+            "expires_in_hours": 24,
+        })
+
         return json.dumps({
-            "ok":         True,
-            "url":        url,
-            "expires_in": "24h",
+            "ok":          True,
+            "ref":         ref,
+            "kind":        kind,
+            "instruction": (
+                f"請在回覆中適合的位置插入 [[attachment:{ref}]] 佔位符標記此檔案，"
+                "不要直接貼上網址。"
+            ),
         }, ensure_ascii=False)
 
     return StructuredTool.from_function(
@@ -191,8 +235,9 @@ def make_get_sandbox_file_tool(
         name="get_sandbox_file",
         description=(
             f"把此 Skill（{skill_name}）沙盒內的檔案取出（例如 run_skill_code "
-            "產出的圖表），上傳至雲端儲存並回傳可下載連結（有效 24 小時），"
-            "供你在回覆中附給使用者。rel_path 相對於此 Skill 根目錄。"
+            "產出的圖表或報告），上傳至雲端儲存並登記為一筆 attachment（有效 24 小時）。"
+            "呼叫成功後會拿到一個 ref 編號，請在回覆文字中用 [[attachment:{ref}]] "
+            "佔位符標記此檔案的位置，不要自己貼網址。"
         ),
     )
 
