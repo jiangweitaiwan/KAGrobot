@@ -844,6 +844,7 @@ export default function Page() {
             fetchFoundationTree={fetchFoundationTree}
             onLaunchSkill={handleLaunchSkill}
             fetchRCPaths={fetchRCPaths}
+            isSubmitting={isLoading}
             width={personalSize.w}
             height={Math.max(personalSize.h - 32, 280)}
           />

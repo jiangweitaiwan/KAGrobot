@@ -14,7 +14,7 @@
  *   - 其餘邏輯（聚焦狀態機、鎖鏈萃取、confirm 流程）完全不變。
  */
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useEffect,useState } from "react";
 import type { FoundationTreeData, PersonalBrainConcept } from "./DetailPanel";
 import type { GlobalLayout } from "./GlobalBrainExplorer";
 import BertopicMap, { type BertopicLayoutData } from "./BertopicMap";
@@ -57,10 +57,11 @@ type Props = {
   layout:        GlobalLayout | null;
   bertopicLayout: BertopicLayoutData | null;
   personalBrain: PersonalBrainConcept[];
-  rcRanking:     RCRankedItem[];           // Top-3 from page.tsx
+  rcRanking:     RCRankedItem[];
   onLaunchSkill: (rcEid: string, rcLabel: string) => void;
   fetchRCPaths:  (eid: string) => Promise<RCPathData | null>;
   fetchFoundationTree: (eid: string) => Promise<FoundationTreeData | null>;
+  isSubmitting?: boolean;   // ← 新增：main_agent 請求進行中時鎖住按鈕
   width?:        number;
   height?:       number;
 };
@@ -121,6 +122,7 @@ export default function PersonalBrain({
   onLaunchSkill,
   fetchRCPaths,
   fetchFoundationTree,
+  isSubmitting = false,
   width  = 480,
   height = 480,
 }: Props) {
@@ -130,8 +132,13 @@ export default function PersonalBrain({
   const [focusRCPathData, setFocusRCPathData] = useState<RCPathData | null>(null);
   const [focusFoundation, setFocusFoundation] = useState<FoundationTreeData | null>(null);
   const [loadingFocus,    setLoadingFocus]    = useState(false);
+  const [pendingSkill,    setPendingSkill]    = useState<{ eid: string; label: string } | null>(null); // ← 新增
 
   const focused = breadcrumb.length > 0 ? breadcrumb[breadcrumb.length - 1] : null;
+
+  useEffect(() => {
+    setPendingSkill(null);
+  }, [focused?.eid]);
 
   const personalBrainEids = useMemo(
     () => new Set(personalBrain.map((c) => c.eid)),
@@ -190,6 +197,18 @@ export default function PersonalBrain({
   const handleFocusNode = useCallback((eid: string, label: string) => {
     focusOn(eid, label);
   }, [focusOn]);
+
+  // ── hourglass 上點擊 skill 徽章 → 只是選取，不送出 ──
+  const handleSelectSkill = useCallback((eid: string, label: string) => {
+    setPendingSkill((prev) => (prev?.eid === eid ? null : { eid, label }));
+  }, []);
+
+  // ── 確認列按下「送出」→ 真正呼叫 onLaunchSkill ──
+  const handleConfirmLaunch = useCallback(() => {
+    if (!pendingSkill) return;
+    onLaunchSkill(pendingSkill.eid, pendingSkill.label);
+    setPendingSkill(null);
+  }, [pendingSkill, onLaunchSkill]);
 
   // ── Breadcrumb 上點擊較早的節點 → 跳回那一層(不必重新 fetch)──
   const handleBreadcrumbClick = useCallback((idx: number) => {
@@ -266,7 +285,8 @@ export default function PersonalBrain({
           bertopicPosByEid={bertopicPosByEid}
           bertopicCentroid={bertopicCentroid}
           skillEids={skillEids}
-          onLaunchSkill={handleLaunchSkill}
+          selectedSkillEid={pendingSkill?.eid ?? null}
+          onSelectSkill={handleSelectSkill}
           loading={loadingFocus}
           onFocusNode={handleFocusNode}
           width={width}
@@ -352,10 +372,14 @@ export default function PersonalBrain({
         </div>
       )}
 
-      {/* ── 鎖鏈麵包屑(顯示目前鑽到第幾層,可點回上一層)── */}
+
+
+      {/* ── 鎖鏈麵包屑 ── */}
       {breadcrumb.length > 1 && (
         <div style={{
-          position: "absolute", bottom: 14, left: 0, right: 0, padding: "0 12px",
+          position: "absolute",
+          bottom: pendingSkill ? 52 : 14,   // ← 讓出下方空間給確認列
+          left: 0, right: 0, padding: "0 12px",
           display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 4,
           pointerEvents: "auto",
         }}>
@@ -379,7 +403,51 @@ export default function PersonalBrain({
         </div>
       )}
 
-
-    </div>
-  );
-}
+      {/* ── Skill 確認列（選取後才出現）── */}
+      {pendingSkill && (
+        <div style={{
+          position: "absolute", bottom: 14, left: 0, right: 0,
+          display: "flex", justifyContent: "center", padding: "0 12px",
+          pointerEvents: "auto",
+        }}>
+          <div style={{
+            display: "flex", alignItems: "center", gap: 8,
+            background: "rgba(3,1,8,0.85)",
+            border: "1px solid rgba(255,204,77,0.4)",
+            borderRadius: 20,
+            padding: "6px 8px 6px 14px",
+            backdropFilter: "blur(4px)",
+            boxShadow: "0 0 12px rgba(255,204,77,0.15)",
+          }}>
+            <span style={{ fontSize: "0.68rem", color: "#ffcc4d", fontFamily: "monospace", whiteSpace: "nowrap" }}>
+              ⚡ 執行「{pendingSkill.label}」
+            </span>
+            <button
+              onClick={() => setPendingSkill(null)}
+              disabled={isSubmitting}
+              style={{
+                fontSize: "0.62rem", padding: "3px 10px", borderRadius: 14,
+                border: "1px solid rgba(127,119,221,0.3)", background: "transparent",
+                color: "rgba(175,169,236,0.7)",
+                cursor: isSubmitting ? "default" : "pointer", fontFamily: "monospace",
+              }}
+            >
+              取消
+            </button>
+            <button
+              onClick={handleConfirmLaunch}
+              disabled={isSubmitting}
+              style={{
+                fontSize: "0.62rem", padding: "3px 12px", borderRadius: 14,
+                border: "1px solid #ffcc4d",
+                background: isSubmitting ? "rgba(255,204,77,0.08)" : "rgba(255,204,77,0.18)",
+                color: "#ffcc4d",
+                cursor: isSubmitting ? "default" : "pointer",
+                fontFamily: "monospace", fontWeight: 600,
+              }}
+            >
+              {isSubmitting ? "送出中…" : "🚀 送出"}
+            </button>
+          </div>
+        </div>
+      )}

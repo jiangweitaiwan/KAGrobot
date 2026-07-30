@@ -84,7 +84,8 @@ type Props = {
   bertopicPosByEid: Map<string, BertopicPos>;
   bertopicCentroid: BertopicPos;
   skillEids: Set<string>;
-  onLaunchSkill: (eid: string, label: string) => void;
+  selectedSkillEid: string | null;        // ← 取代 onLaunchSkill
+  onSelectSkill: (eid: string, label: string) => void;  // ← 只負責選取，不送出
   loading?: boolean;
   onFocusNode: (eid: string, label: string) => void;
   width: number;
@@ -338,7 +339,8 @@ export default function HourglassViz({
   bertopicPosByEid,
   bertopicCentroid,
   skillEids,
-  onLaunchSkill,
+  selectedSkillEid,
+  onSelectSkill,
   loading = false,
   onFocusNode,
   width,
@@ -361,6 +363,7 @@ export default function HourglassViz({
   const isVisibleRef    = useRef(true);
   const needsRenderRef  = useRef(true);
   const lastFrameTsRef  = useRef(0);
+  const skillGlowRef    = useRef<THREE.Sprite | null>(null); // ← 新增：選取中 skill 的呼吸光暈
 
   const graph = useMemo(
     () => buildHourglassGraph(
@@ -449,9 +452,13 @@ export default function HourglassViz({
         nodeGroup.add(label);
       }
 
-      // ── skill 徽章：獨立於 kind 的小閃電圖示，標記「可啟動分析」──
+      // ── skill 徽章：獨立於 kind 的小閃電圖示，標記「可選取分析」──
       if (n.hasSkill) {
-        const badge = makeBadgeSprite(T.skill_badge, T.skill_badge_stroke);
+        const isSelected = n.id === selectedSkillEid;
+        const badge = makeBadgeSprite(
+          isSelected ? "#ffffff" : T.skill_badge,
+          isSelected ? T.skill_badge : T.skill_badge_stroke,
+        );
         const bx = n.x + scale * 0.9;
         const by = n.y + scale * 0.9;
         const bz = n.z;
@@ -459,6 +466,14 @@ export default function HourglassViz({
         badge.userData.eid = n.id;
         nodeGroup.add(badge);
         badgePositions.set(n.id, { x: bx, y: by, z: bz });
+
+        if (isSelected) {
+          const glow = makeGlowSprite(T.skill_badge);
+          glow.position.set(bx, by, bz);
+          glow.scale.set(0.22, 0.22, 1);
+          nodeGroup.add(glow);
+          skillGlowRef.current = glow;
+        }
       }
     });
 
@@ -517,12 +532,19 @@ export default function HourglassViz({
       if (now - lastFrameTsRef.current < RENDER_FRAME_MS) return;
       lastFrameTsRef.current = now;
 
-      if (needsRenderRef.current || isDragging.current) {
+      let hasBreathing = false;
+      if (skillGlowRef.current) {
+        hasBreathing = true;
+        const pulse = 0.55 + 0.45 * Math.sin(now * 0.004);
+        (skillGlowRef.current.material as THREE.SpriteMaterial).opacity = pulse;
+      }
+
+      if (needsRenderRef.current || isDragging.current || hasBreathing) {
         renderer.render(scene, camera);
         needsRenderRef.current = false;
       }
     }
-    animFrameRef.current = requestAnimationFrame(animate);
+
 
     // ── 互動事件 ────────────────────────────────────────────
     const canvas = canvasRef.current!;
@@ -545,7 +567,7 @@ export default function HourglassViz({
 
         const badgeHit = findNearestSkillBadge(px, py);
         if (badgeHit) {
-          onLaunchSkill(badgeHit.id, badgeHit.label);
+          onSelectSkill(badgeHit.id, badgeHit.label);   // ← 改為選取
         } else {
           const hit = findNearestNode(px, py);
           if (hit && (hit.kind === "downstream" || hit.kind === "downstream-final")) {
@@ -625,7 +647,7 @@ export default function HourglassViz({
           hit.kind === "foundation-other" ? "◇ foundation · 尚未加入" :
           "· 中繼概念";
         const skillLine = hit.hasSkill
-          ? `<br/><span style="opacity:0.85;color:${T.skill_badge}">⚡ 點擊圖示可執行此 skill</span>`
+          ? `<br/><span style="opacity:0.85;color:${T.skill_badge}">⚡ 點擊圖示以選取此 skill</span>`
           : "";
         tooltipRef.current.innerHTML = `<strong>${hit.label}</strong><br/><span style="opacity:0.65">${kindLabel}</span>${skillLine}`;
         tooltipRef.current.style.display = "block";
@@ -680,7 +702,7 @@ export default function HourglassViz({
       renderer.dispose();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graph, width, height, focusedEid, onFocusNode, onLaunchSkill]);
+  }, [graph, width, height, focusedEid, onFocusNode, onSelectSkill, selectedSkillEid]);
 
   return (
     <div style={{ position: "relative", width, height }}>
