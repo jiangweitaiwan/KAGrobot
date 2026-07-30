@@ -451,3 +451,6 @@ export default function PersonalBrain({
           </div>
         </div>
       )}
+    </div>
+  );
+}      
