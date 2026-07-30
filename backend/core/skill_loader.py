@@ -314,37 +314,86 @@ import os
 from pathlib import Path
 from google.cloud import storage
 
+
+def _detect_common_root(infolist: List[zipfile.ZipInfo]) -> Optional[str]:
+    """判斷 zip 內所有項目是否共用同一個第一層資料夾（「有根目錄」的打包方式）。
+
+    兩種常見結構：
+      1. 有根目錄：所有檔案都包在同一層資料夾底下，
+         例如 "black-litterman-skill/SKILL.md"、
+              "black-litterman-skill/references/equations.md"
+         → 第一層路徑元件只有一種值，回傳該值。
+      2. 無根目錄：檔案直接放在 zip 頂層，
+         例如 "SKILL.md"、"references/equations.md"、"scripts/xxx.py"
+         → 第一層路徑元件有多種值（SKILL.md / references / scripts / examples），
+         回傳 None，代表不應剝除任何路徑層。
+
+    只看第一層路徑元件是否唯一，不管檔案深度，足以區分這兩種打包方式，
+    也不會誤判「無根目錄但恰好只有一個頂層資料夾」的邊界情況——
+    這種情況即使誤判為「有根目錄」而剝除一層，效果與正確判�007也一致
+    （因為那個頂層資料夾本來就是唯一內容）。
+    """
+    tops = set()
+    for member in infolist:
+        name = member.filename.strip("/")
+        if not name:
+            continue
+        parts = Path(name).parts
+        if not parts:
+            continue
+        tops.add(parts[0])
+
+    if len(tops) == 1:
+        return next(iter(tops))
+    return None
+
+
 def _download_gcs_skill_file(bucket_name: str, gcs_blob_path: str, local_dir: Path) -> bool:
-    """下載 .skill (ZIP) 檔案，並自動剔除 ZIP 內部的第一層根目錄，直接解壓到 local_dir"""
+    """下載 .skill (ZIP) 檔案並解壓到 local_dir。
+
+    相容兩種 zip 內部結構（見 _detect_common_root 說明）：
+      1. 有外層根目錄包住所有檔案 → 自動剔除該層根目錄，
+         把內容直接攤平到 local_dir（例如 SKILL.md 落在
+         local_dir/SKILL.md，而不是 local_dir/<root>/SKILL.md）。
+      2. 沒有外層根目錄，檔案直接在 zip 頂層 → 路徑原樣解壓，
+         不做任何剝除，避免像 "SKILL.md"（只有一層路徑）被誤判為
+         「根目錄本身的 entry」而整個跳過不解壓。
+    """
     try:
         storage_client = storage.Client()
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(gcs_blob_path)
-        
+
         if not blob.exists():
             print(f"[SkillLoader] GCS file not found: {gcs_blob_path}")
             return False
-            
+
         # 1. 下載為本地暫存的 zip 檔
         zip_tmp_path = local_dir.with_suffix('.zip')
         local_dir.mkdir(parents=True, exist_ok=True)
         blob.download_to_filename(str(zip_tmp_path))
-        
-        # 2. 解壓縮並動態修正路徑
+
+        # 2. 解壓縮並依偵測結果決定是否剝除第一層路徑
         with zipfile.ZipFile(zip_tmp_path, 'r') as zip_ref:
-            for member in zip_ref.infolist():
-                # 剔除路徑中的第一層資料夾名稱
-                # 例如 "dsge-model/references/equations.md" -> 拆成 ["dsge-model", "references", "equations.md"]
+            infolist    = zip_ref.infolist()
+            common_root = _detect_common_root(infolist)
+
+            for member in infolist:
                 parts = Path(member.filename).parts
-                
-                # 如果只有一層（代表是外層根目錄本身，例如 "dsge-model/"），直接跳過不建立
-                if len(parts) <= 1:
+                if not parts:
                     continue
-                
-                # 重新組合路徑：去掉第一層 (parts[0])，保留後續所有結構
-                relative_path = Path(*parts[1:])
+
+                if common_root is not None:
+                    # 有根目錄：剔除第一層（root 目錄本身的 entry 直接跳過）
+                    if len(parts) <= 1:
+                        continue
+                    relative_path = Path(*parts[1:])
+                else:
+                    # 無根目錄：路徑原樣使用，不做任何轉換
+                    relative_path = Path(*parts)
+
                 target_path = local_dir / relative_path
-                
+
                 if member.is_dir():
                     # 如果是目錄，建立目錄即可
                     target_path.mkdir(parents=True, exist_ok=True)
@@ -353,11 +402,11 @@ def _download_gcs_skill_file(bucket_name: str, gcs_blob_path: str, local_dir: Pa
                     target_path.parent.mkdir(parents=True, exist_ok=True)
                     with zip_ref.open(member) as source, open(target_path, "wb") as target:
                         target.write(source.read())
-                        
+
         # 3. 刪除暫存的 zip 檔
         if zip_tmp_path.exists():
             zip_tmp_path.unlink()
-            
+
         return True
     except Exception as e:
         print(f"[SkillLoader] GCS .skill Download & Flatten Error: {e}")
