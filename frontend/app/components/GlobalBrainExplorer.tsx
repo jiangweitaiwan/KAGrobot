@@ -17,7 +17,7 @@
  *   視覺語言，避免兩個場景的質感各自漂移。行為完全不變，純搬移，
  *   不影響下方效能優化的任何邏輯。
  *
- * ── 效能優化（重點，維持不變）──────────────────────────────
+ * ── 效能優化（維持不變）────────────────────────────────────
  *   1. 移除自動旋轉：場景不再持續自轉，改為純使用者驅動。
  *   2. 按需渲染（on-demand rendering）：只有在「真的有東西在動」
  *      （拖曳中、有接力光點動畫、聚焦光暈呼吸）或畫面被標記為
@@ -31,6 +31,31 @@
  *      上的暴力投影計算。
  *   7. Cleanup 時完整 dispose 所有 geometry / material / texture，
  *      避免面板 resize 觸發場景重建時造成 GPU 記憶體持續累積。
+ *
+ * ── Renderer 生命週期重構（新增）──────────────────────────────
+ *   原本 renderer/scene/camera/背景星點/marker points/edges/分區
+ *   標籤/事件監聽/render loop 全部塞在同一個 useEffect，依賴陣列
+ *   包含 [layout, width, height, nodeWorldPositions, clusterStats,
+ *   nodeIdxMap]。這代表每次點擊推薦 RC 導致 layout 略有變化、或單純
+ *   面板 resize，都會把整顆 WebGLRenderer dispose 掉再重新 new 一次
+ *   ——這是這幾個操作裡最貴的一步，沒必要每次都做。
+ *
+ *   現在拆成三層生命週期：
+ *     1) Effect A（mount once，依賴 []）
+ *        建立 renderer / scene / camera / 背景星點 / ambient light /
+ *        hoverRing / pathGroup / ringGroup / focusGroup 容器 /
+ *        事件監聽 / render loop。canvas 掛載後只建一次。
+ *        事件處理器裡需要讀的易變資料（layout、nodeWorldPositions、
+ *        width、height、onNodeClick）一律改讀對應的 ref。
+ *     2) Effect B（resize，依賴 [width, height]）
+ *        只呼叫 renderer.setSize() + 更新 camera.aspect +
+ *        updateProjectionMatrix()，不 dispose 任何東西。
+ *     3) Effect C（layout 資料重建，依賴 [layout, nodeWorldPositions,
+ *        clusterStats, nodeIdxMap]）
+ *        只清空／重建 layoutGroup（marker points、neural mesh 邊、
+ *        分區標籤），renderer 本身完全不受影響。
+ *   原本就已獨立、不碰 renderer 的「Active candidate 標示環」與
+ *   「聚焦候選：光暈 + foundation 路徑」兩個 effect 維持不變。
  */
 
 import { useEffect, useRef, useMemo, useState } from "react";
@@ -190,6 +215,7 @@ export default function GlobalBrainExplorer({
   const rendererRef     = useRef<THREE.WebGLRenderer | null>(null);
   const cameraRef       = useRef<THREE.PerspectiveCamera | null>(null);
   const rotGroupRef     = useRef<THREE.Group | null>(null);
+  const layoutGroupRef  = useRef<THREE.Group | null>(null);   // ← layout 相關內容容器（Effect C 管理）
   const markerPointsRef = useRef<THREE.Points | null>(null);
   const pathGroupRef    = useRef<THREE.Group | null>(null);
   const ringGroupRef    = useRef<THREE.Group | null>(null);
@@ -210,6 +236,19 @@ export default function GlobalBrainExplorer({
   const needsRenderRef = useRef(true);   // 畫面是否為 dirty，需要重繪一次
   const lastFrameTsRef = useRef(0);      // 上一次實際渲染的時間戳
 
+  // ── 供 Effect A（mount-once）事件處理器讀取「當下最新值」，
+  //    避免 stale closure，同時不需要把這些值放進 Effect A 的依賴陣列 ──
+  const layoutRef              = useRef(layout);
+  const nodeWorldPositionsRef  = useRef<THREE.Vector3[]>([]);
+  const widthRef               = useRef(width);
+  const heightRef              = useRef(height);
+  const onNodeClickRef         = useRef(onNodeClick);
+  const activeCandidateSetRef  = useRef<Set<string>>(new Set());
+
+  useEffect(() => { layoutRef.current = layout; }, [layout]);
+  useEffect(() => { widthRef.current = width; heightRef.current = height; }, [width, height]);
+  useEffect(() => { onNodeClickRef.current = onNodeClick; }, [onNodeClick]);
+
   const [focusedCandidateEid, setFocusedCandidateEid] = useState<string | null>(null);
 
   useEffect(() => {
@@ -227,6 +266,8 @@ export default function GlobalBrainExplorer({
     if (!layout) return [] as THREE.Vector3[];
     return layout.nodes.map((n) => nodeToWorld(n));
   }, [layout]);
+
+  useEffect(() => { nodeWorldPositionsRef.current = nodeWorldPositions; }, [nodeWorldPositions]);
 
   // ── 分群統計（三層）────────────────────────────────────────
   const clusterStats = useMemo(() => {
@@ -257,7 +298,6 @@ export default function GlobalBrainExplorer({
     [activeCandidateEids],
   );
 
-  const activeCandidateSetRef = useRef(activeCandidateSet);
   useEffect(() => { activeCandidateSetRef.current = activeCandidateSet; }, [activeCandidateSet]);
 
   const focusedTreeData = useMemo(() => {
@@ -274,12 +314,17 @@ export default function GlobalBrainExplorer({
     return { highlightEids, edges: entry.treeEdges ?? [] };
   }, [rcFoundationMap, focusedCandidateEid]);
 
-  // ── Init scene ─────────────────────────────────────────────
+  // ═════════════════════════════════════════════════════════
+  // Effect A — mount once：renderer / scene / camera / 背景星點 /
+  //            ambient light / hoverRing / pathGroup / ringGroup /
+  //            focusGroup 容器 / 事件監聽 / render loop。
+  //            依賴陣列固定為 []，canvas 掛載後只建一次。
+  // ═════════════════════════════════════════════════════════
   useEffect(() => {
-    if (!canvasRef.current || !layout || layout.nodes.length === 0) return;
+    if (!canvasRef.current) return;
 
     const renderer = new THREE.WebGLRenderer({ canvas: canvasRef.current, antialias: true, alpha: false });
-    renderer.setSize(width, height);
+    renderer.setSize(widthRef.current, heightRef.current);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO));
     renderer.setClearColor(PALETTE.bg, 1);
     rendererRef.current = renderer;
@@ -287,7 +332,12 @@ export default function GlobalBrainExplorer({
     const scene = new THREE.Scene();
     sceneRef.current = scene;
 
-    const camera = new THREE.PerspectiveCamera(60, width / height, 0.01, 100);
+    const camera = new THREE.PerspectiveCamera(
+      60,
+      widthRef.current / Math.max(heightRef.current, 1),
+      0.01,
+      100,
+    );
     camera.position.set(0, 0, ZOOM_DEFAULT);
     cameraRef.current = camera;
 
@@ -295,7 +345,7 @@ export default function GlobalBrainExplorer({
     scene.add(rg);
     rotGroupRef.current = rg;
 
-    // 背景星點
+    // 背景星點（靜態，不隨 layout 變化，只建一次）
     const bgCount = 1200;
     const bgPos   = new Float32Array(bgCount * 3);
     for (let i = 0; i < bgCount; i++) {
@@ -310,83 +360,14 @@ export default function GlobalBrainExplorer({
     });
     scene.add(new THREE.Points(bgGeo, bgMat));
 
-    // 節點標記
-    const n = layout.nodes.length;
-    const positions = new Float32Array(n * 3);
-    const colors    = new Float32Array(n * 3);
-    const sizes     = new Float32Array(n);
+    // ── layout 相關內容的容器：marker points / edges / 分區標籤，
+    //    交給 Effect C 專門管理，這裡只建立空容器 ──────────────
+    const layoutGroup = new THREE.Group();
+    rg.add(layoutGroup);
+    layoutGroupRef.current = layoutGroup;
 
-    layout.nodes.forEach((node, i) => {
-      const p = nodeWorldPositions[i];
-      positions[i * 3] = p.x; positions[i * 3 + 1] = p.y; positions[i * 3 + 2] = p.z;
-      const c = categoryColor(node);
-      colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
-      sizes[i] = isRC(node) ? SIZE.rc : SIZE.other;
-    });
-
-    const markerGeo = new THREE.BufferGeometry();
-    markerGeo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    markerGeo.setAttribute("color",    new THREE.BufferAttribute(colors, 3));
-    markerGeo.setAttribute("size",     new THREE.BufferAttribute(sizes, 1));
-
-    const markerMat = new THREE.ShaderMaterial({
-      vertexShader: /* glsl */`
-        attribute float size; attribute vec3 color; varying vec3 vColor;
-        void main() {
-          vColor = color;
-          vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
-          gl_PointSize = size * (300.0 / -mvPos.z);
-          gl_Position  = projectionMatrix * mvPos;
-        }`,
-      fragmentShader: /* glsl */`
-        varying vec3 vColor;
-        void main() {
-          vec2 uv = gl_PointCoord - vec2(0.5);
-          float d = length(uv);
-          if (d > 0.5) discard;
-          if (d > 0.40) {
-            gl_FragColor = vec4(0.91, 0.93, 0.97, 1.0);
-          } else {
-            gl_FragColor = vec4(vColor, 1.0);
-          }
-        }`,
-      transparent: false,
-      depthWrite:  true,
-    });
-
-    const markerPoints = new THREE.Points(markerGeo, markerMat);
-    rg.add(markerPoints);
-    markerPointsRef.current = markerPoints;
-
-    // 神經網格（edges）
-    if (layout.edges.length > 0) {
-      const linePos: number[] = [];
-      layout.edges.forEach((e) => {
-        const si = nodeIdxMap.get(e.source);
-        const ti = nodeIdxMap.get(e.target);
-        if (si === undefined || ti === undefined) return;
-        const sp = nodeWorldPositions[si], tp = nodeWorldPositions[ti];
-        linePos.push(sp.x, sp.y, sp.z, tp.x, tp.y, tp.z);
-      });
-      if (linePos.length > 0) {
-        const meshGeo = new THREE.BufferGeometry();
-        meshGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(linePos), 3));
-        const meshMat = new THREE.LineBasicMaterial({ color: 0x3a4868, transparent: true, opacity: 0.10 });
-        rg.add(new THREE.LineSegments(meshGeo, meshMat));
-      }
-    }
-
-    // 分區浮動標籤（三層）
-    clusterStats.forEach((c) => {
-      const label = makeLabelSprite(
-        `${CLUSTER_LABEL[c.key]} ${c.pct.toFixed(0)}%`,
-        CLUSTER_LABEL_COLOR[c.key],
-      );
-      label.position.set(c.centroid.x, c.centroid.y + LABEL_Y_OFFSET, c.centroid.z);
-      rg.add(label);
-    });
-
-    // path / ring / focus groups
+    // path / ring / focus groups（既有的「聚焦候選」「標示環」effect 會操作這些，
+    // 它們本來就不碰 renderer，維持原樣不變）
     const pathGroup  = new THREE.Group(); rg.add(pathGroup);  pathGroupRef.current  = pathGroup;
     const ringGroup  = new THREE.Group(); rg.add(ringGroup);  ringGroupRef.current  = ringGroup;
     const focusGroup = new THREE.Group(); rg.add(focusGroup); focusGroupRef.current = focusGroup;
@@ -403,21 +384,26 @@ export default function GlobalBrainExplorer({
     // 場景剛建立，標記需要畫第一幀
     needsRenderRef.current = true;
 
-    // ── 螢幕空間點擊判定 ──────────────────────────────────────
+    // ── 螢幕空間點擊判定（讀 layoutRef / nodeWorldPositionsRef，避免 stale closure）──
     function worldToScreenPx(worldPos: THREE.Vector3): { x: number; y: number } | null {
       const cam = cameraRef.current;
       if (!cam) return null;
       const proj = worldPos.clone().project(cam);
       if (Math.abs(proj.z) > 1) return null;
-      return { x: ((proj.x + 1) / 2) * width, y: ((1 - proj.y) / 2) * height };
+      return {
+        x: ((proj.x + 1) / 2) * widthRef.current,
+        y: ((1 - proj.y) / 2) * heightRef.current,
+      };
     }
 
     function findNearestNodeIndex(px: number, py: number): number | null {
-      if (!rotGroupRef.current || !layout) return null;
+      const currentLayout = layoutRef.current;
+      if (!rotGroupRef.current || !currentLayout) return null;
       let bestDist = PICK_PIXEL_RADIUS * PICK_PIXEL_RADIUS;
       let bestIdx: number | null = null;
-      layout.nodes.forEach((_, i) => {
-        const wp = nodeWorldPositions[i].clone();
+      currentLayout.nodes.forEach((_, i) => {
+        const wp = nodeWorldPositionsRef.current[i]?.clone();
+        if (!wp) return;
         rotGroupRef.current!.localToWorld(wp);
         const sp = worldToScreenPx(wp);
         if (!sp) return;
@@ -429,11 +415,6 @@ export default function GlobalBrainExplorer({
     }
 
     // ── Animation loop（按需渲染版）────────────────────────────
-    // 不再自動旋轉。每幀只做：
-    //   1) 可見性檢查 → 不可見直接 return，完全不耗用 GPU/CPU
-    //   2) 幀率上限節流（~24fps）
-    //   3) hover 偵測降頻（~10Hz）
-    //   4) 只有「畫面真的有變化」才呼叫 renderer.render()
     let frameCount = 0;
     function animate(now: number) {
       animFrameRef.current = requestAnimationFrame(animate);
@@ -451,14 +432,14 @@ export default function GlobalBrainExplorer({
         const hRing = hoverRingRef.current;
         if (hRing) {
           if (idx !== null) {
-            const wp = nodeWorldPositions[idx].clone();
+            const wp = nodeWorldPositionsRef.current[idx].clone();
             rotGroupRef.current!.localToWorld(wp);
             hRing.position.copy(wp);
             hRing.visible = true;
             if (tooltipRef.current) {
               const sp = worldToScreenPx(wp);
               if (sp) {
-                const node = layout?.nodes[idx];
+                const node = layoutRef.current?.nodes[idx];
                 const layerLabel = node ? CLUSTER_LABEL[clusterKeyOf(node)] : "";
                 tooltipRef.current.textContent = node
                   ? `${node.name}  ·  ${layerLabel}`
@@ -526,14 +507,15 @@ export default function GlobalBrainExplorer({
         const px  = e.clientX - r.left;
         const py  = e.clientY - r.top;
         const idx = findNearestNodeIndex(px, py);
-        if (idx !== null && layout) {
-          const clickedNode = layout.nodes[idx];
+        const currentLayout = layoutRef.current;
+        if (idx !== null && currentLayout) {
+          const clickedNode = currentLayout.nodes[idx];
           if (activeCandidateSetRef.current.has(clickedNode.id)) {
             setFocusedCandidateEid((prev) =>
               prev === clickedNode.id ? prev : clickedNode.id,
             );
           }
-          onNodeClick?.(clickedNode);
+          onNodeClickRef.current?.(clickedNode);
         } else {
           setFocusedCandidateEid(null);
         }
@@ -638,14 +620,134 @@ export default function GlobalBrainExplorer({
       document.removeEventListener("visibilitychange", onVisibilityChange);
       io?.disconnect();
 
-      // ── 完整釋放 GPU 資源，避免 resize 觸發重建時持續累積 ──────
+      // ── 完整釋放 GPU 資源，避免 unmount 時持續累積 ──────
       disposeObject3D(scene);
       renderer.dispose();
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layout, width, height, nodeWorldPositions, clusterStats, nodeIdxMap]);
 
-  // ── Active candidate 標示環 ────────────────────────────────
+      rendererRef.current     = null;
+      sceneRef.current        = null;
+      cameraRef.current       = null;
+      rotGroupRef.current     = null;
+      layoutGroupRef.current  = null;
+      pathGroupRef.current    = null;
+      ringGroupRef.current    = null;
+      focusGroupRef.current   = null;
+      hoverRingRef.current    = null;
+      markerPointsRef.current = null;
+    };
+    // 依賴陣列固定為 []：只在 canvas 掛載／卸載時執行一次。
+    // 易變資料（layout/nodeWorldPositions/width/height/onNodeClick）
+    // 一律透過 ref 讀取，見上方各個 xxxRef 的同步 effect。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ═════════════════════════════════════════════════════════
+  // Effect B — resize：只更新 renderer size / camera aspect，
+  //            不 dispose、不重建任何場景物件。
+  // ═════════════════════════════════════════════════════════
+  useEffect(() => {
+    const renderer = rendererRef.current;
+    const camera   = cameraRef.current;
+    if (!renderer || !camera || width <= 0 || height <= 0) return;
+    renderer.setSize(width, height);
+    camera.aspect = width / height;
+    camera.updateProjectionMatrix();
+    needsRenderRef.current = true;
+  }, [width, height]);
+
+  // ═════════════════════════════════════════════════════════
+  // Effect C — layout 資料變化：只重建 layoutGroup 底下的
+  //            marker points / neural mesh 邊 / 分區標籤，
+  //            renderer / scene / camera 完全不受影響。
+  // ═════════════════════════════════════════════════════════
+  useEffect(() => {
+    const layoutGroup = layoutGroupRef.current;
+    if (!layoutGroup || !layout || layout.nodes.length === 0) return;
+
+    disposeGroupChildren(layoutGroup);
+    layoutGroup.clear();
+    markerPointsRef.current = null;
+
+    // 節點標記
+    const n = layout.nodes.length;
+    const positions = new Float32Array(n * 3);
+    const colors    = new Float32Array(n * 3);
+    const sizes     = new Float32Array(n);
+
+    layout.nodes.forEach((node, i) => {
+      const p = nodeWorldPositions[i];
+      positions[i * 3] = p.x; positions[i * 3 + 1] = p.y; positions[i * 3 + 2] = p.z;
+      const c = categoryColor(node);
+      colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+      sizes[i] = isRC(node) ? SIZE.rc : SIZE.other;
+    });
+
+    const markerGeo = new THREE.BufferGeometry();
+    markerGeo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    markerGeo.setAttribute("color",    new THREE.BufferAttribute(colors, 3));
+    markerGeo.setAttribute("size",     new THREE.BufferAttribute(sizes, 1));
+
+    const markerMat = new THREE.ShaderMaterial({
+      vertexShader: /* glsl */`
+        attribute float size; attribute vec3 color; varying vec3 vColor;
+        void main() {
+          vColor = color;
+          vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+          gl_PointSize = size * (300.0 / -mvPos.z);
+          gl_Position  = projectionMatrix * mvPos;
+        }`,
+      fragmentShader: /* glsl */`
+        varying vec3 vColor;
+        void main() {
+          vec2 uv = gl_PointCoord - vec2(0.5);
+          float d = length(uv);
+          if (d > 0.5) discard;
+          if (d > 0.40) {
+            gl_FragColor = vec4(0.91, 0.93, 0.97, 1.0);
+          } else {
+            gl_FragColor = vec4(vColor, 1.0);
+          }
+        }`,
+      transparent: false,
+      depthWrite:  true,
+    });
+
+    const markerPoints = new THREE.Points(markerGeo, markerMat);
+    layoutGroup.add(markerPoints);
+    markerPointsRef.current = markerPoints;
+
+    // 神經網格（edges）
+    if (layout.edges.length > 0) {
+      const linePos: number[] = [];
+      layout.edges.forEach((e) => {
+        const si = nodeIdxMap.get(e.source);
+        const ti = nodeIdxMap.get(e.target);
+        if (si === undefined || ti === undefined) return;
+        const sp = nodeWorldPositions[si], tp = nodeWorldPositions[ti];
+        linePos.push(sp.x, sp.y, sp.z, tp.x, tp.y, tp.z);
+      });
+      if (linePos.length > 0) {
+        const meshGeo = new THREE.BufferGeometry();
+        meshGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(linePos), 3));
+        const meshMat = new THREE.LineBasicMaterial({ color: 0x3a4868, transparent: true, opacity: 0.10 });
+        layoutGroup.add(new THREE.LineSegments(meshGeo, meshMat));
+      }
+    }
+
+    // 分區浮動標籤（三層）
+    clusterStats.forEach((c) => {
+      const label = makeLabelSprite(
+        `${CLUSTER_LABEL[c.key]} ${c.pct.toFixed(0)}%`,
+        CLUSTER_LABEL_COLOR[c.key],
+      );
+      label.position.set(c.centroid.x, c.centroid.y + LABEL_Y_OFFSET, c.centroid.z);
+      layoutGroup.add(label);
+    });
+
+    needsRenderRef.current = true;
+  }, [layout, nodeWorldPositions, clusterStats, nodeIdxMap]);
+
+  // ── Active candidate 標示環（不碰 renderer，維持原樣）──────
   useEffect(() => {
     const ringGroup = ringGroupRef.current;
     if (!ringGroup || !layout) return;
@@ -666,7 +768,7 @@ export default function GlobalBrainExplorer({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeCandidateEids, focusedCandidateEid, nodeIdxMap, nodeWorldPositions, layout]);
 
-  // ── 聚焦候選：光暈 + foundation 路徑 ──────────────────────
+  // ── 聚焦候選：光暈 + foundation 路徑（不碰 renderer，維持原樣）──
   useEffect(() => {
     const focusGroup = focusGroupRef.current;
     const pathGroup  = pathGroupRef.current;

@@ -31,6 +31,31 @@
  * 效能與互動模式（drag 旋轉、wheel/pinch 縮放、按需渲染）
  * 直接沿用 GlobalBrainExplorer 已經驗證過的 pattern，
  * sprite 生成與 dispose helper 抽到 three-shared.ts 共用。
+ *
+ * ── Renderer 生命週期重構（新增）──────────────────────────────
+ *   原本 renderer/scene/camera/事件監聽/render loop 全部塞在同一個
+ *   useEffect，依賴陣列包含 [graph, width, height, focusedEid,
+ *   onFocusNode, onSelectSkill, selectedSkillEid]。這代表每次點擊
+ *   推薦 RC（graph 變）、面板 resize（width/height 變）、甚至只是
+ *   選取／取消選取一個 skill 徽章（selectedSkillEid 變），都會把
+ *   整顆 WebGLRenderer dispose 掉再重新 new 一次 —— 這是這幾個操作
+ *   裡最貴的一步，沒必要每次都做。
+ *
+ *   現在拆成四層生命週期：
+ *     1) Effect A（mount once，依賴 []）
+ *        建立 renderer / scene / camera / 靜態錐形線框 / 事件監聽 /
+ *        render loop。canvas 掛載後只建一次，卸載時才 dispose。
+ *        事件處理器裡需要讀的「易變資料」（graph、width、height、
+ *        onFocusNode、onSelectSkill）一律改讀對應的 ref，
+ *        避免 stale closure。
+ *     2) Effect B（resize，依賴 [width, height]）
+ *        只呼叫 renderer.setSize() + 更新 camera.aspect +
+ *        updateProjectionMatrix()，不 dispose 任何東西。
+ *     3) Effect C（資料重建，依賴 [graph, selectedSkillEid]）
+ *        只清空／重建 contentGroup（節點 sprite、edge 線、label、
+ *        skill 徽章、呼吸光暈），renderer 本身完全不受影響。
+ *   這樣「點推薦 RC」「resize」「選 skill 徽章」都不再需要重建
+ *   WebGL context，只有真正需要的那一小塊場景子樹會被重繪。
  */
 
 import { useEffect, useMemo, useRef } from "react";
@@ -74,6 +99,8 @@ type HNode = {
 };
 
 type HEdge = { source: string; target: string; kind: "foundation" | "downstream" };
+
+type HGraph = { nodes: HNode[]; edges: HEdge[] };
 
 type Props = {
   focusedEid: string;
@@ -125,6 +152,7 @@ const ZOOM_MIN     = 1.6;
 const ZOOM_MAX      = 9;
 const ZOOM_DEFAULT  = 4.4;
 const PICK_PIXEL_RADIUS = 18;
+const BADGE_PICK_PIXEL_RADIUS = 12;
 const MAX_PIXEL_RATIO   = 1.5;
 const RENDER_FRAME_MS   = 1000 / 30;
 
@@ -141,7 +169,7 @@ export function buildHourglassGraph(
   bertopicPosByEid: Map<string, BertopicPos>,
   bertopicCentroid: BertopicPos,
   skillEids: Set<string> = new Set(),
-): { nodes: HNode[]; edges: HEdge[] } {
+): HGraph {
   type Draft = { id: string; label: string; kind: HKind; depth: number };
   const draftMap = new Map<string, Draft>();
   const edges: HEdge[] = [];
@@ -349,11 +377,12 @@ export default function HourglassViz({
   const canvasRef  = useRef<HTMLCanvasElement | null>(null);
   const tooltipRef = useRef<HTMLDivElement | null>(null);
 
-  const sceneRef     = useRef<THREE.Scene | null>(null);
-  const rendererRef  = useRef<THREE.WebGLRenderer | null>(null);
-  const cameraRef    = useRef<THREE.PerspectiveCamera | null>(null);
-  const rotGroupRef  = useRef<THREE.Group | null>(null);
-  const animFrameRef = useRef<number>(0);
+  const sceneRef        = useRef<THREE.Scene | null>(null);
+  const rendererRef     = useRef<THREE.WebGLRenderer | null>(null);
+  const cameraRef       = useRef<THREE.PerspectiveCamera | null>(null);
+  const rotGroupRef     = useRef<THREE.Group | null>(null);
+  const contentGroupRef = useRef<THREE.Group | null>(null); // ← graph 相關內容的容器（Effect C 管理）
+  const animFrameRef    = useRef<number>(0);
 
   const isDragging     = useRef(false);
   const prevMouse       = useRef({ x: 0, y: 0 });
@@ -363,7 +392,20 @@ export default function HourglassViz({
   const isVisibleRef    = useRef(true);
   const needsRenderRef  = useRef(true);
   const lastFrameTsRef  = useRef(0);
-  const skillGlowRef    = useRef<THREE.Sprite | null>(null); // ← 新增：選取中 skill 的呼吸光暈
+  const skillGlowRef    = useRef<THREE.Sprite | null>(null); // 選取中 skill 的呼吸光暈
+
+  // ── 供 Effect A（mount-once）的事件處理器讀取「當下最新值」，
+  //    避免 stale closure，同時不需要把這些值放進 Effect A 的依賴陣列 ──
+  const graphRef           = useRef<HGraph>({ nodes: [], edges: [] });
+  const badgePositionsRef  = useRef<Map<string, { x: number; y: number; z: number }>>(new Map());
+  const widthRef           = useRef(width);
+  const heightRef          = useRef(height);
+  const onFocusNodeRef     = useRef(onFocusNode);
+  const onSelectSkillRef   = useRef(onSelectSkill);
+
+  useEffect(() => { widthRef.current = width; heightRef.current = height; }, [width, height]);
+  useEffect(() => { onFocusNodeRef.current = onFocusNode; }, [onFocusNode]);
+  useEffect(() => { onSelectSkillRef.current = onSelectSkill; }, [onSelectSkill]);
 
   const graph = useMemo(
     () => buildHourglassGraph(
@@ -373,11 +415,18 @@ export default function HourglassViz({
     [focusedEid, focusedLabel, foundationTree, downstreamChains, personalBrainEids, bertopicPosByEid, bertopicCentroid, skillEids],
   );
 
+  useEffect(() => { graphRef.current = graph; }, [graph]);
+
+  // ═════════════════════════════════════════════════════════
+  // Effect A — mount once：renderer / scene / camera / 靜態線框 /
+  //            事件監聽 / render loop。依賴陣列固定為 []，
+  //            canvas 掛載後只建一次，卸載時才整個 dispose。
+  // ═════════════════════════════════════════════════════════
   useEffect(() => {
-    if (!canvasRef.current || !focusedEid) return;
+    if (!canvasRef.current) return;
 
     const renderer = new THREE.WebGLRenderer({ canvas: canvasRef.current, antialias: true, alpha: true });
-    renderer.setSize(width, height);
+    renderer.setSize(widthRef.current, heightRef.current);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO));
     renderer.setClearColor(0x000000, 0);
     rendererRef.current = renderer;
@@ -385,7 +434,12 @@ export default function HourglassViz({
     const scene = new THREE.Scene();
     sceneRef.current = scene;
 
-    const camera = new THREE.PerspectiveCamera(55, width / height, 0.01, 100);
+    const camera = new THREE.PerspectiveCamera(
+      55,
+      widthRef.current / Math.max(heightRef.current, 1),
+      0.01,
+      100,
+    );
     camera.position.set(0, 0.3, ZOOM_DEFAULT);
     cameraRef.current = camera;
 
@@ -393,106 +447,35 @@ export default function HourglassViz({
     scene.add(rg);
     rotGroupRef.current = rg;
 
-    // ── 錐形線框（上半 downstream + 下半 foundation）──────────
+    // ── 錐形線框（靜態，不隨 graph 變化，只建一次）──────────
     rg.add(buildConeWireframe(0, HALF_HEIGHT, RIM_RADIUS));
     rg.add(buildConeWireframe(0, -HALF_HEIGHT, RIM_RADIUS));
 
-    // ── edges ──────────────────────────────────────────────
-    const nodeById = new Map(graph.nodes.map((n) => [n.id, n]));
-    const edgeLinePts: number[] = [];
-    const edgeColors: number[] = [];
-    const fColor = new THREE.Color(T.edge_foundation);
-    const dColor = new THREE.Color(T.edge_downstream);
-    graph.edges.forEach((e) => {
-      const s = nodeById.get(e.source);
-      const t = nodeById.get(e.target);
-      if (!s || !t) return;
-      edgeLinePts.push(s.x, s.y, s.z, t.x, t.y, t.z);
-      const c = e.kind === "foundation" ? fColor : dColor;
-      edgeColors.push(c.r, c.g, c.b, c.r, c.g, c.b);
-    });
-    if (edgeLinePts.length > 0) {
-      const edgeGeo = new THREE.BufferGeometry();
-      edgeGeo.setAttribute("position", new THREE.Float32BufferAttribute(edgeLinePts, 3));
-      edgeGeo.setAttribute("color", new THREE.Float32BufferAttribute(edgeColors, 3));
-      const edgeMat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.65 });
-      rg.add(new THREE.LineSegments(edgeGeo, edgeMat));
-    }
-
-    // ── nodes（sprite + 可選 label）───────────────────────────
-    const nodeGroup = new THREE.Group();
-    rg.add(nodeGroup);
-    const spritesById = new Map<string, THREE.Sprite>();
-    const badgePositions = new Map<string, { x: number; y: number; z: number }>();
-
-    graph.nodes.forEach((n) => {
-      const spr = spriteForKind(n.kind);
-      const scale = n.kind === "waist" ? 0.11 : n.kind === "downstream-final" ? 0.08 : 0.06;
-      spr.scale.set(scale, scale, 1);
-      spr.position.set(n.x, n.y, n.z);
-      spr.userData.eid = n.id;
-      nodeGroup.add(spr);
-      spritesById.set(n.id, spr);
-
-      if (n.kind === "waist") {
-        const glow = makeGlowSprite("#00d4aa");
-        glow.position.set(n.x, n.y, n.z);
-        glow.scale.set(0.5, 0.5, 1);
-        nodeGroup.add(glow);
-      }
-
-      if (alwaysShowLabel(n.kind)) {
-        const label = makeLabelSprite(
-          n.label.length > 16 ? n.label.slice(0, 15) + "…" : n.label,
-          labelColor(n.kind),
-        );
-        const lift = n.kind === "waist" ? 0.16 : 0.1;
-        label.position.set(n.x, n.y + lift, n.z);
-        label.scale.set(0.5, 0.11, 1);
-        nodeGroup.add(label);
-      }
-
-      // ── skill 徽章：獨立於 kind 的小閃電圖示，標記「可選取分析」──
-      if (n.hasSkill) {
-        const isSelected = n.id === selectedSkillEid;
-        const badge = makeBadgeSprite(
-          isSelected ? "#ffffff" : T.skill_badge,
-          isSelected ? T.skill_badge : T.skill_badge_stroke,
-        );
-        const bx = n.x + scale * 0.9;
-        const by = n.y + scale * 0.9;
-        const bz = n.z;
-        badge.position.set(bx, by, bz);
-        badge.userData.eid = n.id;
-        nodeGroup.add(badge);
-        badgePositions.set(n.id, { x: bx, y: by, z: bz });
-
-        if (isSelected) {
-          const glow = makeGlowSprite(T.skill_badge);
-          glow.position.set(bx, by, bz);
-          glow.scale.set(0.22, 0.22, 1);
-          nodeGroup.add(glow);
-          skillGlowRef.current = glow;
-        }
-      }
-    });
+    // ── graph 相關內容的容器：節點 / edge / label / skill 徽章，
+    //    交給 Effect C 專門管理，這裡只建立空容器 ──────────────
+    const contentGroup = new THREE.Group();
+    rg.add(contentGroup);
+    contentGroupRef.current = contentGroup;
 
     needsRenderRef.current = true;
 
-    // ── 螢幕空間最近節點偵測（沿用 GlobalBrainExplorer 手法）──
+    // ── 螢幕空間最近節點偵測（讀 graphRef，避免 stale closure）──
     function worldToScreenPx(worldPos: THREE.Vector3): { x: number; y: number } | null {
       const cam = cameraRef.current;
       if (!cam) return null;
       const proj = worldPos.clone().project(cam);
       if (Math.abs(proj.z) > 1) return null;
-      return { x: ((proj.x + 1) / 2) * width, y: ((1 - proj.y) / 2) * height };
+      return {
+        x: ((proj.x + 1) / 2) * widthRef.current,
+        y: ((1 - proj.y) / 2) * heightRef.current,
+      };
     }
 
     function findNearestNode(px: number, py: number): HNode | null {
       if (!rotGroupRef.current) return null;
       let bestDist = PICK_PIXEL_RADIUS * PICK_PIXEL_RADIUS;
       let best: HNode | null = null;
-      graph.nodes.forEach((n) => {
+      graphRef.current.nodes.forEach((n) => {
         const wp = new THREE.Vector3(n.x, n.y, n.z);
         rotGroupRef.current!.localToWorld(wp);
         const sp = worldToScreenPx(wp);
@@ -504,16 +487,13 @@ export default function HourglassViz({
       return best;
     }
 
-
-    const BADGE_PICK_PIXEL_RADIUS = 12;
-
     function findNearestSkillBadge(px: number, py: number): HNode | null {
       if (!rotGroupRef.current) return null;
       let bestDist = BADGE_PICK_PIXEL_RADIUS * BADGE_PICK_PIXEL_RADIUS;
       let best: HNode | null = null;
-      graph.nodes.forEach((n) => {
+      graphRef.current.nodes.forEach((n) => {
         if (!n.hasSkill) return;
-        const pos = badgePositions.get(n.id);
+        const pos = badgePositionsRef.current.get(n.id);
         if (!pos) return;
         const wp = new THREE.Vector3(pos.x, pos.y, pos.z);
         rotGroupRef.current!.localToWorld(wp);
@@ -525,6 +505,7 @@ export default function HourglassViz({
       });
       return best;
     }
+
     // ── render loop（按需渲染，沿用 GlobalBrainExplorer 節流策略）──
     function animate(now: number) {
       animFrameRef.current = requestAnimationFrame(animate);
@@ -544,7 +525,6 @@ export default function HourglassViz({
         needsRenderRef.current = false;
       }
     }
-
 
     // ── 互動事件 ────────────────────────────────────────────
     const canvas = canvasRef.current!;
@@ -567,11 +547,11 @@ export default function HourglassViz({
 
         const badgeHit = findNearestSkillBadge(px, py);
         if (badgeHit) {
-          onSelectSkill(badgeHit.id, badgeHit.label);   // ← 改為選取
+          onSelectSkillRef.current(badgeHit.id, badgeHit.label);   // ← 選取
         } else {
           const hit = findNearestNode(px, py);
           if (hit && (hit.kind === "downstream" || hit.kind === "downstream-final")) {
-            onFocusNode(hit.id, hit.label);
+            onFocusNodeRef.current(hit.id, hit.label);
           }
         }
       }
@@ -684,6 +664,8 @@ export default function HourglassViz({
       io.observe(canvas);
     }
 
+    animFrameRef.current = requestAnimationFrame(animate);
+
     return () => {
       cancelAnimationFrame(animFrameRef.current);
       canvas.removeEventListener("mousedown",  onMouseDown);
@@ -700,9 +682,127 @@ export default function HourglassViz({
 
       disposeObject3D(scene);
       renderer.dispose();
+
+      rendererRef.current     = null;
+      sceneRef.current        = null;
+      cameraRef.current       = null;
+      rotGroupRef.current     = null;
+      contentGroupRef.current = null;
+      skillGlowRef.current    = null;
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graph, width, height, focusedEid, onFocusNode, onSelectSkill, selectedSkillEid]);
+    // 依賴陣列固定為 []：只在 canvas 掛載／卸載時執行一次。
+    // 易變資料（graph/width/height/callback）一律透過 ref 讀取。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ═════════════════════════════════════════════════════════
+  // Effect B — resize：只更新 renderer size / camera aspect，
+  //            不 dispose、不重建任何場景物件。
+  // ═════════════════════════════════════════════════════════
+  useEffect(() => {
+    const renderer = rendererRef.current;
+    const camera   = cameraRef.current;
+    if (!renderer || !camera || width <= 0 || height <= 0) return;
+    renderer.setSize(width, height);
+    camera.aspect = width / height;
+    camera.updateProjectionMatrix();
+    needsRenderRef.current = true;
+  }, [width, height]);
+
+  // ═════════════════════════════════════════════════════════
+  // Effect C — graph 或 selectedSkillEid 變化：只重建 contentGroup
+  //            底下的節點 / edge / label / skill 徽章，renderer /
+  //            scene / camera 完全不受影響。
+  // ═════════════════════════════════════════════════════════
+  useEffect(() => {
+    const contentGroup = contentGroupRef.current;
+    if (!contentGroup) return;
+
+    disposeGroupChildren(contentGroup);
+    contentGroup.clear();
+    skillGlowRef.current = null;
+
+    // ── edges ──────────────────────────────────────────────
+    const nodeById = new Map(graph.nodes.map((n) => [n.id, n]));
+    const edgeLinePts: number[] = [];
+    const edgeColors: number[] = [];
+    const fColor = new THREE.Color(T.edge_foundation);
+    const dColor = new THREE.Color(T.edge_downstream);
+    graph.edges.forEach((e) => {
+      const s = nodeById.get(e.source);
+      const t = nodeById.get(e.target);
+      if (!s || !t) return;
+      edgeLinePts.push(s.x, s.y, s.z, t.x, t.y, t.z);
+      const c = e.kind === "foundation" ? fColor : dColor;
+      edgeColors.push(c.r, c.g, c.b, c.r, c.g, c.b);
+    });
+    if (edgeLinePts.length > 0) {
+      const edgeGeo = new THREE.BufferGeometry();
+      edgeGeo.setAttribute("position", new THREE.Float32BufferAttribute(edgeLinePts, 3));
+      edgeGeo.setAttribute("color", new THREE.Float32BufferAttribute(edgeColors, 3));
+      const edgeMat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.65 });
+      contentGroup.add(new THREE.LineSegments(edgeGeo, edgeMat));
+    }
+
+    // ── nodes（sprite + 可選 label）───────────────────────────
+    const nodeGroup = new THREE.Group();
+    contentGroup.add(nodeGroup);
+    const badgePositions = new Map<string, { x: number; y: number; z: number }>();
+
+    graph.nodes.forEach((n) => {
+      const spr = spriteForKind(n.kind);
+      const scale = n.kind === "waist" ? 0.11 : n.kind === "downstream-final" ? 0.08 : 0.06;
+      spr.scale.set(scale, scale, 1);
+      spr.position.set(n.x, n.y, n.z);
+      spr.userData.eid = n.id;
+      nodeGroup.add(spr);
+
+      if (n.kind === "waist") {
+        const glow = makeGlowSprite("#00d4aa");
+        glow.position.set(n.x, n.y, n.z);
+        glow.scale.set(0.5, 0.5, 1);
+        nodeGroup.add(glow);
+      }
+
+      if (alwaysShowLabel(n.kind)) {
+        const label = makeLabelSprite(
+          n.label.length > 16 ? n.label.slice(0, 15) + "…" : n.label,
+          labelColor(n.kind),
+        );
+        const lift = n.kind === "waist" ? 0.16 : 0.1;
+        label.position.set(n.x, n.y + lift, n.z);
+        label.scale.set(0.5, 0.11, 1);
+        nodeGroup.add(label);
+      }
+
+      // ── skill 徽章：獨立於 kind 的小閃電圖示，標記「可選取分析」──
+      if (n.hasSkill) {
+        const isSelected = n.id === selectedSkillEid;
+        const badge = makeBadgeSprite(
+          isSelected ? "#ffffff" : T.skill_badge,
+          isSelected ? T.skill_badge : T.skill_badge_stroke,
+        );
+        const bx = n.x + scale * 0.9;
+        const by = n.y + scale * 0.9;
+        const bz = n.z;
+        badge.position.set(bx, by, bz);
+        badge.userData.eid = n.id;
+        nodeGroup.add(badge);
+        badgePositions.set(n.id, { x: bx, y: by, z: bz });
+
+        if (isSelected) {
+          const glow = makeGlowSprite(T.skill_badge);
+          glow.position.set(bx, by, bz);
+          glow.scale.set(0.22, 0.22, 1);
+          nodeGroup.add(glow);
+          skillGlowRef.current = glow;
+        }
+      }
+    });
+
+    badgePositionsRef.current = badgePositions;
+    needsRenderRef.current = true;
+  }, [graph, selectedSkillEid]);
 
   return (
     <div style={{ position: "relative", width, height }}>
