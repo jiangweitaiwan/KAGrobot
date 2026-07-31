@@ -8,6 +8,16 @@
  *
  * GlobalBrainExplorer.tsx 之後應該改成從這裡 import，而不是保留自己的私有版本，
  * 這是這次重構順手做的清理，行為完全不變。
+ *
+ * ── Mipmap 修正（新增）──────────────────────────────────────
+ *   所有 CanvasTexture 一律關閉 generateMipmaps，並改用 LinearFilter。
+ *   原因：makeLabelSprite 的 canvas 尺寸是 320x72（非二的次方，NPOT），
+ *   部分瀏覽器/驅動在為 NPOT 貼圖產生 mipmap 時，會誤觸 texImage3D 上傳
+ *   路徑並丟出「texImage3D: FLIP_Y or PREMULTIPLY_ALPHA isn't allowed
+ *   for uploading 3D textures」這個 INVALID_OPERATION 錯誤，導致該次
+ *   render pass 後續的 draw call 一併被拖垮（畫面整個空白，不只是那個
+ *   NPOT 貼圖消失）。這些 sprite 貼圖本來就不會被縮到很小，不需要 mip
+ *   chain，直接關閉最乾淨，也順便省一點記憶體與生成 mipmap 的成本。
  */
 
 import * as THREE from "three";
@@ -57,6 +67,14 @@ export function roundRectPath(
   ctx.closePath();
 }
 
+/** 統一套用在所有 CanvasTexture 上的設定：關閉 mipmap，避免 NPOT 貼圖
+ *  觸發 texImage3D 錯誤並拖垮整個 render pass（見檔頭說明）。 */
+function configureCanvasTexture(tex: THREE.CanvasTexture): void {
+  tex.generateMipmaps = false;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+}
+
 export function makeLabelSprite(text: string, colorHex: string): THREE.Sprite {
   const canvas = document.createElement("canvas");
   canvas.width = 320; canvas.height = 72;
@@ -73,6 +91,7 @@ export function makeLabelSprite(text: string, colorHex: string): THREE.Sprite {
   ctx.textBaseline = "middle";
   ctx.fillText(text, canvas.width / 2, canvas.height / 2);
   const tex = new THREE.CanvasTexture(canvas);
+  configureCanvasTexture(tex);
   const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
   const spr = new THREE.Sprite(mat);
   spr.scale.set(0.62, 0.14, 1);
@@ -89,6 +108,7 @@ export function makeRingSprite(colorHex: string, lineWidth = 5): THREE.Sprite {
   ctx.arc(32, 32, 24, 0, Math.PI * 2);
   ctx.stroke();
   const tex = new THREE.CanvasTexture(canvas);
+  configureCanvasTexture(tex);
   const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
   return new THREE.Sprite(mat);
 }
@@ -105,6 +125,7 @@ export function makeGlowSprite(colorHex: string): THREE.Sprite {
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, 128, 128);
   const tex = new THREE.CanvasTexture(canvas);
+  configureCanvasTexture(tex);
   const mat = new THREE.SpriteMaterial({
     map: tex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
   });
@@ -123,6 +144,7 @@ export function makeFlatDotSprite(colorHex: string, strokeHex = "#e8eef8"): THRE
   ctx.lineWidth = 2;
   ctx.stroke();
   const tex = new THREE.CanvasTexture(canvas);
+  configureCanvasTexture(tex);
   const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
   const spr = new THREE.Sprite(mat);
   spr.scale.set(0.05, 0.05, 1);
@@ -141,6 +163,7 @@ export function makeHollowDotSprite(strokeHex: string, lineWidth = 3): THREE.Spr
   ctx.arc(16, 16, 9, 0, Math.PI * 2);
   ctx.stroke();
   const tex = new THREE.CanvasTexture(canvas);
+  configureCanvasTexture(tex);
   const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
   const spr = new THREE.Sprite(mat);
   spr.scale.set(0.05, 0.05, 1);
@@ -166,6 +189,7 @@ export function makeBadgeSprite(colorHex: string, strokeHex = "#fff3c4"): THREE.
   ctx.lineWidth = 1.2;
   ctx.stroke();
   const tex = new THREE.CanvasTexture(canvas);
+  configureCanvasTexture(tex);
   const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
   const spr = new THREE.Sprite(mat);
   spr.scale.set(0.045, 0.045, 1);
