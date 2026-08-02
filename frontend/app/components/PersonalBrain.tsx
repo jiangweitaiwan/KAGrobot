@@ -408,28 +408,36 @@ export default function PersonalBrain({
         <div style={{
           position: "absolute", bottom: 14, left: 0, right: 0,
           display: "flex", justifyContent: "center", padding: "0 12px",
-          pointerEvents: "auto",
+          pointerEvents: "auto", boxSizing: "border-box",
         }}>
           <div style={{
-            display: "flex", alignItems: "center", gap: 8,
+            display: "flex", alignItems: "center", gap: 6,
             background: "rgba(3,1,8,0.85)",
             border: "1px solid rgba(255,204,77,0.4)",
             borderRadius: 20,
             padding: "6px 8px 6px 14px",
             backdropFilter: "blur(4px)",
             boxShadow: "0 0 12px rgba(255,204,77,0.15)",
+            maxWidth: "100%",
+            minWidth: 0,
+            boxSizing: "border-box",
           }}>
-            <span style={{ fontSize: "0.68rem", color: "#ffcc4d", fontFamily: "monospace", whiteSpace: "nowrap" }}>
+            <span style={{
+              fontSize: "0.68rem", color: "#ffcc4d", fontFamily: "monospace",
+              whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+              minWidth: 0, flexShrink: 1,
+            }}>
               ⚡ 執行「{pendingSkill.label}」
             </span>
             <button
               onClick={() => setPendingSkill(null)}
               disabled={isSubmitting}
               style={{
-                fontSize: "0.62rem", padding: "3px 10px", borderRadius: 14,
+                fontSize: "0.62rem", padding: "3px 8px", borderRadius: 14,
                 border: "1px solid rgba(127,119,221,0.3)", background: "transparent",
                 color: "rgba(175,169,236,0.7)",
                 cursor: isSubmitting ? "default" : "pointer", fontFamily: "monospace",
+                flexShrink: 0, whiteSpace: "nowrap",
               }}
             >
               取消
@@ -438,12 +446,13 @@ export default function PersonalBrain({
               onClick={handleConfirmLaunch}
               disabled={isSubmitting}
               style={{
-                fontSize: "0.62rem", padding: "3px 12px", borderRadius: 14,
+                fontSize: "0.62rem", padding: "3px 10px", borderRadius: 14,
                 border: "1px solid #ffcc4d",
                 background: isSubmitting ? "rgba(255,204,77,0.08)" : "rgba(255,204,77,0.18)",
                 color: "#ffcc4d",
                 cursor: isSubmitting ? "default" : "pointer",
                 fontFamily: "monospace", fontWeight: 600,
+                flexShrink: 0, whiteSpace: "nowrap",
               }}
             >
               {isSubmitting ? "送出中…" : "🚀 送出"}
