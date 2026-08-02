@@ -25,7 +25,7 @@ from pathlib import Path
 
 from core.semantic_context import SemanticContext
 from graph_service.semantic_scorer import combine_score, type_overlap
-
+from core.firebase_auth import require_auth
 router = APIRouter()
 
 
@@ -190,14 +190,14 @@ def _get_anchor_label(request: Request, eid: str) -> str:
         return label
     return _anchor_label_from_neo4j(request.app.state.driver, eid)
 
-def _get_semantic_context(request: Request, session_id: str) -> SemanticContext:
+def _get_semantic_context(request: Request, uid: str, session_id: str) -> SemanticContext:
     """從 orchestrator checkpoint 讀出該 session 目前的 SemanticContext。
 
     LangGraph 的 MemorySaver checkpointer 是純記憶體 dict 讀取，
     get_state() 本身開銷極小，這裡不特別包 asyncio.to_thread。
     """
     orchestrator = request.app.state.orchestrator
-    config = {"configurable": {"thread_id": session_id}}
+    config = {"configurable": {"thread_id": f"{uid}:{session_id}"}}
     try:
         snapshot = orchestrator.get_state(config)
     except Exception:
@@ -342,6 +342,7 @@ async def rc_semantic_scores(
     request:    Request,
     session_id: Optional[str] = None,
     query:      Optional[str] = None,
+    uid:        str = Depends(require_auth),
 ) -> SemanticScoresResponse:
     """計算所有 Resulting Concept 對目前 SemanticContext 的匹配分數。
 
@@ -352,7 +353,7 @@ async def rc_semantic_scores(
     candidate_retriever = request.app.state.candidate_retriever
 
     ctx = (
-        _get_semantic_context(request, session_id)
+        _get_semantic_context(request, uid, session_id)
         if session_id
         else SemanticContext(query=query or "")
     )
@@ -380,8 +381,12 @@ async def rc_semantic_scores(
     return SemanticScoresResponse(query=ctx.query, scores=results)
 
 @router.get("/brain/semantic-context", response_model=SemanticContextResponse)
-async def semantic_context(session_id: str, request: Request) -> SemanticContextResponse:
-    ctx = _get_semantic_context(request, session_id)
+async def semantic_context(
+    session_id: str,
+    request:    Request,
+    uid:        str = Depends(require_auth),
+) -> SemanticContextResponse:
+    ctx = _get_semantic_context(request, uid, session_id)
     return SemanticContextResponse(
         session_id=session_id,
         query=ctx.query,
@@ -464,8 +469,9 @@ def _load_bertopic_layout(request: Request) -> BertopicLayoutResponse:
 async def foundation_recommendations(
     session_id: str,
     request:    Request,
+    uid:        str = Depends(require_auth),
 ) -> FoundationRecommendationsResponse:
-    ctx = _get_semantic_context(request, session_id)
+    ctx = _get_semantic_context(request, uid, session_id)
     if not ctx.embedding_text.strip():
         return FoundationRecommendationsResponse(session_id=session_id, recommendations=[])
 
