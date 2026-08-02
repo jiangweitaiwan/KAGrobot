@@ -19,14 +19,14 @@ is_anonymous / provider 狀態。
 from __future__ import annotations
 
 import time
-from typing import List, Optional
+from typing import Any, Dict, List, Optional  # ← 加入 Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException
 from firebase_admin import auth as fb_auth
 from pydantic import BaseModel
 
 from core.firebase_auth import require_auth, require_auth_claims
-from core.session_store import list_sessions
+from core.session_store import list_sessions, load_session_display  # ← 新增 import
 
 router = APIRouter()
 
@@ -70,6 +70,20 @@ class SessionSummary(BaseModel):
 class SessionListResponse(BaseModel):
     sessions: List[SessionSummary]
 
+
+class SessionDisplayMessage(BaseModel):
+    role:        str
+    content:     str
+    attachments: List[Dict[str, Any]] = []
+    created_at:  int
+
+
+class SessionDetailResponse(BaseModel):
+    session_id:        str
+    phase:             str
+    display_messages:  List[SessionDisplayMessage]
+    selected_rc_eid:   Optional[str] = None
+    selected_rc_label: Optional[str] = None
 
 class DeleteAccountResponse(BaseModel):
     ok: bool
@@ -189,6 +203,32 @@ async def get_my_sessions(uid: str = Depends(require_auth)) -> SessionListRespon
     """
     sessions = await list_sessions(uid)
     return SessionListResponse(sessions=[SessionSummary(**s) for s in sessions])
+
+
+
+@router.get("/me/sessions/{session_id}", response_model=SessionDetailResponse)
+async def get_session_detail(
+    session_id: str,
+    uid:        str = Depends(require_auth),
+) -> SessionDetailResponse:
+    """回傳指定 session 的完整聊天紀錄，供前端「接續歷史對話」還原畫面。
+
+    display_messages 已是前端 ChatMessage 可直接渲染的格式
+    （role/content/attachments），不需要再額外轉換。
+    """
+    detail = await load_session_display(uid, session_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="找不到此對話紀錄")
+
+    return SessionDetailResponse(
+        session_id=detail["session_id"],
+        phase=detail["phase"],
+        display_messages=[
+            SessionDisplayMessage(**m) for m in detail["display_messages"]
+        ],
+        selected_rc_eid=detail.get("selected_rc_eid"),
+        selected_rc_label=detail.get("selected_rc_label"),
+    )
 
 
 @router.delete("/me", response_model=DeleteAccountResponse)

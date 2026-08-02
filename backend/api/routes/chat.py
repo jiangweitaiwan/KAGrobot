@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import time  
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, Request
@@ -125,6 +126,28 @@ async def chat_endpoint(
     attachments = [
         Attachment(**a) for a in (result.get("attachments") or [])
     ]
+
+
+    # ── 這一輪的「前端展示用」訊息，供之後 GET /me/sessions/{session_id}
+    #    還原聊天畫面使用。與 main_state_messages（LangGraph 還原用，
+    #    格式不同、且過濾了帶 tool_calls 的訊息）刻意分開存，
+    #    因為用途不同：這裡要完整保留使用者實際看到的內容。
+    now_ms = int(time.time() * 1000)
+    turn_messages = [
+        {
+            "role":        "user",
+            "content":     body.message,
+            "attachments": [],
+            "created_at":  now_ms,
+        },
+        {
+            "role":        "ai",
+            "content":     reply_text,
+            "attachments": [a.model_dump() for a in attachments],
+            "created_at":  now_ms,
+        },
+    ]
+
 
     # ── 備份本輪結束後的狀態到 Firestore（best-effort，內部已 try/except）
     await save_session_snapshot(uid, body.session_id, result)

@@ -46,6 +46,29 @@ type ChatResponse = {
   skill_used?:    string | null;
 };
 
+type SessionSummary = {
+  session_id: string;
+  phase?:     string | null;
+  summary:    string;
+  updated_at?: number | null;
+  created_at?: number | null;
+};
+
+type SessionDisplayMessage = {
+  role:        string;
+  content:     string;
+  attachments: Attachment[];
+  created_at:  number;
+};
+
+type SessionDetail = {
+  session_id:        string;
+  phase:             string;
+  display_messages:  SessionDisplayMessage[];
+  selected_rc_eid?:  string | null;
+  selected_rc_label?: string | null;
+};
+
 // ─────────────────────────────────────────────────────────────
 // Constants
 // ─────────────────────────────────────────────────────────────
@@ -260,6 +283,33 @@ async function fetchExpandBatch(
   }
 }
 
+async function fetchMySessions(): Promise<SessionSummary[]> {
+  if (!API_BASE) return [];
+  try {
+    const r = await apiFetch(`${API_BASE.replace(/\/$/, "")}/me/sessions`);
+    if (!r.ok) throw new Error(`${r.status}`);
+    const d = await r.json();
+    return d.sessions ?? [];
+  } catch (err) {
+    console.warn("[me/sessions]", err);
+    return [];
+  }
+}
+
+async function fetchSessionDetail(sessionId: string): Promise<SessionDetail | null> {
+  if (!API_BASE) return null;
+  try {
+    const r = await apiFetch(
+      `${API_BASE.replace(/\/$/, "")}/me/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    if (!r.ok) throw new Error(`${r.status}`);
+    return await r.json();
+  } catch (err) {
+    console.warn("[me/sessions/detail]", err);
+    return null;
+  }
+}
+
 // ─────────────────────────────────────────────────────────────
 // ChatBubble — 拆解 [[attachment:N]] 佔位符為附件卡片
 // ─────────────────────────────────────────────────────────────
@@ -316,6 +366,10 @@ export default function Page() {
   const [input,     setInput]     = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error,     setError]     = useState("");
+
+  const [historySessions, setHistorySessions] = useState<SessionSummary[]>([]);
+  const [showHistory,     setShowHistory]     = useState(false);
+  const [loadingHistory,  setLoadingHistory]  = useState(false);
 
   // ── Global layout ──────────────────────────────────────────
   const [globalLayout,        setGlobalLayout]        = useState<GlobalLayout | null>(null);
@@ -727,6 +781,61 @@ export default function Page() {
     setRecommendedFoundations([]);
   }
 
+  const openHistory = useCallback(async () => {
+    setShowHistory(true);
+    setLoadingHistory(true);
+    const list = await fetchMySessions();
+    // 依最後更新時間新到舊（後端已排序，這裡保底再排一次）
+    list.sort((a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0));
+    setHistorySessions(list);
+    setLoadingHistory(false);
+  }, []);
+
+  const handleLoadSession = useCallback(async (sid: string) => {
+    setShowHistory(false);
+    setIsLoading(true);
+    setError("");
+
+    const sessionDetail = await fetchSessionDetail(sid);
+    setIsLoading(false);
+
+    if (!sessionDetail) {
+      setError("讀取對話紀錄失敗，請稍後再試");
+      return;
+    }
+
+    const restoredMessages: ChatMessage[] = sessionDetail.display_messages.map((m) => ({
+      id:          createId(),
+      role:        m.role === "user" ? "user" : "ai",
+      content:     m.content,
+      attachments: m.attachments ?? [],
+    }));
+
+    setSessionId(sessionDetail.session_id);
+    setPhase(sessionDetail.phase);
+    setMessages(restoredMessages);
+
+    // ── 清空與舊聚焦狀態相關的暫存，避免殘留上一個 session 的畫面 ──
+    setRCFoundationMap(new Map());
+    setRCSemanticScores([]);
+    expandFetchedRef.current = new Set();
+    setSelectedNode(null);
+    setDetail(null);
+    setFoundationTree(null);
+    setSemanticContext(null);
+    setRecommendedFoundations([]);
+
+    localStorage.setItem(SESSION_KEY, sessionDetail.session_id);
+    localStorage.setItem(PHASE_KEY, sessionDetail.phase);
+    saveHistory(restoredMessages);
+
+    // ── 補齊 Semantic 機制的畫面（GlobalBrain 點亮 / SemanticPanel），
+    //    這些不含在 display_messages 裡，需要額外重新拉一次 ──
+    fetchSemanticContextData(sessionDetail.session_id).then(setSemanticContext);
+    fetchSemanticScores(sessionDetail.session_id).then(setRCSemanticScores);
+    fetchFoundationRecommendations(sessionDetail.session_id).then(setRecommendedFoundations);
+  }, []);
+
   const inputPlaceholder =
     phase === "main_agent" ? "繼續詢問分析…" : "輸入你的問題…";
 
@@ -756,6 +865,9 @@ export default function Page() {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {!authLoading && <AuthPanel />}
+          <button type="button" onClick={openHistory} disabled={isLoading}>
+            歷史對話
+          </button>
           <button type="button" onClick={resetConversation} disabled={isLoading}>
             開新對話
           </button>
@@ -861,6 +973,70 @@ export default function Page() {
         </div>
 
       </div>
+      {/* ── 歷史對話 modal ── */}
+      {showHistory && (
+        <div
+          onClick={() => setShowHistory(false)}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(3,1,8,0.72)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            zIndex: 1000, padding: 20,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 380, maxWidth: "100%", maxHeight: "70vh", overflowY: "auto",
+              background: "var(--panel)", border: "1px solid var(--border)",
+              borderRadius: 14, padding: 16,
+              display: "flex", flexDirection: "column", gap: 8,
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{
+                fontSize: "0.62rem", letterSpacing: "0.18em", textTransform: "uppercase",
+                color: "var(--orange)",
+              }}>
+                歷史對話
+              </span>
+              <button type="button" onClick={() => setShowHistory(false)} style={{ padding: "2px 8px" }}>
+                ✕
+              </button>
+            </div>
+
+            {loadingHistory ? (
+              <div className="meta">載入中…</div>
+            ) : historySessions.length === 0 ? (
+              <div className="meta">尚無歷史對話紀錄</div>
+            ) : (
+              historySessions.map((s) => (
+                <button
+                  key={s.session_id}
+                  type="button"
+                  onClick={() => handleLoadSession(s.session_id)}
+                  style={{
+                    textAlign: "left", display: "flex", flexDirection: "column", gap: 2,
+                    padding: "8px 10px",
+                  }}
+                >
+                  <span style={{
+                    fontSize: "0.7rem", color: "var(--text)",
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  }}>
+                    {s.summary
+                      ? (s.summary.length > 40 ? s.summary.slice(0, 40) + "…" : s.summary)
+                      : `session ${s.session_id.slice(0, 8)}…`}
+                  </span>
+                  <span style={{ fontSize: "0.6rem", color: "var(--muted)" }}>
+                    {s.phase ?? ""}
+                    {s.updated_at ? ` · ${new Date(s.updated_at).toLocaleString()}` : ""}
+                  </span>
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+      )}
     </main>
   );
 }
