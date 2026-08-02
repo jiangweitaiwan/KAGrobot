@@ -13,6 +13,20 @@
                  service account json
       Cloud Run / GCE 部署 → Application Default Credentials，
                  使用附掛的服務帳號，容器內不需要放任何金鑰檔案
+
+【會員系統擴充】
+  require_auth_claims：與 require_auth 相同的驗證邏輯，但回傳完整
+  decoded token（uid / email / email_verified / firebase.sign_in_provider
+  等），供需要判斷「使用者是不是匿名帳號」「用哪個 provider 登入」的
+  路由使用（例如 GET /me）。刻意獨立一個 dependency，而不是把 require_auth
+  的回傳型別從 str 改成 dict——避免動到現有一大票只需要 uid 字串的路由。
+
+  匿名使用者（signInAnonymously）與一般使用者共用同一套 verify_id_token
+  驗證路徑：Firebase 對匿名使用者一樣會核發合法 ID token，
+  decoded["firebase"]["sign_in_provider"] == "anonymous"。
+  也因此，前端「先匿名使用、之後升級為正式帳號」的流程完全不需要
+  後端另外處理——升級（linkWithCredential / linkWithPopup）不會改變
+  uid，所有既有以 uid 為 key 的資料（brain / sessions）自動延續。
 """
 
 from __future__ import annotations
@@ -73,6 +87,30 @@ async def require_auth(
         raise HTTPException(status_code=401, detail="登入憑證缺少 uid")
 
     return uid
+
+
+async def require_auth_claims(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+) -> dict:
+    """與 require_auth 相同的驗證，但回傳完整 decoded token dict。
+
+    供需要 email / email_verified / sign_in_provider 等額外資訊的路由
+    使用（目前為 GET/PATCH /me）。
+    """
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(status_code=401, detail="缺少登入憑證（Authorization header）")
+
+    _ensure_initialized()
+
+    try:
+        decoded = fb_auth.verify_id_token(credentials.credentials)
+    except Exception:
+        raise HTTPException(status_code=401, detail="登入憑證無效或已過期")
+
+    if not decoded.get("uid"):
+        raise HTTPException(status_code=401, detail="登入憑證缺少 uid")
+
+    return decoded
 
 
 async def optional_auth(
