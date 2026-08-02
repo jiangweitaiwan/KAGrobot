@@ -22,6 +22,10 @@ import type { SemanticContextData, RecommendedFoundation } from "./components/Se
 
 import { AttachmentCard, AttachmentTray, type Attachment } from "./components/AttachmentCard";
 
+import { useAuth } from "./components/AuthProvider";
+import AuthPanel from "./components/AuthPanel";
+import { apiFetch } from "../lib/apiFetch";
+
 
 const GlobalBrainExplorer = dynamic(() => import("./components/GlobalBrainExplorer"), { ssr: false });
 const PersonalBrain       = dynamic(() => import("./components/PersonalBrain"),       { ssr: false });
@@ -46,10 +50,12 @@ type ChatResponse = {
 // Constants
 // ─────────────────────────────────────────────────────────────
 
+// 注意：使用者身分（uid）不再由本檔案自行產生／存進 localStorage，
+// 一律來自 Firebase Auth（見 AuthProvider）——匿名使用者也有真正的
+// Firebase uid，登入/升級帳號時 uid 不變，資料自動延續。
 const SESSION_KEY = "kagrobot_session_id";
 const HISTORY_KEY = "kagrobot_history";
 const PHASE_KEY   = "kagrobot_phase";
-const USER_ID_KEY = "kagrobot_user_id";
 const MAX_HISTORY = 60;
 const ALPHA       = 0.5;
 
@@ -181,13 +187,13 @@ function usePanelSize(ref: React.RefObject<HTMLDivElement>) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Semantic 機制 fetch helpers
+// Semantic 機制 fetch helpers（一律透過 apiFetch 帶上登入憑證）
 // ─────────────────────────────────────────────────────────────
 
 async function fetchSemanticContextData(sessionId: string): Promise<SemanticContextData | null> {
   if (!API_BASE || !sessionId) return null;
   try {
-    const r = await fetch(
+    const r = await apiFetch(
       `${API_BASE.replace(/\/$/, "")}/brain/semantic-context?session_id=${encodeURIComponent(sessionId)}`,
     );
     if (!r.ok) throw new Error(`${r.status}`);
@@ -202,7 +208,7 @@ async function fetchSemanticContextData(sessionId: string): Promise<SemanticCont
 async function fetchSemanticScores(sessionId: string): Promise<RCSemanticScore[]> {
   if (!API_BASE || !sessionId) return [];
   try {
-    const r = await fetch(
+    const r = await apiFetch(
       `${API_BASE.replace(/\/$/, "")}/brain/rc-semantic-scores?session_id=${encodeURIComponent(sessionId)}`,
     );
     if (!r.ok) throw new Error(`${r.status}`);
@@ -217,7 +223,7 @@ async function fetchSemanticScores(sessionId: string): Promise<RCSemanticScore[]
 async function fetchFoundationRecommendations(sessionId: string): Promise<RecommendedFoundation[]> {
   if (!API_BASE || !sessionId) return [];
   try {
-    const r = await fetch(
+    const r = await apiFetch(
       `${API_BASE.replace(/\/$/, "")}/brain/foundation-recommendations?session_id=${encodeURIComponent(sessionId)}`,
     );
     if (!r.ok) throw new Error(`${r.status}`);
@@ -240,7 +246,7 @@ async function fetchExpandBatch(
 }>> {
   if (!API_BASE || eids.length === 0) return {};
   try {
-    const r = await fetch(`${API_BASE.replace(/\/$/, "")}/graph/expand/batch`, {
+    const r = await apiFetch(`${API_BASE.replace(/\/$/, "")}/graph/expand/batch`, {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
       body:    JSON.stringify({ eids }),
@@ -298,9 +304,11 @@ function ChatBubble({ msg }: { msg: ChatMessage }) {
 // ─────────────────────────────────────────────────────────────
 
 export default function Page() {
-  // ── Identity ───────────────────────────────────────────────
+  // ── Identity（uid 來自 Firebase Auth，見 AuthProvider）──────
+  const { user, loading: authLoading } = useAuth();
+  const userId = user?.uid ?? "";
+
   const [sessionId, setSessionId] = useState("");
-  const [userId,    setUserId]    = useState("");
   const [phase,     setPhase]     = useState("socratic");
 
   // ── Chat ───────────────────────────────────────────────────
@@ -367,13 +375,11 @@ export default function Page() {
   );
 
   // ──────────────────────────────────────────────────────────
-  // Init from localStorage
+  // Init from localStorage（session/phase/history 仍是本機裝置層級的
+  // 「目前開著哪個對話」設定，與登入身分無關；身分本身完全交給
+  // AuthProvider／Firebase 管理，這裡不再產生或讀寫任何 uid）
   // ──────────────────────────────────────────────────────────
   useEffect(() => {
-    let uid = localStorage.getItem(USER_ID_KEY);
-    if (!uid) { uid = createId(); localStorage.setItem(USER_ID_KEY, uid); }
-    setUserId(uid);
-
     const storedSession = localStorage.getItem(SESSION_KEY);
     const sid           = storedSession || createId();
     if (!storedSession) localStorage.setItem(SESSION_KEY, sid);
@@ -391,11 +397,12 @@ export default function Page() {
     boxRef.current.scrollTop = boxRef.current.scrollHeight;
   }, [messages, isLoading]);
 
-  // ── Load Personal Brain ────────────────────────────────────
+  // ── Load Personal Brain（等待 Firebase 給出 uid 後才觸發，
+  //    匿名使用者一樣有 uid，不會因為還沒登入正式帳號而卡住）──
   useEffect(() => {
     if (!userId || !API_BASE || brainLoaded) return;
     setBrainLoaded(true);
-    fetch(`${API_BASE.replace(/\/$/, "")}/user/${userId}/brain`)
+    apiFetch(`${API_BASE.replace(/\/$/, "")}/user/${userId}/brain`)
       .then((r) => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); })
       .then((d) => { if (d.concepts?.length) setPersonalBrain(d.concepts); })
       .catch((err) => console.warn("[PersonalBrain] load failed:", err));
@@ -403,22 +410,22 @@ export default function Page() {
 
   // ── Fetch global layout ────────────────────────────────────
   useEffect(() => {
-    if (messages.length === 0 || globalLayoutFetched || !API_BASE) return;
+    if (messages.length === 0 || globalLayoutFetched || !API_BASE || !userId) return;
     setGlobalLayoutFetched(true);
-    fetch(`${API_BASE.replace(/\/$/, "")}/graph/global-layout`)
+    apiFetch(`${API_BASE.replace(/\/$/, "")}/graph/global-layout`)
       .then((r) => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); })
       .then((d: GlobalLayout) => setGlobalLayout(d))
       .catch((err) => console.warn("[GlobalBrain] layout fetch failed:", err));
-  }, [messages, globalLayoutFetched]);
+  }, [messages, globalLayoutFetched, userId]);
 
   // ── Fetch BERTopic layout(一次性,和 globalLayout 同步觸發)──
   useEffect(() => {
-    if (!API_BASE || bertopicLayout !== null) return;
-    fetch(`${API_BASE.replace(/\/$/, "")}/graph/bertopic-layout`)
+    if (!API_BASE || !userId || bertopicLayout !== null) return;
+    apiFetch(`${API_BASE.replace(/\/$/, "")}/graph/bertopic-layout`)
       .then((r) => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); })
       .then((d: BertopicLayoutData) => setBertopicLayout(d))
       .catch((err) => console.warn("[BertopicLayout] fetch failed:", err));
-  }, [bertopicLayout]);
+  }, [bertopicLayout, userId]);
 
   // ── RCFoundationMap 統一補齊：一律走 /graph/expand/batch，merge-only，
   //    不再有「先用 all_graphs 建、再補洞」的雙軌邏輯。
@@ -470,8 +477,8 @@ export default function Page() {
     const base = API_BASE.replace(/\/$/, "");
 
     const [detailRes, treeRes] = await Promise.allSettled([
-      fetch(`${base}/concept/detail/${node.id}`).then((r) => r.json() as Promise<ConceptDetail>),
-      fetch(`${base}/graph/expand/${node.id}`).then((r) => r.json() as Promise<FoundationTreeData>),
+      apiFetch(`${base}/concept/detail/${node.id}`).then((r) => r.json() as Promise<ConceptDetail>),
+      apiFetch(`${base}/graph/expand/${node.id}`).then((r) => r.json() as Promise<FoundationTreeData>),
     ]);
 
     if (detailRes.status === "fulfilled") setDetail(detailRes.value);
@@ -495,7 +502,7 @@ export default function Page() {
 
   const persistBrainEntry = useCallback((entry: PersonalBrainConcept) => {
     if (!API_BASE || !userId) return;
-    fetch(`${API_BASE.replace(/\/$/, "")}/user/${userId}/brain/concepts`, {
+    apiFetch(`${API_BASE.replace(/\/$/, "")}/user/${userId}/brain/concepts`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(entry),
     }).catch((err) => console.warn("[brain/add]", err));
@@ -520,14 +527,14 @@ export default function Page() {
   const removeFromBrain = useCallback((eid: string) => {
     setPersonalBrain((prev) => prev.filter((c) => c.eid !== eid));
     if (!API_BASE || !userId) return;
-    fetch(`${API_BASE.replace(/\/$/, "")}/user/${userId}/brain/concepts/${eid}`, { method: "DELETE" })
+    apiFetch(`${API_BASE.replace(/\/$/, "")}/user/${userId}/brain/concepts/${eid}`, { method: "DELETE" })
       .catch((err) => console.warn("[brain/remove]", err));
   }, [userId]);
 
   const updateWeight = useCallback((eid: string, weight: number) => {
     setPersonalBrain((prev) => prev.map((c) => c.eid === eid ? { ...c, weight } : c));
     if (!API_BASE || !userId) return;
-    fetch(`${API_BASE.replace(/\/$/, "")}/user/${userId}/brain/concepts/${eid}`, {
+    apiFetch(`${API_BASE.replace(/\/$/, "")}/user/${userId}/brain/concepts/${eid}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ weight }),
     }).catch((err) => console.warn("[brain/weight]", err));
@@ -540,7 +547,7 @@ export default function Page() {
   const fetchRCPaths = useCallback(async (eid: string): Promise<RCPathData | null> => {
     if (!API_BASE) return null;
     try {
-      const r = await fetch(`${API_BASE.replace(/\/$/, "")}/graph/rc-paths/${eid}`);
+      const r = await apiFetch(`${API_BASE.replace(/\/$/, "")}/graph/rc-paths/${eid}`);
       if (!r.ok) throw new Error(`${r.status}`);
       return await r.json();
     } catch (err) {
@@ -552,7 +559,7 @@ export default function Page() {
   const fetchConceptDetail = useCallback(async (eid: string): Promise<ConceptDetail | null> => {
     if (!API_BASE) return null;
     try {
-      const r = await fetch(`${API_BASE.replace(/\/$/, "")}/concept/detail/${eid}`);
+      const r = await apiFetch(`${API_BASE.replace(/\/$/, "")}/concept/detail/${eid}`);
       if (!r.ok) throw new Error(`${r.status}`);
       return await r.json();
     } catch (err) {
@@ -568,7 +575,7 @@ export default function Page() {
   const fetchFoundationTree = useCallback(async (eid: string): Promise<FoundationTreeData | null> => {
     if (!API_BASE) return null;
     try {
-      const r = await fetch(`${API_BASE.replace(/\/$/, "")}/graph/expand/${eid}`);
+      const r = await apiFetch(`${API_BASE.replace(/\/$/, "")}/graph/expand/${eid}`);
       if (!r.ok) throw new Error(`${r.status}`);
       return await r.json();
     } catch (err) {
@@ -584,7 +591,7 @@ export default function Page() {
   const handleLaunchSkill = useCallback(async (
     rcEid: string, rcLabel: string,
   ) => {
-    if (!sessionId || isLoading || !API_BASE) return;
+    if (!sessionId || isLoading || !API_BASE || !userId) return;
 
     addFoundationsToBrain([{ eid: rcEid, label: rcLabel }]);
 
@@ -597,7 +604,7 @@ export default function Page() {
     setError("");
 
     try {
-      const resp = await fetch(`${API_BASE.replace(/\/$/, "")}/chat`, {
+      const resp = await apiFetch(`${API_BASE.replace(/\/$/, "")}/chat`, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({
@@ -621,13 +628,13 @@ export default function Page() {
       if (!isTypingRef.current) saveHistory(messagesRef.current);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, isLoading, phase, addFoundationsToBrain]);
+  }, [sessionId, isLoading, phase, userId, addFoundationsToBrain]);
 
   // ──────────────────────────────────────────────────────────
   // Chat
   // ──────────────────────────────────────────────────────────
 
-  const canSend = !!input.trim() && !isLoading && !!sessionId;
+  const canSend = !!input.trim() && !isLoading && !!sessionId && !!userId;
 
   async function typewriterAppend(fullText: string, attachments: Attachment[] = []): Promise<void> {
     isTypingRef.current = true;
@@ -667,7 +674,7 @@ export default function Page() {
     setMessages((prev) => [...prev, userMsg]);
 
     try {
-      const response = await fetch(`${API_BASE.replace(/\/$/, "")}/chat`, {
+      const response = await apiFetch(`${API_BASE.replace(/\/$/, "")}/chat`, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({
@@ -747,9 +754,12 @@ export default function Page() {
             )}
           </div>
         </div>
-        <button type="button" onClick={resetConversation} disabled={isLoading}>
-          開新對話
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {!authLoading && <AuthPanel />}
+          <button type="button" onClick={resetConversation} disabled={isLoading}>
+            開新對話
+          </button>
+        </div>
       </header>
 
       {/* ── Four-column layout ── */}
