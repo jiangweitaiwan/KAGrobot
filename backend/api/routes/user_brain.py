@@ -12,9 +12,13 @@ Collection 結構：
       updatedAt: int (unix ms)
   }
 
-uid 由瀏覽器自行產生（UUID），不需要 auth。
-這是有意的設計決策：Personal Brain 是輕量個人偏好，
-不涉及敏感資料，未來要加 auth 只需在此加 middleware。
+【更新】uid 擁有權驗證：
+  舊版設計是「uid 由瀏覽器自行產生的 UUID，不需要 auth」——
+  這代表任何人只要知道別人的 UUID，就能讀寫別人的 Personal Brain。
+  現在改為：uid 必須與 Authorization header 帶的 Firebase ID token
+  解出的 uid 一致，否則回傳 403（見 _verify_owner）。
+  路徑仍保留 {uid}，是因為前端既有的匿名 UUID 使用者可以透過
+  Firebase「匿名登入」升級成正式帳號、uid 不變，資料不需要遷移。
 """
 
 from __future__ import annotations
@@ -22,8 +26,10 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+
+from core.firebase_auth import require_auth
 
 router = APIRouter()
 
@@ -57,12 +63,25 @@ class UpdateWeightRequest(BaseModel):
     weight: float = Field(ge=0.0, le=1.0)
 
 
+# ── Auth dependency ───────────────────────────────────────────────────
+
+async def _verify_owner(uid: str, caller_uid: str = Depends(require_auth)) -> str:
+    """確保呼叫者已驗證的 uid 與路徑上的 uid 一致，否則 403。
+
+    caller_uid 由 Firebase ID token 解出，無法偽造；
+    uid 仍做基本格式檢查，防止 path traversal 之類的異常輸入。
+    """
+    _validate_uid(uid)
+    if caller_uid != uid:
+        raise HTTPException(status_code=403, detail="無權存取此使用者的資料")
+    return uid
+
+
 # ── Routes ────────────────────────────────────────────────────────────
 
 @router.get("/user/{uid}/brain", response_model=BrainSnapshot)
-async def get_brain(uid: str) -> BrainSnapshot:
+async def get_brain(uid: str, _owner: str = Depends(_verify_owner)) -> BrainSnapshot:
     """讀取 Personal Brain 完整 snapshot。"""
-    _validate_uid(uid)
     db  = _get_db()
     doc = await db.collection("users").document(uid).collection("brain").document("snapshot").get()
 
@@ -75,9 +94,12 @@ async def get_brain(uid: str) -> BrainSnapshot:
 
 
 @router.post("/user/{uid}/brain/concepts", response_model=BrainSnapshot)
-async def add_concept(uid: str, body: BrainConcept) -> BrainSnapshot:
+async def add_concept(
+    uid:    str,
+    body:   BrainConcept,
+    _owner: str = Depends(_verify_owner),
+) -> BrainSnapshot:
     """加入或更新一個 concept（eid 已存在則更新 weight / source）。"""
-    _validate_uid(uid)
     db      = _get_db()
     ref     = db.collection("users").document(uid).collection("brain").document("snapshot")
     doc     = await ref.get()
@@ -107,9 +129,13 @@ async def add_concept(uid: str, body: BrainConcept) -> BrainSnapshot:
 
 
 @router.patch("/user/{uid}/brain/concepts/{eid}", response_model=BrainSnapshot)
-async def update_weight(uid: str, eid: str, body: UpdateWeightRequest) -> BrainSnapshot:
+async def update_weight(
+    uid:    str,
+    eid:    str,
+    body:   UpdateWeightRequest,
+    _owner: str = Depends(_verify_owner),
+) -> BrainSnapshot:
     """只更新 weight，不異動其他欄位。"""
-    _validate_uid(uid)
     db  = _get_db()
     ref = db.collection("users").document(uid).collection("brain").document("snapshot")
     doc = await ref.get()
@@ -135,9 +161,12 @@ async def update_weight(uid: str, eid: str, body: UpdateWeightRequest) -> BrainS
 
 
 @router.delete("/user/{uid}/brain/concepts/{eid}", response_model=BrainSnapshot)
-async def remove_concept(uid: str, eid: str) -> BrainSnapshot:
+async def remove_concept(
+    uid:    str,
+    eid:    str,
+    _owner: str = Depends(_verify_owner),
+) -> BrainSnapshot:
     """從 Personal Brain 移除一個 concept。"""
-    _validate_uid(uid)
     db  = _get_db()
     ref = db.collection("users").document(uid).collection("brain").document("snapshot")
     doc = await ref.get()

@@ -108,6 +108,7 @@ class OrchestratorNodes:
         selected_rc_eid   = state.get("selected_rc_eid")
         selected_rc_label = state.get("selected_rc_label") or ""
         confirmed_rc_eid  = state.get("confirmed_rc_eid")
+        uid                = state.get("uid")
 
         # skill 綁定的是 RC，不是 path——同一個 RC 不管走哪條 path
         # 到達，都是同一顆 skill，不該觸發 sandbox 重建。
@@ -150,6 +151,7 @@ class OrchestratorNodes:
             history,
             skill=skill,
             sandbox_id=sandbox_id,
+            uid=uid,
         )
 
         output_messages: List[BaseMessage] = []

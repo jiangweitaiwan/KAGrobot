@@ -45,6 +45,15 @@ Attachment 收集（新增）：
   在文字中插入 [[attachment:{ref}]] 佔位符標記位置（見
   tools/skill_code.py 的 get_sandbox_file 工具說明）。
 
+  【更新】uid 命名空間：chat(..., uid=...) 由呼叫端（OrchestratorNodes，
+  最終來自 api/routes/chat.py 已驗證的 Firebase uid）傳入，往下交給
+  tools/skill_code.py 的 get_sandbox_file 工具，讓輸出檔案的 GCS 物件
+  路徑改為 "{uid}/{sandbox_id}/{filename}"，避免不同使用者的輸出檔案
+  只靠 sandbox_id 分隔（sandbox_id 本身不對外洩漏，但仍以 uid 多加一層
+  隔離，方便未來要依使用者盤點/清理輸出檔案時有明確前綴可用）。
+  uid 為 None 時（理論上不會發生，因為 /chat 已強制登入）以 "anon"
+  代替，不讓工具直接壞掉。
+
 References 注入（lazy loading）：
   skill.prompt_context 只含 references 的檔名索引（見 skill_loader.py）。
   若 skill.has_references 為真，會額外掛上 read_skill_reference 工具，
@@ -165,6 +174,7 @@ class MainAgent:
         history:        List[BaseMessage],
         skill:          Optional["RCSkill"] = None,
         sandbox_id:     Optional[str]       = None,
+        uid:            Optional[str]       = None,
     ) -> dict:
         """單次處理對話請求（完全無狀態）。
 
@@ -176,6 +186,11 @@ class MainAgent:
         skill          : 選取 path 後對應的 RC Skill（可為 None）
         sandbox_id     : 此 session 既有的 e2b sandbox id（可為 None，
                          代表尚未建立，或上一輪重新選路後已捨棄）
+        uid            : 已驗證的使用者 id（見 api/routes/chat.py），
+                         供 get_sandbox_file 工具替輸出檔案加上使用者
+                         命名空間；可為 None（理論上不會，因為 /chat
+                         已強制登入，此處保留 None 只是為了向後相容
+                         直接呼叫 MainAgent 的既有測試/腳本）
 
         Returns
         -------
@@ -210,7 +225,9 @@ class MainAgent:
         attachment_state: dict = {"items": []}
 
         system_prompt = self._build_system_prompt(socrates_state, skill)
-        tools         = self._build_tools(socrates_state, skill, sandbox_state, attachment_state)
+        tools         = self._build_tools(
+            socrates_state, skill, sandbox_state, attachment_state, uid=uid,
+        )
         has_tools     = bool(tools)
 
         llm_bound = self._base_llm.bind_tools(tools) if has_tools else self._base_llm
@@ -245,7 +262,9 @@ class MainAgent:
         query         = socrates_state.get("query")
         sandbox_state = {"id": None}
         attachment_state: dict = {"items": []}
-        tools         = self._build_tools(socrates_state, skill, sandbox_state, attachment_state)
+        tools         = self._build_tools(
+            socrates_state, skill, sandbox_state, attachment_state, uid=None,
+        )
         tool_names    = [t.name for t in tools]
         skill_info    = f"  RC Skill: {skill.rc_name}" if skill else "  RC Skill: （無）"
         return "\n".join([
@@ -433,6 +452,7 @@ class MainAgent:
         skill:            Optional["RCSkill"],
         sandbox_state:    dict,
         attachment_state: dict,
+        uid:              Optional[str] = None,
     ) -> List[StructuredTool]:
         langchain_tools: List[StructuredTool] = []   # ← 修正：搬到最上面，兩個分支都能安全 append
 
@@ -459,6 +479,7 @@ class MainAgent:
                             skill.rc_name,
                             self._skill_outputs_bucket,
                             attachment_state,
+                            uid=uid,
                         )
                     )
                 else:

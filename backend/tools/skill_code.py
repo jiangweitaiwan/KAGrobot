@@ -13,9 +13,12 @@ lazy create、連線快取、僅在 sandbox 不可用時重置三件事只有一
                        上傳至 GCS 並回傳簽名 URL
 
 GCS 路徑分割策略：
-  用 sandbox_id（而非 session_id）作為路徑前綴 —— sandbox_id 本身就是
-  「此 session + 此 skill」的唯一鍵，不需要額外把 session_id 往下傳，
-  也天然避免不同使用者的輸出檔案互相碰撞或覆蓋。
+  物件路徑改為 "{uid}/{sandbox_id}/{filename}"（原本只用 sandbox_id）。
+  uid 為已驗證的使用者 id（見 core/main_agent.py 的 chat(..., uid=...)），
+  sandbox_id 仍是「此 session + 此 skill」的唯一鍵，兩者疊加後，
+  即使未來要依使用者盤點、清理或審計輸出檔案，也有明確前綴可用；
+  uid 缺失時（理論上不會發生，因為 /chat 已強制登入）退回 "anon"，
+  不讓工具因此直接失敗。
 
 Attachment 結構化回傳（新增）：
   get_sandbox_file 不再要求 LLM 自己把簽名 URL 貼進回覆文字——那樣做
@@ -162,6 +165,7 @@ def make_get_sandbox_file_tool(
     skill_name:       str,
     bucket_name:      str,
     attachment_state: dict,
+    uid:              Optional[str] = None,
 ) -> StructuredTool:
     """建立 get_sandbox_file 工具。
 
@@ -178,7 +182,12 @@ def make_get_sandbox_file_tool(
                          會 append 一筆 {ref, kind, url, filename,
                          created_at}，chat() 結束後由 MainAgent 讀出
                          回傳給呼叫端，最終組成 ChatResponse.attachments。
+    uid               : 已驗證的使用者 id（見 core/main_agent.py），
+                         用於在 GCS 物件路徑加上使用者命名空間
+                         "{uid}/{sandbox_id}/{filename}"。為 None 時
+                         退回 "anon"，不影響工具正常運作。
     """
+    uid_segment = uid or "anon"
 
     def get_sandbox_file(rel_path: str) -> str:
         """把此 Skill 沙盒內的檔案（例如 run_skill_code 產出的圖表或報告）
@@ -200,7 +209,7 @@ def make_get_sandbox_file_tool(
 
         sandbox_id = computer.sandbox_id or "unknown-sandbox"
         filename   = os.path.basename(rel_path) or "output"
-        object_key = f"{sandbox_id}/{filename}"
+        object_key = f"{uid_segment}/{sandbox_id}/{filename}"
 
         try:
             url = _upload_and_sign(bucket_name, object_key, data)

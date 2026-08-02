@@ -10,6 +10,10 @@
      （已統一由 BFSCoordinator 管理）
   6. DownstreamBFS / UpstreamBFS 仍保留在 app.state，
      供非 coordinator 路徑使用（未來可逐步遷移）
+  7. 【新增】掛載 users_router（/me、/me/sessions），供登入後的
+     profile 與對話 session 列表使用（見 api/routes/users.py）。
+     Firebase Admin SDK 的初始化採 lazy（見 core/firebase_auth.py），
+     不需要在這裡的 lifespan 額外處理。
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ from api.routes                    import (
     concept_router,
     user_brain_router,
     brain_router,
+    users_router,
 )
 
 from core.skill_sandbox import SkillSandboxProvisioner
@@ -162,5 +167,6 @@ def create_app() -> FastAPI:
     app.include_router(concept_router)
     app.include_router(user_brain_router)
     app.include_router(brain_router)
+    app.include_router(users_router)
 
     return app
