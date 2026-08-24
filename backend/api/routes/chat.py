@@ -150,7 +150,10 @@ async def chat_endpoint(
 
 
     # ── 備份本輪結束後的狀態到 Firestore（best-effort，內部已 try/except）
-    await save_session_snapshot(uid, body.session_id, result)
+    await save_session_snapshot(
+        uid, body.session_id, result,
+        turn_messages=turn_messages,
+    )
 
     return ChatResponse(
         reply          = reply_text,
