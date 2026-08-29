@@ -79,6 +79,8 @@ export type GlobalLayoutNode = {
   name:    string;
   type:    string;
   source?: string;
+  category?: string | null;        
+  category_color?: string | null;  
   x:       number;
   y:       number;
   z:       number;
@@ -441,9 +443,10 @@ export default function GlobalBrainExplorer({
               if (sp) {
                 const node = layoutRef.current?.nodes[idx];
                 const layerLabel = node ? CLUSTER_LABEL[clusterKeyOf(node)] : "";
+                const categoryLabel = node?.category ? `  ·  ${node.category}` : "";
                 tooltipRef.current.textContent = node
-                  ? `${node.name}  ·  ${layerLabel}`
-                  : "";
+                  ? `${node.name}  ·  ${layerLabel}${categoryLabel}`
+                  : "";                
                 tooltipRef.current.style.left    = `${sp.x + 12}px`;
                 tooltipRef.current.style.top     = `${sp.y - 8}px`;
                 tooltipRef.current.style.opacity = "1";

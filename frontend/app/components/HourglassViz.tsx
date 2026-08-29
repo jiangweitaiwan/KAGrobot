@@ -105,6 +105,8 @@ type HGraph = { nodes: HNode[]; edges: HEdge[] };
 type Props = {
   focusedEid: string;
   focusedLabel: string;
+  focusedCategory?: string | null;        
+  focusedCategoryColor?: string | null; 
   foundationTree: FoundationTreeData | null;
   downstreamChains: ChainStep[][];
   personalBrainEids: Set<string>;
@@ -361,6 +363,8 @@ function labelColor(kind: HKind): string {
 export default function HourglassViz({
   focusedEid,
   focusedLabel,
+  focusedCategory = null,
+  focusedCategoryColor = null,
   foundationTree,
   downstreamChains,
   personalBrainEids,
@@ -799,10 +803,21 @@ export default function HourglassViz({
         }
       }
     });
+    // ── waist 分類標籤（只有聚焦節點有分類時才顯示，位置在 waist label 下方）──
+    if (focusedCategory) {
+      const catLabel = makeLabelSprite(
+        `#${focusedCategory}`,
+        focusedCategoryColor || T.text_dim,
+      );
+      // waist label 本身 lift = 0.16，分類標籤放更下面一點，避免重疊
+      catLabel.position.set(0, -0.1, 0);
+      catLabel.scale.set(0.4, 0.09, 1);
+      nodeGroup.add(catLabel);
+    }
 
     badgePositionsRef.current = badgePositions;
     needsRenderRef.current = true;
-  }, [graph, selectedSkillEid]);
+  }, [graph, selectedSkillEid, focusedCategory, focusedCategoryColor]);    
 
   return (
     <div style={{ position: "relative", width, height }}>

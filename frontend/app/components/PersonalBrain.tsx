@@ -62,6 +62,7 @@ type Props = {
   fetchRCPaths:  (eid: string) => Promise<RCPathData | null>;
   fetchFoundationTree: (eid: string) => Promise<FoundationTreeData | null>;
   isSubmitting?: boolean;   // ← 新增：main_agent 請求進行中時鎖住按鈕
+  rcCategoryMap?: Map<string, { category: string; color?: string | null }>;
   width?:        number;
   height?:       number;
 };
@@ -123,6 +124,7 @@ export default function PersonalBrain({
   fetchRCPaths,
   fetchFoundationTree,
   isSubmitting = false,
+  rcCategoryMap,
   width  = 480,
   height = 480,
 }: Props) {
@@ -135,7 +137,10 @@ export default function PersonalBrain({
   const [pendingSkill,    setPendingSkill]    = useState<{ eid: string; label: string } | null>(null); // ← 新增
 
   const focused = breadcrumb.length > 0 ? breadcrumb[breadcrumb.length - 1] : null;
-
+  const focusedCategoryInfo = useMemo(
+    () => (focused ? rcCategoryMap?.get(focused.eid) ?? null : null),
+    [focused, rcCategoryMap],
+  );    
   useEffect(() => {
     setPendingSkill(null);
   }, [focused?.eid]);
@@ -279,6 +284,8 @@ export default function PersonalBrain({
         <HourglassViz
           focusedEid={focused?.eid ?? ""}
           focusedLabel={focused?.label ?? ""}
+          focusedCategory={focusedCategoryInfo?.category ?? null}
+          focusedCategoryColor={focusedCategoryInfo?.color ?? null}
           foundationTree={focusFoundation}
           downstreamChains={downstreamChains}
           personalBrainEids={personalBrainEids}
@@ -348,6 +355,7 @@ export default function PersonalBrain({
           {rcRanking.slice(0, 3).map((rc, i) => {
             const isRoot = breadcrumb.length > 0 && breadcrumb[0].eid === rc.eid;
             const color  = ["#c060ff", "#7f77dd", "#534AB7"][i];
+            const cat    = rcCategoryMap?.get(rc.eid);
             return (
               <button
                 key={rc.eid}
@@ -366,6 +374,14 @@ export default function PersonalBrain({
                 <span style={{ marginLeft: 4, fontSize: "0.56rem", opacity: 0.7 }}>
                   {(rc.totalScore * 100).toFixed(0)}
                 </span>
+                {cat && (
+                  <span style={{
+                    marginLeft: 6, fontSize: "0.56rem", opacity: 0.75,
+                    color: cat.color ?? "rgba(175,169,236,0.8)",
+                  }}>
+                    #{cat.category}
+                  </span>
+                )}                
               </button>
             );
           })}

@@ -51,6 +51,7 @@ from api.routes                    import (
 )
 
 from core.skill_sandbox import SkillSandboxProvisioner
+from retrieval.rc_category_loader import RCCategoryLoader
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -118,6 +119,7 @@ async def lifespan(app: FastAPI):
         coordinator=coordinator,
         encoder=encoder,
     )
+    rc_category_loader = RCCategoryLoader(bucket_name=s.gcs_bucketforresult)
 
     # ── app.state ─────────────────────────────────────────────
     app.state.orchestrator    = orchestrator
@@ -135,6 +137,8 @@ async def lifespan(app: FastAPI):
     app.state.bertopic_layout = None   # GET /graph/bertopic-layout 的結果快取
     # 注意：expand_cache / rcpath_cache 已移入 BFSCoordinator，
     # 此處不再設置，routes_brain.py 也已更新為使用 coordinator
+    app.state.rc_category_loader = rc_category_loader
+    app.state.rc_category_map    = None
 
     yield
 

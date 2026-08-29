@@ -180,6 +180,20 @@ function computeRCRanking(
   return results.sort((a, b) => b.totalScore - a.totalScore).slice(0, 3);
 }
 
+/** eid → {category, color} 查表，供 DetailPanel 標題列 / PersonalBrain
+ *  Top-3 推薦標籤 / HourglassViz waist 標籤共用。資料來源是
+ *  globalLayout.nodes 上的 category / category_color 欄位
+ *  （由後端 /graph/global-layout 合併 GCS rc_categories.json 產生），
+ *  不需要額外 fetch。*/
+function buildRCCategoryMap(
+    layout: GlobalLayout | null,
+  ): Map<string, { category: string; color?: string | null }> {
+    const m = new Map<string, { category: string; color?: string | null }>();
+    layout?.nodes.forEach((n) => {
+      if (n.category) m.set(n.id, { category: n.category, color: n.category_color });
+    });
+    return m;
+  }
 // ─────────────────────────────────────────────────────────────
 // usePanelSize(加入 resize 防抖)
 // ─────────────────────────────────────────────────────────────
@@ -420,6 +434,12 @@ export default function Page() {
   const rcRanking = useMemo(
     () => computeRCRanking(personalBrain, rcSemanticScores, rcFoundationMap, ALPHA),
     [personalBrain, rcSemanticScores, rcFoundationMap],
+  );
+  // ── RC 分類標籤查表（GlobalBrain hover / DetailPanel / PersonalBrain
+  //    推薦標籤 / HourglassViz waist 共用，見 buildRCCategoryMap）──────
+  const rcCategoryMap = useMemo(
+    () => buildRCCategoryMap(globalLayout),
+    [globalLayout],
   );
 
   // ── 本次 session 至今所有附件（供橫向 tray 彙總顯示）───────
@@ -941,6 +961,7 @@ export default function Page() {
           rcSemanticScores={rcSemanticScores}
           rcFoundationMap={rcFoundationMap}
           alpha={ALPHA}
+          rcCategoryMap={rcCategoryMap}
           fetchConceptDetail={fetchConceptDetail}
           onAddFoundations={addFoundationsToBrain}
           onRemove={removeFromBrain}
@@ -963,6 +984,7 @@ export default function Page() {
             personalBrain={personalBrain}
             rcRanking={rcRanking}
             bertopicLayout={bertopicLayout}
+            rcCategoryMap={rcCategoryMap}   
             fetchFoundationTree={fetchFoundationTree}
             onLaunchSkill={handleLaunchSkill}
             fetchRCPaths={fetchRCPaths}

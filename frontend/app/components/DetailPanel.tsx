@@ -59,6 +59,7 @@ type Props = {
   personalBrain:     PersonalBrainConcept[];
   rcSemanticScores:  RCSemanticScore[];
   rcFoundationMap:   RCFoundationMap;
+  rcCategoryMap?:    Map<string, { category: string; color?: string | null }>;
   alpha:             number;
   fetchConceptDetail: (eid: string) => Promise<ConceptDetail | null>;
   onAddFoundations:  (eids: { eid: string; label: string }[]) => void;
@@ -720,6 +721,7 @@ export default function DetailPanel({
   personalBrain,
   rcSemanticScores,
   rcFoundationMap,
+  rcCategoryMap,
   alpha,
   fetchConceptDetail,
   onAddFoundations,
@@ -817,7 +819,10 @@ export default function DetailPanel({
   const brainEntry = node ? (personalBrain.find((c) => c.eid === node.id) ?? null) : null;
   const isInBrain  = !!brainEntry;
   const isRC       = (node?.type || "").toLowerCase().includes("resulting");
-
+  // ── RC 分類標籤（來自 GCS rc_categories.json，經 /graph/global-layout
+  //    合併後由 page.tsx 建表傳入；查無分類時 undefined，不顯示）──────
+  const categoryInfo = node ? rcCategoryMap?.get(node.id) : undefined;
+  
   const activeDetail = previewLoading ? null : (previewDetail ?? detail);
 
   return (
@@ -854,6 +859,15 @@ export default function DetailPanel({
               <span className="detail-concept-name">
                 {detail?.rc_name ?? node.name}
               </span>
+              {categoryInfo && (
+                <span style={{
+                  fontSize: "0.6rem",
+                  color:    categoryInfo.color || "var(--purple)",
+                  opacity:  0.85,
+                }}>
+                  #{categoryInfo.category}
+                </span>
+              )}
             </div>
             <button
               className="detail-btn-secondary"
