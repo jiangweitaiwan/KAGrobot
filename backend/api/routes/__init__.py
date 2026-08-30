@@ -7,6 +7,7 @@ from api.routes.concept      import router as concept_router
 from api.routes.user_brain   import router as user_brain_router
 from api.routes.routes_brain import router as brain_router
 from api.routes.users        import router as users_router
+from api.routes.routes_walk  import router as walk_router
 
 __all__ = [
     "chat_router",
@@ -15,4 +16,5 @@ __all__ = [
     "user_brain_router",
     "brain_router",
     "users_router",
+    "walk_router",
 ]
