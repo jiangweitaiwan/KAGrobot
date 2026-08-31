@@ -1,52 +1,65 @@
 # -*- coding: utf-8 -*-
-"""api/routes/routes_walk.py — Random Walk Mode 的 4 個 endpoint。
+"""api/routes/routes_walk.py — Random Walk Mode 的 4 個 endpoint（改版）。
 
-POST /walk/start           → 語意搜尋起點（StartConceptPool），建立 WalkSession
-GET  /walk/stream/{walk_id}   → SSE 串流，逐輪推進，停在 question 或 walk_complete
-POST /walk/answer/{walk_id}   → 提交回答，回應本身是新一段 SSE 串流（resume）
-GET  /walk/ranking/{walk_id}  → walk 結束後，套用 walk_ranking.py 公式算最終排名
+【變更說明 — 改用 orchestrator.astream() 驅動】
+不再有獨立的 WalkTurnRunner.run_turn() 手動迴圈 + app.state.walk_sessions
+這個 process 內記憶體 dict（那條路完整定義見 core/walk_bot.py 檔頭的
+「併入 orchestrator 後的狀態」說明，該 class 現已是 legacy，只是暫時沒
+刪）。walk 的狀態現在活在 orchestrator 自己的 MemorySaver checkpointer
+裡，跟 dialogue mode 共用同一套 thread_id 慣例（"{uid}:{walk_id}"）：
 
-WalkSession 的存放：
-  目前是 app.state.walk_sessions 這個 process 內記憶體 dict（key 為
-  f"{uid}:{walk_id}"）。比照 orchestrator 的 MemorySaver（見
-  orchestrator/orchestrator_graph.py）——同樣是「重啟即遺失」的取捨。
-  dialogue mode 有 core/session_store.py 做 Firestore 備援，random walk
-  mode 目前沒有對應機制；由於這個 mode 設計上「不允許中途切換」且通常
-  一次性跑完，重啟後遺失、使用者重新開一次 walk，代價比 dialogue mode
-  中途遺失小很多，先接受這個限制，之後有需要再比照 session_store.py
-    加一層 Firestore 備援。
+  - POST /walk/start         ：只做語意搜尋起點 + 準備初始 state，
+                                不呼叫 orchestrator。
+  - GET  /walk/stream/{id}    ：第一次真正呼叫 orchestrator.astream()，
+                                把 /walk/start 準備好的初始 state 當作
+                                input 餵進去。
+  - POST /walk/answer/{id}    ：呼叫 orchestrator.astream(Command(
+                                resume=answer))，直接對應 LangGraph 原生
+                                的 interrupt/resume 機制——不再需要手動
+                                把答案塞進 context_summary 再重新開一段
+                                stream，這件事現在由
+                                orchestrator/walk_nodes.py::
+                                WalkOrchestratorNodes.walk_ask 自己做。
+  - GET  /walk/ranking/{id}    ：邏輯不變（仍是 CandidateRetriever 語意
+                                排名前 N 名 + BFSCoordinator 批次展開
+                                foundation，套 graph_service/
+                                walk_ranking.py 的公式），只是判斷
+                                「walk 是否已結束」的方式，從
+                                WalkSession.all_done() 改讀 orchestrator
+                                目前記錄的 phase 是否為 "walk_complete"。
 
-排名計算的資料來源（/walk/ranking）：
-  rc_foundation_map / rc_semantic_scores 的取得方式與既有
-  /brain/rc-semantic-scores、/brain/foundation-recommendations
-  （見 api/routes/routes_brain.py）完全同構：CandidateRetriever.score_all()
-  取語意排名前 N 名，再用 BFSCoordinator.get_expand_cached_async() 批次
-  取得各自的 foundation 清單。刻意重用同一套機制、同一份 cache
-  （BFSCoordinator 的 _expand_cache 命中率因此也跟 dialogue mode 共用）。
+app.state.walk_pending_starts：
+  一個很小的 process 內記憶體 dict（"{uid}:{walk_id}" → 初始 invoke_input
+  dict），只用來銜接「/walk/start 準備好初始狀態」與「/walk/stream 第一
+  次真正呼叫 orchestrator」這兩個 endpoint 之間的空隙。/walk/stream 一旦
+  消費過就會把它 pop 掉；之後 walk 的完整生命週期就交給 orchestrator 的
+  checkpointer 負責。與舊版 app.state.walk_sessions 的差異：舊版整個
+  walk 的狀態全程都活在那個 dict 裡（process 重啟即整個遺失）；這裡的
+  暫存只覆蓋「/walk/start 呼叫過、但 /walk/stream 還沒呼叫過」這一個
+  很窄的時間窗，重啟風險的曝險範圍因此大幅縮小。
 """
 
 from __future__ import annotations
 
 import asyncio
-import uuid
 from typing import Any, Dict, List, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from langgraph.types import Command
 from pydantic import BaseModel
 
 from core.firebase_auth import require_auth
-from core.walk_bot import WalkTurnRunner
-from core.walk_stream import record_user_answer, stream_walk_turns
+from core.walk_stream import stream_walk_via_orchestrator
 from graph_service.walk_ranking import compute_walk_ranking
-from graph_service.walk_state import WalkScheduler, WalkSession
+from graph_service.walk_state import WalkSession
 
 router = APIRouter()
 
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 
-# ── Schema ────────────────────────────────────────────────────────────
+# ── Schema（與前一版相同，前端不需要改動）─────────────────────────────
 
 class StartWalkRequest(BaseModel):
     query:     str
@@ -56,8 +69,6 @@ class StartWalkRequest(BaseModel):
 
 class StartWalkResponse(BaseModel):
     walk_id: str
-    # 回傳起點清單，讓前端不需要再等第一個 frontier_ready 事件
-    # 才知道「這次 walk 從哪幾個概念開始」。
     start_concepts: List[Dict[str, str]]
 
 
@@ -87,27 +98,13 @@ def _walk_key(uid: str, walk_id: str) -> str:
     return f"{uid}:{walk_id}"
 
 
-def _get_walk_entry(
-    request: Request,
-    uid:     str,
-    walk_id: str,
-) -> Tuple[WalkSession, WalkScheduler]:
-    entry = request.app.state.walk_sessions.get(_walk_key(uid, walk_id))
-    if entry is None:
-        raise HTTPException(
-            status_code=404,
-            detail="找不到此 walk_id，可能已過期（process 重啟）或屬於其他使用者",
-        )
-    return entry
+def _walk_config(uid: str, walk_id: str) -> dict:
+    return {"configurable": {"thread_id": _walk_key(uid, walk_id)}}
 
 
-def _sse_response(
-    session:   WalkSession,
-    scheduler: WalkScheduler,
-    runner:    WalkTurnRunner,
-) -> StreamingResponse:
+def _sse_response(orchestrator: Any, config: dict, invoke_input: Any) -> StreamingResponse:
     return StreamingResponse(
-        stream_walk_turns(session, scheduler, runner),
+        stream_walk_via_orchestrator(orchestrator, config, invoke_input),
         media_type="text/event-stream",
         headers=_SSE_HEADERS,
     )
@@ -130,15 +127,26 @@ async def start_walk(
             detail="找不到合適的起點概念，請換個描述再試一次",
         )
 
+    import uuid
     walk_id = uuid.uuid4().hex[:12]
+    key     = _walk_key(uid, walk_id)
+
     session = WalkSession.start(
-        session_id=_walk_key(uid, walk_id),
+        session_id=key,
         start_concepts=start_refs,
         max_depth=body.max_depth,
     )
-    scheduler = WalkScheduler(session)
 
-    request.app.state.walk_sessions[_walk_key(uid, walk_id)] = (session, scheduler)
+    # mode="random_walk" 讓 entry_router 分流進 walk 迴圈；phase 給一個
+    # 不與 "path_confirmed"/"main_agent" 衝突的值即可，純粹方便除錯觀察，
+    # entry_router 本身不依賴這個值的具體內容（只在乎它不是那兩個保留值）。
+    request.app.state.walk_pending_starts[key] = {
+        "mode":         "random_walk",
+        "phase":        "random_walk",
+        "walk_session": session.to_dict(),
+        "walk_pointer": -1,
+        "uid":          uid,
+    }
 
     return StartWalkResponse(
         walk_id=walk_id,
@@ -152,8 +160,22 @@ async def stream_walk(
     request: Request,
     uid:     str = Depends(require_auth),
 ) -> StreamingResponse:
-    session, scheduler = _get_walk_entry(request, uid, walk_id)
-    return _sse_response(session, scheduler, request.app.state.walk_runner)
+    key = _walk_key(uid, walk_id)
+    initial_input = request.app.state.walk_pending_starts.pop(key, None)
+    if initial_input is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "找不到此 walk_id 的初始狀態——可能已經開始過串流"
+                "（此 endpoint 只能對同一個 walk_id 呼叫一次，恢復對話"
+                "請改用 /walk/answer）、屬於其他使用者，或 process 重啟"
+                "後遺失了尚未開始的 walk"
+            ),
+        )
+
+    orchestrator = request.app.state.orchestrator
+    config = _walk_config(uid, walk_id)
+    return _sse_response(orchestrator, config, initial_input)
 
 
 @router.post("/walk/answer/{walk_id}")
@@ -163,9 +185,25 @@ async def answer_walk(
     request: Request,
     uid:     str = Depends(require_auth),
 ) -> StreamingResponse:
-    session, scheduler = _get_walk_entry(request, uid, walk_id)
-    record_user_answer(session, body.path_id, body.answer)
-    return _sse_response(session, scheduler, request.app.state.walk_runner)
+    orchestrator = request.app.state.orchestrator
+    config = _walk_config(uid, walk_id)
+
+    snapshot = await orchestrator.aget_state(config)
+    if not snapshot.interrupts:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "此 walk 目前並未暫停等待回答（可能尚未開始、已經結束，"
+                "或 process 重啟後遺失了暫停點）"
+            ),
+        )
+
+    # body.path_id 目前只用來讓前端表明「回答的是哪個 path 的問題」，
+    # 與 snapshot.interrupts 裡實際暫停的 path 理論上一致（walk 迴圈序列
+    # 化執行、同一時間只會有一條 path 卡在 interrupt，見與使用者關於
+    # 「不用 Send 做 K-path 平行」的討論）。這裡不做額外交叉驗證，
+    # 信任前端只會對目前真的在等待的那個問題送出回答。
+    return _sse_response(orchestrator, config, Command(resume=body.answer))
 
 
 @router.get("/walk/ranking/{walk_id}", response_model=WalkRankingResponse)
@@ -174,13 +212,22 @@ async def walk_ranking(
     request: Request,
     uid:     str = Depends(require_auth),
 ) -> WalkRankingResponse:
-    session, _scheduler = _get_walk_entry(request, uid, walk_id)
+    orchestrator = request.app.state.orchestrator
+    config = _walk_config(uid, walk_id)
 
-    if not session.all_done():
+    snapshot = await orchestrator.aget_state(config)
+    values   = snapshot.values or {}
+
+    if values.get("phase") != "walk_complete":
         raise HTTPException(status_code=409, detail="walk 尚未結束，無法計算排名")
 
-    rc_foundation_map, rc_semantic_scores = await _build_rc_pool_data(request, session)
+    session_dict = values.get("walk_session")
+    if session_dict is None:
+        raise HTTPException(status_code=404, detail="找不到此 walk_id 的狀態")
 
+    session = WalkSession.from_dict(session_dict)
+
+    rc_foundation_map, rc_semantic_scores = await _build_rc_pool_data(request, session)
     ranked = compute_walk_ranking(session, rc_foundation_map, rc_semantic_scores)
 
     return WalkRankingResponse(
@@ -196,7 +243,7 @@ async def walk_ranking(
     )
 
 
-# ── Private：組出語意 pool 的 foundation/semantic 資料 ─────────────────
+# ── Private：組出語意 pool 的 foundation/semantic 資料（邏輯不變）───────
 
 async def _build_rc_pool_data(
     request: Request,

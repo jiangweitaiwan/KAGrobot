@@ -1,97 +1,188 @@
 # -*- coding: utf-8 -*-
-"""core/walk_stream.py — Random Walk Mode 的 SSE 事件轉譯層。
+"""core/walk_stream.py — Random Walk Mode 的 SSE 事件轉譯層（改版）。
 
-職責：
-  - to_sse_event()：把 WalkTurnResult 轉成前端可消費的 event dict
-    （schema 對應設計討論階段定案的草案）。
-  - format_sse()：組成 SSE wire format（"data: {json}\\n\\n"）。
-  - stream_walk_turns()：驅動 WalkTurnRunner 逐輪跑，逐輪 yield SSE
-    字串，直到遇到 "question"（暫停，等使用者回答）或 "walk_complete"
-    （終止）才 return。
+【變更說明 — 改吃 orchestrator.astream() 的 chunk，而非 WalkTurnResult】
+舊版 to_sse_event() 的輸入是 core/walk_bot.py::WalkTurnResult，一個手刻的
+dataclass，由 WalkTurnRunner.run_turn() 每輪明確組出來。現在 walk 的推進
+邏輯搬進了 orchestrator/walk_nodes.py 的 LangGraph node，驅動方式也從
+「呼叫端手動 for 迴圈呼叫 run_turn()」改成「orchestrator.astream(...,
+stream_mode='updates')」，每個 tick 吐出的是 `{node_name: state_update}`
+這種形狀的 chunk，或是暫停時的 `{"__interrupt__": (Interrupt(...),)}`。
 
-暫停/resume 設計（對應討論定案「中斷後 resume，不重啟整個 stream」）：
-  - 一次 HTTP SSE 連線 = 一段「連續自動推進」的區間，在 question 或
-    walk_complete 處自然結束（連線關閉是正常結束，不是異常）。
-  - 使用者回答問題後，呼叫端（api/routes 層）應該：
-      1. 呼叫 record_user_answer() 把回答摺進 session.context_summary
-      2. 對同一個 session/scheduler 重新呼叫 stream_walk_turns()（開一個
-         新的 SSE 連線）——因為 scheduler.next_path() 是 idempotent 的
-         查詢（不是消耗性的 pop），同一條仍是 ACTIVE 的 path 會被再次選中，
-         等於從暫停處自然接續，不需要任何額外的「resume token」機制。
-  - LLM 提出的問題本身也會在暫停當下自動摺進 context_summary（見
-    _record_question），確保下一次 LLM 呼叫時，「自己問過什麼、使用者
-    答了什麼」都在累積脈絡裡，不需要呼叫端手動組裝對話歷史。
+這裡的 to_sse_events() 負責把這些 chunk 翻譯成前端 RandomWalkPanel.tsx
+早已在消費的同一套 event schema（frontier_ready / frontier_expanded /
+path_dead_end / user_question / walk_complete），front-end 完全不需要
+改動。
 
-刻意不含的部分（留給 api/routes 層接線時處理）：
-  - WalkSession 跨 request 的持久化／查找（比照 core/session_store.py
-    的模式，用 walk_id 或 f"{uid}:{session_id}" 當 key）。
-  - FastAPI StreamingResponse 的實際掛載（見檔尾的 route 骨架示範）。
+翻譯規則（見各 helper function 的說明）：
+  - "__interrupt__" 出現 → user_question（不看是哪個 node 產生的）
+  - {"walk_fetch_frontier": update} → frontier_ready 或 path_dead_end
+    （frontier 抓回來發現是空的，代表這條 path 已經走到底）
+  - {"walk_decide": update} → 兩種情況：
+      a. update 裡帶了 walk_pending_question → 這個 tick 本身不對應任何
+         使用者可見事件；真正的 user_question 事件會在緊接著的
+         "__interrupt__" chunk 出現，這裡刻意不重複發送。
+      b. 否則代表 LLM 決定推進了 → frontier_expanded；如果推進後這條
+         path 因為達到 max_depth 而直接被標記終止（PathState.advance()
+         內部行為），這個 tick不會再進 walk_fetch_frontier（scheduler
+         之後會跳過已 dead_end 的 path），所以「終止」這件事必須在這裡
+         一併補發一個 path_dead_end，否則這種終止方式永遠不會被前端
+         看到（這是相對舊版 WalkTurnResult 設計補上的一個小改進，
+         no_downstream 終止方式一直都有對應事件，max_depth 終止方式
+         舊版其實也沒有，這裡一併修正）。
+  - {"walk_ask": update} → 沒有對應事件（resume 後只是把答案記錄進
+    context_summary，使用者早就知道自己回答了什麼，不需要额外通知）。
+  - {"walk_finish": update} → walk_complete。
+
+path_id 的取得：WalkSession.start() 建立時 path_id 就等於它在
+session.paths 這個 list 裡的 index（graph_service/walk_state.py），而
+WalkScheduler.next_path() 選中某條 path 時，會把該 index 存進
+self._pointer（也就是 node 回傳、我們存進 state 的 walk_pointer）。
+因此「這個 tick 是在處理哪條 path」，直接讀 update["walk_pointer"] 就是
+該 path 在 session["paths"] 陣列裡的 index，不需要另外比對前後兩份
+session 的差異。
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
-from typing import AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
-from core.walk_bot import WalkTurnResult, WalkTurnRunner
-from graph_service.walk_state import WalkScheduler, WalkSession
+from graph_service.walk_state import WalkSession
 
-_DEFAULT_MAX_TURNS = 200   # 安全上限，避免邏輯錯誤造成無限串流
+_DEFAULT_MAX_CHUNKS = 400   # 安全上限，避免圖邏輯有誤造成無限串流
 
 
 # ══════════════════════════════════════════════════════════════
-# Event 轉譯
+# Chunk → SSE event(s) 翻譯
 # ══════════════════════════════════════════════════════════════
 
-def to_sse_event(result: WalkTurnResult) -> dict:
-    """把 WalkTurnResult 轉成前端可直接消費的 event dict。
-
-    kind → type 對應：
-      frontier_ready  → frontier_ready   （候選節點虛線預覽，非必要可忽略）
-      path_terminated → path_dead_end
-      advanced        → frontier_expanded（實際走了一步，GlobalBrain 據此點亮節點）
-      question        → user_question    （暫停點）
-      walk_complete   → walk_complete    （終點，附上 ranking_hint）
+def to_sse_events(chunk: Dict[str, Any]) -> List[dict]:
+    """把 astream(stream_mode='updates') 吐出的一個 chunk 轉成 0～N 個
+    前端可消費的 event dict（多數情況是 0 或 1 個，只有 walk_decide 在
+    「推進後直接因 max_depth 終止」這個邊界情況會是 2 個）。
     """
-    if result.kind == "frontier_ready":
-        return {
-            "type":      "frontier_ready",
-            "path_id":   result.path_id,
-            "candidates": result.frontier or [],
-        }
+    if "__interrupt__" in chunk:
+        return _events_from_interrupt(chunk["__interrupt__"])
 
-    if result.kind == "path_terminated":
-        return {
+    if len(chunk) != 1:
+        # walk 圖沒有平行分支（刻意設計，見與使用者的討論），理論上
+        # 每個 chunk 只會有一個 node 的 key；防禦性地忽略不符預期的形狀。
+        return []
+
+    node_name, update = next(iter(chunk.items()))
+
+    if node_name == "walk_fetch_frontier":
+        return _events_from_fetch_frontier(update)
+    if node_name == "walk_decide":
+        return _events_from_decide(update)
+    if node_name == "walk_finish":
+        return _events_from_finish(update)
+
+    # walk_ask、walk_confirm（不會出現在這裡，見檔尾說明）等其餘 node
+    # 沒有對應的使用者可見事件。
+    return []
+
+
+def _events_from_interrupt(interrupts: tuple) -> List[dict]:
+    events = []
+    for itr in interrupts:
+        payload = getattr(itr, "value", itr) or {}
+        events.append({
+            "type":     "user_question",
+            "path_id":  payload.get("path_id"),
+            "question": payload.get("question", ""),
+        })
+    return events
+
+
+def _events_from_fetch_frontier(update: Dict[str, Any]) -> List[dict]:
+    session_dict = update.get("walk_session")
+    path_id      = update.get("walk_pointer")
+    if session_dict is None or path_id is None:
+        return []  # 防禦分支（node 內部的早期 return），理論上不會發生
+
+    path = _path_at(session_dict, path_id)
+    if path is None:
+        return []
+
+    if path["status"] == "dead_end":
+        return [{
             "type":    "path_dead_end",
-            "path_id": result.path_id,
-            "reason":  result.dead_end_reason,
-        }
+            "path_id": path_id,
+            "reason":  path.get("dead_end_reason"),
+        }]
 
-    if result.kind == "advanced":
-        return {
-            "type":    "frontier_expanded",
-            "path_id": result.path_id,
-            "from_eid": result.from_eid,
-            "to_eid":   result.target_eid,
-            "to_label": result.target_label,
-            "reason":   result.reason,
-        }
+    return [{
+        "type":     "frontier_ready",
+        "path_id":  path_id,
+        "candidates": [
+            {
+                "eid":   c["eid"],
+                "label": c["label"],
+                "is_rc": "resulting" in (c.get("node_type") or "").lower(),
+            }
+            for c in (path.get("frontier") or [])
+        ],
+    }]
 
-    if result.kind == "question":
-        return {
-            "type":    "user_question",
-            "path_id": result.path_id,
-            "question": result.question,
-        }
 
-    if result.kind == "walk_complete":
-        return {
-            "type":    "walk_complete",
-            "ranking": result.ranking_hint or {},
-        }
+def _events_from_decide(update: Dict[str, Any]) -> List[dict]:
+    if update.get("walk_pending_question") is not None:
+        # 真正的 user_question 事件會在緊接著的 "__interrupt__" chunk
+        # 出現，這裡不重複發送。
+        return []
 
-    raise ValueError(f"unknown WalkTurnResult.kind: {result.kind}")
+    session_dict = update.get("walk_session")
+    path_id      = update.get("walk_pointer")
+    if session_dict is None or path_id is None:
+        return []  # 防禦分支
+
+    path = _path_at(session_dict, path_id)
+    if path is None:
+        return []
+
+    decision_log = path.get("decision_log") or []
+    if not decision_log:
+        return []  # 防禦：理論上剛推進過一定有 log
+
+    last    = decision_log[-1]
+    visited = path.get("visited") or []
+    from_eid = visited[-2]["eid"] if len(visited) >= 2 else path.get("start_eid")
+
+    events = [{
+        "type":     "frontier_expanded",
+        "path_id":  path_id,
+        "from_eid": from_eid,
+        "to_eid":   path.get("current_eid"),
+        "to_label": path.get("current_label"),
+        "reason":   last.get("reason", ""),
+    }]
+
+    # advance() 若因為達到 max_depth 而直接終止，這個 tick 不會再進
+    # walk_fetch_frontier（見本檔頭說明），"終止" 這件事必須在這裡
+    # 一併回報。
+    if path["status"] == "dead_end":
+        events.append({
+            "type":    "path_dead_end",
+            "path_id": path_id,
+            "reason":  path.get("dead_end_reason"),
+        })
+
+    return events
+
+
+def _events_from_finish(update: Dict[str, Any]) -> List[dict]:
+    session_dict = update.get("walk_session") or {"session_id": "", "paths": []}
+    session = WalkSession.from_dict(session_dict)
+    return [{"type": "walk_complete", "ranking": session.all_foundation_eids()}]
+
+
+def _path_at(session_dict: Dict[str, Any], path_id: int) -> Optional[dict]:
+    paths = session_dict.get("paths") or []
+    if not (0 <= path_id < len(paths)):
+        return None
+    return paths[path_id]
 
 
 def format_sse(event: dict) -> str:
@@ -100,125 +191,39 @@ def format_sse(event: dict) -> str:
 
 
 # ══════════════════════════════════════════════════════════════
-# context_summary 記錄 helper
-# ══════════════════════════════════════════════════════════════
-
-def _record_question(session: WalkSession, path_id: Optional[int], question: str) -> None:
-    """LLM 提問當下自動摺進 context_summary，讓下一次呼叫（resume 後）
-    的 LLM 能看到「自己問過什麼」，不需要呼叫端手動組裝對話歷史。
-    """
-    if not question:
-        return
-    session.record_decision(f"[path {path_id} 提問]：{question}")
-
-
-def record_user_answer(session: WalkSession, path_id: Optional[int], answer: str) -> None:
-    """使用者回答問題後，呼叫端（api/routes 層）應呼叫此函式，
-    把回答摺進 session.context_summary，再重新呼叫 stream_walk_turns()。
-
-    與 _record_question 是一組：一次「提問 → 回答」在 context_summary 裡
-    會呈現成連續兩句話，讓 LLM 在下一輪決策時看到完整的問答脈絡。
-    """
-    if not answer:
-        return
-    session.record_decision(f"[path {path_id} 使用者回覆]：{answer}")
-
-
-# ══════════════════════════════════════════════════════════════
 # Streaming driver
 # ══════════════════════════════════════════════════════════════
 
-async def stream_walk_turns(
-    session:   WalkSession,
-    scheduler: WalkScheduler,
-    runner:    WalkTurnRunner,
-    max_turns: int = _DEFAULT_MAX_TURNS,
+async def stream_walk_via_orchestrator(
+    orchestrator: Any,
+    config:       dict,
+    invoke_input: Any,
+    max_chunks:   int = _DEFAULT_MAX_CHUNKS,
 ) -> AsyncGenerator[str, None]:
-    """驅動 runner 逐輪跑，逐輪 yield 一個 SSE 字串。
+    """驅動 orchestrator.astream() 跑 random walk 子圖，逐 chunk 轉成 SSE
+    字串。invoke_input 可以是：
 
-    在 "question" 或 "walk_complete" 之後 return（連線自然結束）。
-    runner.run_turn() 本身是同步函式（內部會打 Neo4j / LLM API），
-    用 asyncio.to_thread 包起來，避免阻塞 event loop——比照
-    orchestrator/nodes.py 對同步的 socrates_bot / main_agent 的處理方式。
+      - 一份完整的初始 state dict（第一次呼叫，見 api/routes/routes_walk.py
+        的 /walk/start + /walk/stream 兩段式流程）
+      - langgraph.types.Command(resume=answer)（使用者回答問題後，見
+        /walk/answer；也對應 core/walk_bot.py 舊版 stream_walk_turns() 的
+        「resume = 開一段新 stream」設計精神，只是現在 resume 是 LangGraph
+        原生機制，不需要呼叫端手動把答案摺進 context_summary）
+
+    連線在圖真正跑到 END（walk_finish 之後）或再次卡在 interrupt() 時
+    自然結束——不需要像舊版那樣手動判斷「這輪 kind 是不是 question /
+    walk_complete」才 return，astream() 本身在遇到這兩種情況都會自然
+    停止 yield。
     """
-    for _ in range(max_turns):
-        result = await asyncio.to_thread(runner.run_turn, session, scheduler)
-        event  = to_sse_event(result)
-        yield format_sse(event)
-
-        if result.kind == "question":
-            _record_question(session, result.path_id, result.question or "")
+    chunk_count = 0
+    async for chunk in orchestrator.astream(invoke_input, config=config, stream_mode="updates"):
+        chunk_count += 1
+        if chunk_count > max_chunks:
+            yield format_sse({
+                "type":    "walk_error",
+                "message": f"超過 max_chunks={max_chunks}，強制中止（可能有邏輯錯誤造成無限迴圈）",
+            })
             return
 
-        if result.kind == "walk_complete":
-            return
-
-    # 超過安全上限：明確 emit 一個錯誤事件，而不是讓連線無聲斷掉，
-    # 方便前端與後端 log 都能定位到「walk 邏輯疑似卡在無限迴圈」。
-    yield format_sse({
-        "type":    "walk_error",
-        "message": f"超過 max_turns={max_turns}，強制中止（可能有邏輯錯誤造成無限迴圈）",
-    })
-
-
-# ══════════════════════════════════════════════════════════════
-# Route 骨架示範（非完整可執行程式碼，接線時參考）
-# ══════════════════════════════════════════════════════════════
-#
-# 實際掛進 FastAPI 時，架構大致如下（比照 api/routes/routes_brain.py
-# 的 dependency 注入慣例）：
-#
-#   from fastapi import APIRouter, Request, Depends
-#   from fastapi.responses import StreamingResponse
-#   from core.firebase_auth import require_auth
-#
-#   router = APIRouter()
-#
-#   # WalkSession 的跨 request 存放：比照 core/session_store.py 的模式，
-#   # 正式版應該是 Firestore 或至少 app.state 上的一個 dict（重啟即遺失，
-#   # 但 random walk 本來就設計成不可中途切換 mode，遺失後重開一次不算
-#   # 太大的體驗損失）。這裡示意用 app.state.walk_sessions: Dict[str, WalkSession]。
-#
-#   @router.post("/walk/start")
-#   async def start_walk(body: StartWalkRequest, request: Request, uid: str = Depends(require_auth)):
-#       start_concepts = await find_start_concepts(body.query, ...)  # 見下方 note
-#       session = WalkSession.start(session_id=f"{uid}:{body.walk_id}", start_concepts=start_concepts)
-#       request.app.state.walk_sessions[body.walk_id] = (session, WalkScheduler(session))
-#       return {"walk_id": body.walk_id}
-#
-#   @router.get("/walk/stream/{walk_id}")
-#   async def stream_walk(walk_id: str, request: Request, uid: str = Depends(require_auth)):
-#       session, scheduler = request.app.state.walk_sessions[walk_id]
-#       runner = request.app.state.walk_runner  # 單例，見下方 note
-#       return StreamingResponse(
-#           stream_walk_turns(session, scheduler, runner),
-#           media_type="text/event-stream",
-#       )
-#
-#   @router.post("/walk/answer/{walk_id}")
-#   async def answer_walk(walk_id: str, body: WalkAnswerRequest, request: Request, uid: str = Depends(require_auth)):
-#       session, scheduler = request.app.state.walk_sessions[walk_id]
-#       record_user_answer(session, body.path_id, body.answer)
-#       return StreamingResponse(
-#           stream_walk_turns(session, scheduler, request.app.state.walk_runner),
-#           media_type="text/event-stream",
-#       )
-#
-# Note — walk_runner 單例的組裝（比照 app.py lifespan 組裝 socrates_bot /
-# main_agent 的方式）：
-#
-#   frontier_fetcher = make_frontier_fetcher(adjacency_cache, driver, encoder)
-#   llm = create_chat_google_generative_ai(model=s.socrates_model, temperature=0.2)
-#
-#   def llm_caller(system_prompt: str, tool_schema) -> AIMessage:
-#       return call_with_retry(
-#           lambda: llm.bind_tools([tool_schema]).invoke([SystemMessage(content=system_prompt)])
-#       )
-#
-#   walk_runner = WalkTurnRunner(frontier_fetcher=frontier_fetcher, llm_caller=llm_caller)
-#
-# Note — find_start_concepts()（/walk/start 用）：
-#   對應設計討論第 1 點「起點檢索池只掃描曾是某 RC foundation 的 concept」，
-#   這需要一個全圖批次 job 先建好這個候選池的 embedding index（結構上
-#   類似 CandidateRetriever，但語料是一般 concept 的 name+mechanism，
-#   而非 RC 的 name+function），不是這次要做的範圍，留待下一步。
+        for event in to_sse_events(chunk):
+            yield format_sse(event)

@@ -1,23 +1,23 @@
 # -*- coding: utf-8 -*-
 """graph_service/walk_state.py — Random Walk Mode 的路徑狀態與排程器。
 
-職責：
-  - PathState：單條 path 的完整狀態（visited 全量保留、frontier 當輪候選、
-    決策理由 log），並提供「裁剪後 prompt context」的組裝方法。
-  - WalkSession：K 條 path 的集合 + 全域設定（max_depth 等）。
-  - WalkScheduler：round-robin 排程「這一輪換哪條 path」，跳過已終止的 path。
+【變更說明 — LangGraph 化】
+WalkScheduler._pointer 原本是「跨多次 run_turn() 呼叫、活在同一個 Python
+物件生命週期裡」的隱含狀態，這在舊架構下沒問題，因為 routes_walk.py 把
+(WalkSession, WalkScheduler) 這對 tuple 整個存在 app.state.walk_sessions
+這個 process 內記憶體 dict 裡，同一個 WalkScheduler 實例會被重複拿出來用。
 
-刻意不含任何 LLM / SSE / Neo4j 依賴——這一層只處理「path 狀態機」本身，
-確保這份邏輯可以用假資料獨立測試，之後才接上 tool-loop 與串流層。
+改用 LangGraph 之後，walk 的狀態改成隨 OrchestratorState 存進
+checkpointer，每個 node 呼叫都是「讀 state → 算 → 回傳 state 更新」，
+不會有同一個 WalkScheduler 物件跨呼叫存活這件事。因此 pointer 必須能夠
+明確地被存進 state、下次呼叫時明確地被還原——不能再依賴「物件還活著」
+這個假設。
 
-與現有程式碼的介接點（之後串接時）：
-  - frontier 的取得：呼叫端應透過 BFSCoordinator.downstream_async() 或
-    AdjacencyCache.get_downstream_neighbors() 取得下一輪候選，再經過
-    sbert prefilter（比照 api/routes/concept.py 的 _sbert_prefilter）
-    砍到 top-N 後，餵進 PathState.set_frontier()。
-  - 最終排名：WalkSession.all_foundation_eids() 回傳「每條 path 上、
-    不含最終節點本身」的 node id 清單，供前端 computeRCRanking 風格的
-    公式使用（interScore 計算方式與 DetailPanel.tsx 一致）。
+WalkScheduler 現在接受一個可選的 pointer 建構參數（預設 -1，等同原本
+行為），並透過 .pointer 屬性把當前值暴露出來，供呼叫端（orchestrator/
+walk_nodes.py）讀寫進 OrchestratorState["walk_pointer"]。
+
+其餘邏輯（PathState / WalkSession / DeadEndReason 等）完全不變。
 """
 
 from __future__ import annotations
@@ -58,6 +58,13 @@ class WalkNodeRef:
     label: str
     is_rc: bool = False
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {"eid": self.eid, "label": self.label, "is_rc": self.is_rc}
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "WalkNodeRef":
+        return cls(eid=d["eid"], label=d["label"], is_rc=bool(d.get("is_rc", False)))
+
 
 @dataclass
 class FrontierCandidate:
@@ -72,6 +79,21 @@ class FrontierCandidate:
     def is_rc(self) -> bool:
         return "resulting" in (self.node_type or "").lower()
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "eid": self.eid, "label": self.label,
+            "definition": self.definition, "mechanism": self.mechanism,
+            "node_type": self.node_type,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "FrontierCandidate":
+        return cls(
+            eid=d["eid"], label=d["label"],
+            definition=d.get("definition"), mechanism=d.get("mechanism"),
+            node_type=d.get("node_type"),
+        )
+
 
 @dataclass
 class DecisionLogEntry:
@@ -79,6 +101,13 @@ class DecisionLogEntry:
     from_eid: str
     to_eid:   str
     reason:   str   # LLM 給的一句話理由（例如「使用者提到通膨，這個方向與通膨機制相關」）
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"from_eid": self.from_eid, "to_eid": self.to_eid, "reason": self.reason}
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "DecisionLogEntry":
+        return cls(from_eid=d["from_eid"], to_eid=d["to_eid"], reason=d["reason"])
 
 
 # ══════════════════════════════════════════════════════════════
@@ -176,6 +205,48 @@ class PathState:
         self.status = PathStatus.DEAD_END
         self.dead_end_reason = reason
         self.frontier = []
+
+    # ------------------------------------------------------------------
+    # 序列化（供 OrchestratorState 存進 LangGraph checkpointer 使用）
+    # ------------------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        return {
+            "path_id":         self.path_id,
+            "start_eid":       self.start_eid,
+            "start_label":     self.start_label,
+            "current_eid":     self.current_eid,
+            "current_label":   self.current_label,
+            "visited":         [n.to_dict() for n in self.visited],
+            "frontier":        [c.to_dict() for c in self.frontier],
+            "status":          self.status.value,
+            "dead_end_reason": self.dead_end_reason.value if self.dead_end_reason else None,
+            "depth":           self.depth,
+            "max_depth":       self.max_depth,
+            "decision_log":    [e.to_dict() for e in self.decision_log],
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "PathState":
+        obj = cls(
+            path_id=d["path_id"],
+            start_eid=d["start_eid"],
+            start_label=d["start_label"],
+            current_eid=d.get("current_eid", ""),
+            current_label=d.get("current_label", ""),
+            status=PathStatus(d.get("status", PathStatus.PENDING.value)),
+            dead_end_reason=(
+                DeadEndReason(d["dead_end_reason"]) if d.get("dead_end_reason") else None
+            ),
+            depth=d.get("depth", 0),
+            max_depth=d.get("max_depth", 8),
+        )
+        # __post_init__ 已經根據 start_eid/current_eid 補了預設的
+        # visited=[起點]；這裡有序列化資料就整批覆寫回真正的歷史紀錄。
+        obj.visited      = [WalkNodeRef.from_dict(n) for n in d.get("visited", [])] or obj.visited
+        obj.frontier      = [FrontierCandidate.from_dict(c) for c in d.get("frontier", [])]
+        obj.decision_log  = [DecisionLogEntry.from_dict(e) for e in d.get("decision_log", [])]
+        return obj
 
     # ------------------------------------------------------------------
     # Prompt context 組裝（裁剪後）
@@ -311,6 +382,36 @@ class WalkSession:
             return
         self.context_summary = (self.context_summary + " " + reason).strip()
 
+    # ------------------------------------------------------------------
+    # 序列化（供 OrchestratorState 存進 LangGraph checkpointer 使用）
+    # ------------------------------------------------------------------
+    #
+    # OrchestratorState["walk_session"] 一律存這裡輸出的 dict，不存
+    # WalkSession 實例本身：LangGraph 目前版本的 checkpointer 序列化層是
+    # msgpack-based，對未註冊的自訂 dataclass/Enum 只給警告、但已明確
+    # 標示「未來版本會直接擋下來」，直接存 dataclass 進去屬於現在能動、
+    # 但注定會壞的寫法。走純 dict 也順便讓這份狀態未來可以直接餵給
+    # core/session_store.py 風格的 Firestore 備援層，不需要另外再寫一次
+    # 轉換邏輯。
+
+    def to_dict(self) -> dict:
+        return {
+            "session_id":      self.session_id,
+            "paths":           [p.to_dict() for p in self.paths],
+            "max_depth":       self.max_depth,
+            "context_summary": self.context_summary,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "WalkSession":
+        obj = cls(
+            session_id=d["session_id"],
+            max_depth=d.get("max_depth", 8),
+            context_summary=d.get("context_summary", ""),
+        )
+        obj.paths = [PathState.from_dict(p) for p in d.get("paths", [])]
+        return obj
+
 
 # ══════════════════════════════════════════════════════════════
 # WalkScheduler — round-robin，跳過已終止 path
@@ -321,11 +422,28 @@ class WalkScheduler:
 
     Round-robin：從上一次指標的下一位開始找，跳過 DEAD_END 的 path；
     找不到任何非 DEAD_END 的 path 時回傳 None（代表 walk 已全部結束）。
+
+    【變更說明】pointer 現在是建構參數 + 唯讀屬性，而不是純粹的實例私有
+    狀態：LangGraph node 每次被呼叫時都是全新建立這個物件（讀 state 建構、
+    算完即丟棄），因此 pointer 的存續必須交給呼叫端明確存進
+    OrchestratorState["walk_pointer"]、下次呼叫時明確傳回來還原，
+    而不能依賴「同一個 WalkScheduler 實例活過多次呼叫」這個舊架構下才
+    成立的假設。呼叫端慣例：
+
+        scheduler = WalkScheduler(session, state.get("walk_pointer", -1))
+        path = scheduler.next_path()
+        ...
+        return {"walk_pointer": scheduler.pointer, ...}
     """
 
-    def __init__(self, session: WalkSession) -> None:
+    def __init__(self, session: WalkSession, pointer: int = -1) -> None:
         self._session = session
-        self._pointer = -1   # 上一輪選中的 index（在 session.paths 中的位置）
+        self._pointer = pointer
+
+    @property
+    def pointer(self) -> int:
+        """目前指標位置，呼叫端應在 node 回傳時把這個值存回 state。"""
+        return self._pointer
 
     def next_path(self) -> Optional[PathState]:
         n = len(self._session.paths)

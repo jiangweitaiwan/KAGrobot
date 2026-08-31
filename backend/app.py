@@ -1,16 +1,21 @@
 # -*- coding: utf-8 -*-
-"""app.py — FastAPI application factory（新增 random walk mode 的組裝）
+"""app.py — FastAPI application factory。
 
-與前一版的差異：
-  1. 新增 StartConceptPool、make_frontier_fetcher、WalkTurnRunner 的組裝
-     （見 graph_service/walk_start_pool.py、graph_service/walk_frontier.py、
-     core/walk_bot.py）。
-  2. app.state 新增 start_concept_pool / walk_runner / walk_sessions
-     三個欄位，供 api/routes/routes_walk.py 使用。
-  3. 掛載 walk_router。
-  4. walk_runner 的 LLM 呼叫沿用既有 core/google_llm.py +
-     core/llm_retry.py 的組合方式，與 socrates_bot / main_agent 一致，
-     只是 bind_tools 的對象換成 walk_bot.py 動態產生的 advance_path schema。
+【變更說明 — Random Walk Mode 完全併入 orchestrator】
+build_orchestrator() 需要兩組節點：既有的 OrchestratorNodes（dialogue
+mode）與 WalkOrchestratorNodes（random walk mode，見
+orchestrator/walk_nodes.py）。walk_llm / _walk_llm_caller /
+walk_frontier_fetcher 的組裝方式與前一版相同，只是現在只餵給
+WalkOrchestratorNodes 一份——舊版並存的 WalkTurnRunner + app.state.
+walk_runner / walk_sessions 已經隨 api/routes/routes_walk.py 遷移到透過
+orchestrator.astream() 驅動而移除；walk 狀態現在完全活在 orchestrator
+自己的 MemorySaver checkpointer 裡，跟 dialogue mode 共用同一套
+thread_id 慣例。
+
+app.state.walk_pending_starts 取代原本的 app.state.walk_sessions，範圍
+小很多：只銜接「/walk/start 準備好初始 state」與「/walk/stream 第一次
+真正呼叫 orchestrator」這兩個 endpoint 之間的空隙，見
+api/routes/routes_walk.py 檔頭說明。
 """
 
 from __future__ import annotations
@@ -42,8 +47,7 @@ from core.main_agent               import MainAgent
 from core.skill_loader             import SkillLoader
 from core.google_llm               import create_chat_google_generative_ai
 from core.llm_retry                import call_with_retry
-from core.walk_bot                 import WalkTurnRunner
-from orchestrator                  import OrchestratorNodes, build_orchestrator
+from orchestrator                  import OrchestratorNodes, WalkOrchestratorNodes, build_orchestrator
 from api.routes                    import (
     chat_router,
     graph_router,
@@ -51,7 +55,7 @@ from api.routes                    import (
     user_brain_router,
     brain_router,
     users_router,
-    walk_router,
+    walk_router as walk_routes_router,
 )
 
 from core.skill_sandbox import SkillSandboxProvisioner
@@ -108,7 +112,7 @@ async def lifespan(app: FastAPI):
         bucket_name=s.skills_bucket_name,
         gcs_prefix="skills",
     )
-    
+
     nodes = OrchestratorNodes(
         socrates_bot        = socrates_bot,
         main_agent          = main_agent,
@@ -116,14 +120,14 @@ async def lifespan(app: FastAPI):
         sandbox_provisioner  = sandbox_provisioner,
         coordinator          = coordinator,
     )
-    orchestrator = build_orchestrator(nodes)
+
     foundation_recommender = FoundationRecommender(
         coordinator=coordinator,
         encoder=encoder,
     )
     rc_category_loader = RCCategoryLoader(bucket_name=s.gcs_bucketforresult)
 
-    # ── Random Walk Mode 組裝（新增）───────────────────────────
+    # ── Random Walk Mode 組裝 ───────────────────────────────────
     #
     # StartConceptPool：起點檢索池（見 graph_service/walk_start_pool.py），
     # 與 CandidateRetriever 各自獨立索引，職責不同（leaf foundation
@@ -136,9 +140,9 @@ async def lifespan(app: FastAPI):
     walk_frontier_fetcher = make_frontier_fetcher(adjacency_cache, driver, encoder)
 
     # walk LLM：獨立一個 LLM 實例（而非重用 socrates_bot 內部的），
-    # 因為 walk_bot.py 每輪要動態 bind_tools 不同的 advance_path schema
-    # （target_eid 的 Literal 隨當輪 frontier 變動），與 socrates_bot
-    # 固定 bind_tools 一次的用法不同，分開持有比較乾淨。
+    # 因為每輪要動態 bind_tools 不同的 advance_path schema（target_eid 的
+    # Literal 隨當輪 frontier 變動），與 socrates_bot 固定 bind_tools 一次
+    # 的用法不同，分開持有比較乾淨。
     walk_llm = create_chat_google_generative_ai(
         model=s.socrates_model,
         temperature=0.2,
@@ -151,10 +155,13 @@ async def lifespan(app: FastAPI):
             )
         )
 
-    walk_runner = WalkTurnRunner(
+    # 新：交給 orchestrator 的 LangGraph node（見 orchestrator/walk_nodes.py）。
+    walk_nodes = WalkOrchestratorNodes(
         frontier_fetcher=walk_frontier_fetcher,
         llm_caller=_walk_llm_caller,
     )
+
+    orchestrator = build_orchestrator(nodes, walk_nodes)
 
     # ── app.state ─────────────────────────────────────────────
     app.state.orchestrator    = orchestrator
@@ -171,15 +178,16 @@ async def lifespan(app: FastAPI):
     app.state.bertopic_layout = None
 
     app.state.rc_category_loader = rc_category_loader
-    app.state.rc_category_map    = None 
+    app.state.rc_category_map    = None
 
-    # Random Walk Mode 的新增狀態：
-    #   walk_sessions 是 process 內記憶體 dict（key: "{uid}:{walk_id}"），
-    #   重啟即遺失——見 api/routes/routes_walk.py 檔頭關於這個取捨的說明。
-    app.state.start_concept_pool = start_concept_pool
-    app.state.walk_runner        = walk_runner
-    app.state.walk_sessions      = {}
-
+    # Random Walk Mode 的狀態：
+    #   start_concept_pool 是 /walk/start 起點語意搜尋用。
+    #   walk_pending_starts 見 api/routes/routes_walk.py 檔頭說明——只是
+    #   「/walk/start 準備好、但 /walk/stream 還沒真正呼叫 orchestrator」
+    #   這個很窄的時間窗的暫存，process 重啟遺失的曝險範圍遠比舊版
+    #   app.state.walk_sessions 小很多。
+    app.state.start_concept_pool  = start_concept_pool
+    app.state.walk_pending_starts = {}
 
     yield
 
@@ -213,6 +221,6 @@ def create_app() -> FastAPI:
     app.include_router(user_brain_router)
     app.include_router(brain_router)
     app.include_router(users_router)
-    app.include_router(walk_router)
+    app.include_router(walk_routes_router)
 
     return app

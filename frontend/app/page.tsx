@@ -22,6 +22,9 @@ import type { SemanticContextData, RecommendedFoundation } from "./components/Se
 
 import { AttachmentCard, AttachmentTray, type Attachment } from "./components/AttachmentCard";
 
+import RandomWalkPanel from "./components/RandomWalkPanel";
+import type { WalkRankedRC } from "./components/RandomWalkPanel";
+
 import { useAuth } from "./components/AuthProvider";
 import AuthPanel from "./components/AuthPanel";
 import { apiFetch } from "../lib/apiFetch";
@@ -68,6 +71,8 @@ type SessionDetail = {
   selected_rc_eid?:  string | null;
   selected_rc_label?: string | null;
 };
+
+type WalkStartConcept = { eid: string; label: string };
 
 // ─────────────────────────────────────────────────────────────
 // Constants
@@ -325,6 +330,28 @@ async function fetchSessionDetail(sessionId: string): Promise<SessionDetail | nu
 }
 
 // ─────────────────────────────────────────────────────────────
+// Random Walk Mode fetch helpers
+// ─────────────────────────────────────────────────────────────
+
+async function startWalkRequest(
+  query: string,
+): Promise<{ walk_id: string; start_concepts: WalkStartConcept[] } | null> {
+  if (!API_BASE) return null;
+  try {
+    const r = await apiFetch(`${API_BASE.replace(/\/$/, "")}/walk/start`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ query, k: 3, max_depth: 8 }),
+    });
+    if (!r.ok) throw new Error(`${r.status}`);
+    return await r.json();
+  } catch (err) {
+    console.warn("[walk/start]", err);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // ChatBubble — 拆解 [[attachment:N]] 佔位符為附件卡片
 // ─────────────────────────────────────────────────────────────
 
@@ -385,6 +412,31 @@ export default function Page() {
   const [showHistory,     setShowHistory]     = useState(false);
   const [loadingHistory,  setLoadingHistory]  = useState(false);
 
+  // ── Random Walk Mode ─────────────────────────────────────────
+  // 獨立於 dialogue mode 的第二種對話模式（見 core/walk_bot.py /
+  // orchestrator/walk_nodes.py）。以 modal 呈現，避免跟既有 220px 寬的
+  // chat-column 搶版面——RandomWalkPanel 需要顯示每條 path 的走訪軌跡
+  // 與最終排名，在窄欄位裡會很擠。
+  //
+  // walkId 一旦選定最終 RC（見 handleSelectFinalRC），就會變成這段對話
+  // 往後的 sessionId：orchestrator 那邊 thread_id 是
+  // "{uid}:{session_id}"（見 api/routes/chat.py）與
+  // "{uid}:{walk_id}"（見 api/routes/routes_walk.py）用的是同一個字串
+  // 慣例，entry_router 只要看到 mode="random_walk"（已持久化在該
+  // thread 的 checkpoint 裡）且 selected_rc_eid 有值就會分流進
+  // walk_confirm → main_agent，不需要另外開一支後端 endpoint——直接
+  // 沿用既有 /chat 即可，見 handleLaunchSkill 的 sessionIdOverride 參數。
+  const [showWalkModal, setShowWalkModal]   = useState(false);
+  const [walkQuery, setWalkQuery]           = useState("");
+  const [walkId, setWalkId]                 = useState<string | null>(null);
+  const [walkStartConcepts, setWalkStartConcepts] = useState<WalkStartConcept[]>([]);
+  const [walkStarting, setWalkStarting]     = useState(false);
+  const [walkStartError, setWalkStartError] = useState("");
+  // random walk 過程中，各 path 目前所在節點的 eid 集合，餵給
+  // GlobalBrainExplorer 的 activeCandidateEids，達成「大腦被激活」的
+  // 即時視覺效果（見 RandomWalkPanel.tsx 檔頭說明）。
+  const [walkActiveEids, setWalkActiveEids] = useState<string[]>([]);
+
   // ── Global layout ──────────────────────────────────────────
   const [globalLayout,        setGlobalLayout]        = useState<GlobalLayout | null>(null);
   // ── BERTopic 2D layout ─────────────────────────────────────
@@ -429,6 +481,15 @@ export default function Page() {
       .map((s) => s.eid),
     [rcSemanticScores],
   );
+
+  // ── GlobalBrainExplorer 實際要點亮的節點集合：random walk modal 開著
+  //    時，優先顯示 walk 即時走訪的節點（大腦被激活的視覺效果）；
+  //    否則沿用 dialogue mode 既有的語意排名 Top-3。modal 關閉時
+  //    RandomWalkPanel 會被 unmount，SSE 連線隨之中止（後端 walk 狀態
+  //    本身透過 orchestrator checkpointer 安全保存、不受影響，只是
+  //    前端暫時看不到即時進度），因此這裡的判斷同時也隱含「只有
+  //    modal 開著才顯示 walk 高亮」。
+  const explorerActiveEids = showWalkModal && walkId ? walkActiveEids : activeCandidateEids;
 
   // ── RC Ranking (derived, 前端即時計算) ────────────────────
   const rcRanking = useMemo(
@@ -500,6 +561,19 @@ export default function Page() {
       .then((d: BertopicLayoutData) => setBertopicLayout(d))
       .catch((err) => console.warn("[BertopicLayout] fetch failed:", err));
   }, [bertopicLayout, userId]);
+
+  // ── random walk 需要 GlobalBrain layout 才有節點可以點亮，模式一開始
+  //    (walk modal 開啟) 就順便補抓一次，不用等到 messages.length>0
+  //    （dialogue mode 的觸發條件是「已經有對話」，但 random walk 可能
+  //    是使用者一進來就直接用的第一個動作）。
+  useEffect(() => {
+    if (!showWalkModal || globalLayoutFetched || !API_BASE || !userId) return;
+    setGlobalLayoutFetched(true);
+    apiFetch(`${API_BASE.replace(/\/$/, "")}/graph/global-layout`)
+      .then((r) => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); })
+      .then((d: GlobalLayout) => setGlobalLayout(d))
+      .catch((err) => console.warn("[GlobalBrain] layout fetch failed:", err));
+  }, [showWalkModal, globalLayoutFetched, userId]);
 
   // ── RCFoundationMap 統一補齊：一律走 /graph/expand/batch，merge-only，
   //    不再有「先用 all_graphs 建、再補洞」的雙軌邏輯。
@@ -663,9 +737,14 @@ export default function Page() {
   // ──────────────────────────────────────────────────────────
 
   const handleLaunchSkill = useCallback(async (
-    rcEid: string, rcLabel: string,
+    rcEid: string, rcLabel: string, sessionIdOverride?: string,
   ) => {
-    if (!sessionId || isLoading || !API_BASE || !userId) return;
+    // sessionIdOverride 只有在「從 random walk 排名結果選定最終 RC」
+    // 時才會有值（見 handleSelectFinalRC），此時它就是 walkId 本身；
+    // 一般 dialogue mode（PersonalBrain 的 Top-3 標籤點擊）不帶這個
+    // 參數，行為與改動前完全一致。
+    const targetSessionId = sessionIdOverride ?? sessionId;
+    if (!targetSessionId || isLoading || !API_BASE || !userId) return;
 
     addFoundationsToBrain([{ eid: rcEid, label: rcLabel }]);
 
@@ -682,7 +761,7 @@ export default function Page() {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({
-          session_id:        sessionId,
+          session_id:        targetSessionId,
           message:           launchMsg.content,
           phase:             phase === "main_agent" ? "main_agent" : "socratic",
           selected_rc_eid:   rcEid,
@@ -691,6 +770,17 @@ export default function Page() {
       });
       if (!resp.ok) throw new Error(`API error ${resp.status}`);
       const data = (await resp.json()) as ChatResponse;
+
+      // 從 random walk 交接過來時，walk_id 從此變成這段對話往後的
+      // session_id——orchestrator 那邊的 thread_id 本來就是同一個
+      // "{uid}:{walk_id}" 字串（見 api/routes/routes_walk.py 與
+      // api/routes/chat.py 共用的 thread_id 慣例），所以這裡只需要
+      // 把本機狀態同步過去，完全不需要後端另外提供交接用的 endpoint。
+      if (sessionIdOverride) {
+        setSessionId(sessionIdOverride);
+        localStorage.setItem(SESSION_KEY, sessionIdOverride);
+      }
+
       setPhase(data.phase || "main_agent");
       localStorage.setItem(PHASE_KEY, data.phase || "main_agent");
       await typewriterAppend(data.reply || "", data.attachments ?? []);
@@ -703,6 +793,57 @@ export default function Page() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, isLoading, phase, userId, addFoundationsToBrain]);
+
+  // ──────────────────────────────────────────────────────────
+  // Random Walk Mode：啟動、排名查詢、選定最終 RC
+  // ──────────────────────────────────────────────────────────
+
+  const handleStartWalk = useCallback(async () => {
+    if (!walkQuery.trim() || walkStarting) return;
+    setWalkStarting(true);
+    setWalkStartError("");
+
+    const result = await startWalkRequest(walkQuery.trim());
+    setWalkStarting(false);
+
+    if (!result) {
+      setWalkStartError("啟動隨機漫步失敗，請稍後再試");
+      return;
+    }
+    setWalkId(result.walk_id);
+    setWalkStartConcepts(result.start_concepts);
+    // 起點本身先點亮，RandomWalkPanel 掛載後的 SSE 事件會接手更新。
+    setWalkActiveEids(result.start_concepts.map((c) => c.eid));
+  }, [walkQuery, walkStarting]);
+
+  const fetchWalkRanking = useCallback(async (): Promise<WalkRankedRC[]> => {
+    if (!API_BASE || !walkId) return [];
+    try {
+      const r = await apiFetch(`${API_BASE.replace(/\/$/, "")}/walk/ranking/${walkId}`);
+      if (!r.ok) throw new Error(`${r.status}`);
+      const d = await r.json();
+      return d.ranking ?? [];
+    } catch (err) {
+      console.warn("[walk/ranking]", err);
+      return [];
+    }
+  }, [walkId]);
+
+  const handleSelectFinalRC = useCallback((eid: string, label: string) => {
+    if (!walkId) return;
+    setShowWalkModal(false);
+    handleLaunchSkill(eid, label, walkId);
+  }, [walkId, handleLaunchSkill]);
+
+  const resetWalk = useCallback(() => {
+    setWalkId(null);
+    setWalkStartConcepts([]);
+    setWalkActiveEids([]);
+    setWalkQuery("");
+    setWalkStartError("");
+  }, []);
+
+  const closeWalkModal = useCallback(() => setShowWalkModal(false), []);
 
   // ──────────────────────────────────────────────────────────
   // Chat
@@ -799,6 +940,9 @@ export default function Page() {
     localStorage.removeItem(HISTORY_KEY);
     setSemanticContext(null);
     setRecommendedFoundations([]);
+    // 新對話跟舊的 random walk 進度沒有關聯，一併清空，避免 GlobalBrain
+    // 殘留上一次 walk 的高亮節點造成混淆。
+    resetWalk();
   }
 
   const openHistory = useCallback(async () => {
@@ -885,6 +1029,9 @@ export default function Page() {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {!authLoading && <AuthPanel />}
+          <button type="button" onClick={() => setShowWalkModal(true)} disabled={isLoading}>
+            🌀 隨機漫步
+          </button>
           <button type="button" onClick={openHistory} disabled={isLoading}>
             歷史對話
           </button>
@@ -943,7 +1090,7 @@ export default function Page() {
           <div className="brain-panel-label">Global Knowledge Field</div>
           <GlobalBrainExplorer
             layout={globalLayout}
-            activeCandidateEids={activeCandidateEids}
+            activeCandidateEids={explorerActiveEids}
             rcFoundationMap={rcFoundationMap}
             onNodeClick={handleNodeClick}
             width={explorerSize.w}
@@ -1055,6 +1202,97 @@ export default function Page() {
                   </span>
                 </button>
               ))
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Random Walk modal ── */}
+      {showWalkModal && (
+        <div
+          onClick={closeWalkModal}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(3,1,8,0.72)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            zIndex: 1000, padding: 20,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 560, maxWidth: "100%", height: "min(78vh, 640px)",
+              background: "var(--panel)", border: "1px solid var(--border)",
+              borderRadius: 14, padding: 16,
+              display: "flex", flexDirection: "column", gap: 10,
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
+              <span style={{
+                fontSize: "0.62rem", letterSpacing: "0.18em", textTransform: "uppercase",
+                color: "var(--orange)",
+              }}>
+                隨機漫步模式
+              </span>
+              <div style={{ display: "flex", gap: 6 }}>
+                {walkId && (
+                  <button type="button" onClick={resetWalk} style={{ padding: "2px 8px", fontSize: "0.62rem" }}>
+                    重新開始
+                  </button>
+                )}
+                <button type="button" onClick={closeWalkModal} style={{ padding: "2px 8px" }}>✕</button>
+              </div>
+            </div>
+
+            {!userId ? (
+              <div className="meta">請先登入 / 以訪客身分初始化後再試</div>
+            ) : !walkId ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <p style={{ margin: 0, fontSize: "0.72rem", color: "var(--muted)", lineHeight: 1.6 }}>
+                  描述你想探索的方向，AI 會從幾個起點概念出發，在知識圖譜上
+                  自主推進，過程中可能會反問你問題；GlobalBrain 會即時顯示
+                  目前正在探索的節點，走完後會給出 Resulting Concept 推薦排名。
+                </p>
+                <textarea
+                  value={walkQuery}
+                  onChange={(e) => setWalkQuery(e.target.value)}
+                  placeholder="例如：升息對股市的影響"
+                  disabled={walkStarting}
+                  style={{ minHeight: 80 }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      if (walkQuery.trim() && !walkStarting) handleStartWalk();
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  className="detail-btn-add"
+                  disabled={!walkQuery.trim() || walkStarting}
+                  onClick={handleStartWalk}
+                >
+                  {walkStarting ? "搜尋起點中…" : "開始探索"}
+                </button>
+                {walkStartError && <div className="status">{walkStartError}</div>}
+              </div>
+            ) : (
+              <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", gap: 6 }}>
+                {walkStartConcepts.length > 0 && (
+                  <div style={{ fontSize: "0.62rem", color: "var(--muted)", flexShrink: 0 }}>
+                    起點：{walkStartConcepts.map((c) => c.label).join("、")}
+                  </div>
+                )}
+                <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+                  <RandomWalkPanel
+                    walkId={walkId}
+                    streamUrl={`${API_BASE.replace(/\/$/, "")}/walk/stream/${walkId}`}
+                    answerUrl={`${API_BASE.replace(/\/$/, "")}/walk/answer/${walkId}`}
+                    onActiveNodesChange={setWalkActiveEids}
+                    fetchRanking={fetchWalkRanking}
+                    onSelectFinalRC={handleSelectFinalRC}
+                  />
+                </div>
+              </div>
             )}
           </div>
         </div>

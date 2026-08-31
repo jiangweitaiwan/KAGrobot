@@ -20,6 +20,18 @@
     (current_eid, context_query) -> List[FrontierCandidate]；
     帶上 context_query 是因為排序候選需要依語意脈絡，不能只靠 eid。
 
+【併入 orchestrator 後的狀態】
+  _SYSTEM_PROMPT_TEMPLATE / _build_advance_tool / _format_frontier 這三個
+  仍是 orchestrator/walk_nodes.py::WalkOrchestratorNodes 直接重用的部分
+  （prompt 組裝與 schema 動態建構的邏輯只寫一份）。
+
+  WalkTurnRunner 這個 class 本身已被 orchestrator/walk_nodes.py 的五個
+  LangGraph node 取代（run_turn() 的三種分支對應 walk_fetch_frontier /
+  walk_decide / walk_ask 三個 node），只剩 api/routes/routes_walk.py 的
+  舊版實作還在用它。等 routes_walk.py 遷移到透過 orchestrator.astream()
+  驅動後，這個 class 就可以整個刪除，屆時本檔案只保留上面三個共用的
+  prompt/schema 組裝函式。
+
 與既有程式碼的介接點：
   - frontier_fetcher 的真正實作見 graph_service/walk_frontier.py 的
     make_frontier_fetcher()——接 AdjacencyCache 取一跳下游鄰居、批次
@@ -139,7 +151,7 @@ class WalkTurnResult:
 
 
 # ══════════════════════════════════════════════════════════════
-# WalkTurnRunner
+# WalkTurnRunner（legacy — 見檔頭「併入 orchestrator 後的狀態」說明）
 # ══════════════════════════════════════════════════════════════
 
 class WalkTurnRunner:
