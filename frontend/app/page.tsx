@@ -332,9 +332,6 @@ async function fetchSessionDetail(sessionId: string): Promise<SessionDetail | nu
   }
 }
 
-// ─────────────────────────────────────────────────────────────
-// Random Walk Mode fetch helpers
-// ─────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────
 // Random Walk（慢想）fetch helpers
@@ -574,18 +571,7 @@ export default function Page() {
       .catch((err) => console.warn("[BertopicLayout] fetch failed:", err));
   }, [bertopicLayout, userId]);
 
-  // ── random walk 需要 GlobalBrain layout 才有節點可以點亮，模式一開始
-  //    (walk modal 開啟) 就順便補抓一次，不用等到 messages.length>0
-  //    （dialogue mode 的觸發條件是「已經有對話」，但 random walk 可能
-  //    是使用者一進來就直接用的第一個動作）。
-  useEffect(() => {
-    if (!showWalkModal || globalLayoutFetched || !API_BASE || !userId) return;
-    setGlobalLayoutFetched(true);
-    apiFetch(`${API_BASE.replace(/\/$/, "")}/graph/global-layout`)
-      .then((r) => { if (!r.ok) throw new Error(`${r.status}`); return r.json(); })
-      .then((d: GlobalLayout) => setGlobalLayout(d))
-      .catch((err) => console.warn("[GlobalBrain] layout fetch failed:", err));
-  }, [showWalkModal, globalLayoutFetched, userId]);
+
 
   // ── RCFoundationMap 統一補齊：一律走 /graph/expand/batch，merge-only，
   //    不再有「先用 all_graphs 建、再補洞」的雙軌邏輯。
@@ -963,56 +949,7 @@ export default function Page() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, isLoading, phase, userId, addFoundationsToBrain]);
 
-  // ──────────────────────────────────────────────────────────
-  // Random Walk Mode：啟動、排名查詢、選定最終 RC
-  // ──────────────────────────────────────────────────────────
 
-  const handleStartWalk = useCallback(async () => {
-    if (!walkQuery.trim() || walkStarting) return;
-    setWalkStarting(true);
-    setWalkStartError("");
-
-    const result = await startWalkRequest(walkQuery.trim());
-    setWalkStarting(false);
-
-    if (!result) {
-      setWalkStartError("啟動隨機漫步失敗，請稍後再試");
-      return;
-    }
-    setWalkId(result.walk_id);
-    setWalkStartConcepts(result.start_concepts);
-    // 起點本身先點亮，RandomWalkPanel 掛載後的 SSE 事件會接手更新。
-    setWalkActiveEids(result.start_concepts.map((c) => c.eid));
-  }, [walkQuery, walkStarting]);
-
-  const fetchWalkRanking = useCallback(async (): Promise<WalkRankedRC[]> => {
-    if (!API_BASE || !walkId) return [];
-    try {
-      const r = await apiFetch(`${API_BASE.replace(/\/$/, "")}/walk/ranking/${walkId}`);
-      if (!r.ok) throw new Error(`${r.status}`);
-      const d = await r.json();
-      return d.ranking ?? [];
-    } catch (err) {
-      console.warn("[walk/ranking]", err);
-      return [];
-    }
-  }, [walkId]);
-
-  const handleSelectFinalRC = useCallback((eid: string, label: string) => {
-    if (!walkId) return;
-    setShowWalkModal(false);
-    handleLaunchSkill(eid, label, walkId);
-  }, [walkId, handleLaunchSkill]);
-
-  const resetWalk = useCallback(() => {
-    setWalkId(null);
-    setWalkStartConcepts([]);
-    setWalkActiveEids([]);
-    setWalkQuery("");
-    setWalkStartError("");
-  }, []);
-
-  const closeWalkModal = useCallback(() => setShowWalkModal(false), []);
 
   // ──────────────────────────────────────────────────────────
   // Chat
