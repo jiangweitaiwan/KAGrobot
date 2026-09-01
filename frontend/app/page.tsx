@@ -27,6 +27,7 @@ import { AttachmentCard, AttachmentTray, type Attachment } from "./components/At
 import { useAuth } from "./components/AuthProvider";
 import AuthPanel from "./components/AuthPanel";
 import { apiFetch } from "../lib/apiFetch";
+import { streamSSE } from "../lib/sseFetch"; 
 
 
 const GlobalBrainExplorer = dynamic(() => import("./components/GlobalBrainExplorer"), { ssr: false });
