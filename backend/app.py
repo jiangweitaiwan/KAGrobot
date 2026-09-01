@@ -61,6 +61,26 @@ from api.routes                    import (
 from core.skill_sandbox import SkillSandboxProvisioner
 from retrieval.rc_category_loader import RCCategoryLoader
 
+
+async def _load_brain_weights(uid: Optional[str]) -> Dict[str, float]:
+    """讀取使用者 Personal Brain，回傳 eid -> weight 查表，供 walk_seed
+    加權起點選擇使用。獨立於 user_brain.py 的 FastAPI route，直接讀
+    Firestore（走與 api/routes/user_brain.py::get_brain 相同的 collection）。
+    """
+    if not uid:
+        return {}
+    try:
+        from google.cloud import firestore
+        db  = firestore.AsyncClient()
+        doc = await db.collection("users").document(uid).collection("brain").document("snapshot").get()
+        if not doc.exists:
+            return {}
+        data = doc.to_dict() or {}
+        return {c["eid"]: c.get("weight", 0.5) for c in (data.get("concepts") or [])}
+    except Exception as exc:
+        print(f"[app] _load_brain_weights failed (uid={uid}): {exc}")
+        return {}
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     s        = get_settings()
@@ -128,25 +148,11 @@ async def lifespan(app: FastAPI):
     rc_category_loader = RCCategoryLoader(bucket_name=s.gcs_bucketforresult)
 
     # ── Random Walk Mode 組裝 ───────────────────────────────────
-    #
-    # StartConceptPool：起點檢索池（見 graph_service/walk_start_pool.py），
-    # 與 CandidateRetriever 各自獨立索引，職責不同（leaf foundation
-    # concept vs. RC），不共用同一份 embedding index。
     start_concept_pool = StartConceptPool(driver, encoder)
 
-    # frontier_fetcher：接 AdjacencyCache 取一跳下游鄰居 + sbert prefilter
-    # （見 graph_service/walk_frontier.py）。與 dialogue mode 共用同一個
-    # adjacency_cache 實例，同一個節點不論在哪個 mode 展開過都能互相命中。
     walk_frontier_fetcher = make_frontier_fetcher(adjacency_cache, driver, encoder)
 
-    # walk LLM：獨立一個 LLM 實例（而非重用 socrates_bot 內部的），
-    # 因為每輪要動態 bind_tools 不同的 advance_path schema（target_eid 的
-    # Literal 隨當輪 frontier 變動），與 socrates_bot 固定 bind_tools 一次
-    # 的用法不同，分開持有比較乾淨。
-    walk_llm = create_chat_google_generative_ai(
-        model=s.socrates_model,
-        temperature=0.2,
-    )
+    walk_llm = create_chat_google_generative_ai(model=s.socrates_model, temperature=0.2)
 
     def _walk_llm_caller(system_prompt: str, tool_schema):
         return call_with_retry(
@@ -155,10 +161,11 @@ async def lifespan(app: FastAPI):
             )
         )
 
-    # 新：交給 orchestrator 的 LangGraph node（見 orchestrator/walk_nodes.py）。
     walk_nodes = WalkOrchestratorNodes(
         frontier_fetcher=walk_frontier_fetcher,
         llm_caller=_walk_llm_caller,
+        start_pool=start_concept_pool,
+        brain_weights_loader=_load_brain_weights,
     )
 
     orchestrator = build_orchestrator(nodes, walk_nodes)
@@ -181,13 +188,8 @@ async def lifespan(app: FastAPI):
     app.state.rc_category_map    = None
 
     # Random Walk Mode 的狀態：
-    #   start_concept_pool 是 /walk/start 起點語意搜尋用。
-    #   walk_pending_starts 見 api/routes/routes_walk.py 檔頭說明——只是
-    #   「/walk/start 準備好、但 /walk/stream 還沒真正呼叫 orchestrator」
-    #   這個很窄的時間窗的暫存，process 重啟遺失的曝險範圍遠比舊版
-    #   app.state.walk_sessions 小很多。
     app.state.start_concept_pool  = start_concept_pool
-    app.state.walk_pending_starts = {}
+
 
     yield
 

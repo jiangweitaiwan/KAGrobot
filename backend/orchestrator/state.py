@@ -57,14 +57,15 @@ class OrchestratorState(TypedDict, total=False):
     confirmed_rc_eid:  Optional[str]
     skill_sandbox_id:  Optional[str]
     attachments:       List[Dict[str, Any]]
-    # 已驗證的 Firebase uid（見 api/routes/chat.py），由呼叫端在第一次
-    # invoke 時放進 invoke_input；LangGraph 節點回傳值中若未包含此 key，
-    # 該 channel 值會維持不變，因此不需要在 nodes.py 每個 return 都重複
-    # 帶上 uid，只需要在 main_agent 節點讀取時 state.get("uid") 即可。
     uid:               Optional[str]
+    # 新增：讓 walk_seed 等節點能拿到「這是哪個 chat session」，
+    # 純粹用於 WalkSession.session_id 顯示與 debug log，不影響
+    # LangGraph thread_id 本身（thread_id 是 config 層級的東西，
+    # 與這個欄位無關，見 api/routes/chat.py 的 invoke_input 組裝）。
+    session_id:        Optional[str]
 
-    # ── Random Walk Mode（新增）──────────────────────────────
-    mode:                   str
+    walk_enabled:           bool
     walk_session:           Optional[Dict[str, Any]]
     walk_pointer:            int
     walk_pending_question:  Optional[Dict[str, Any]]
+    thinking_process:       str

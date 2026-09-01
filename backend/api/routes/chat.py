@@ -41,6 +41,7 @@ class ChatRequest(BaseModel):
     phase:             Optional[str] = None
     selected_rc_eid:   Optional[str] = None
     selected_rc_label: Optional[str] = None
+    walk_enabled:      bool = False   
 
 
 class Attachment(BaseModel):
@@ -74,19 +75,17 @@ async def chat_endpoint(
     initial_phase = body.phase or "socratic"
 
     invoke_input: dict = {
-        "messages": [HumanMessage(content=body.message)],
-        "phase":    initial_phase,
-        "uid":      uid,
+        "messages":     [HumanMessage(content=body.message)],
+        "phase":        initial_phase,
+        "uid":          uid,
+        "session_id":   body.session_id,      # ← 新增
+        "walk_enabled": body.walk_enabled,    # ← 新增
     }
     if body.selected_rc_eid is not None:
         invoke_input["selected_rc_eid"] = body.selected_rc_eid
     if body.selected_rc_label is not None:
         invoke_input["selected_rc_label"] = body.selected_rc_label
 
-    # ── 冷啟動 / MemorySaver 遺失該 thread 時，從 Firestore 備援還原 ──
-    # get_state() 是 MemorySaver 的純記憶體讀取，開銷極小，
-    # 同樣的呼叫方式已用於 api/routes/routes_brain.py 的
-    # _get_semantic_context，這裡沿用同一慣例，不特別包 to_thread。
     existing_snapshot = orchestrator.get_state(config)
     if not existing_snapshot.values:
         restored = await load_session_snapshot(uid, body.session_id)
@@ -96,22 +95,30 @@ async def chat_endpoint(
             invoke_input["main_state"]       = restored["main_state"]
             invoke_input["confirmed_rc_eid"] = restored["confirmed_rc_eid"]
             invoke_input["skill_sandbox_id"] = restored["skill_sandbox_id"]
+            invoke_input["thinking_process"] = restored["thinking_process"]
+
+            # ── walk 的執行狀態（walk_session/pointer/pending_question）
+            #    綁定的是 LangGraph 內部 interrupt() 的 checkpoint task，
+            #    不是我們能序列化還原的資料——這裡冷啟動代表那個暫停點
+            #    已經永久遺失，唯一誠實的作法是降級回 socratic，讓使用者
+            #    知道上次的慢想被中斷了，而不是假裝可以無縫恢復一個
+            #    實際上已經不存在的 interrupt（同 main_state 對含
+            #    tool_calls 訊息的降級哲學，見 core/session_store.py）。
+            if restored["phase"] in ("walk_pending",):
+                invoke_input["phase"] = "socratic"
+
             if body.selected_rc_eid is None and restored["selected_rc_eid"]:
                 invoke_input["selected_rc_eid"]   = restored["selected_rc_eid"]
                 invoke_input["selected_rc_label"] = restored["selected_rc_label"]
-            # 前端這次沒有明確指定 phase 時，以還原結果為準，
-            # 避免冷啟動後又從 socratic 重新開始一次。
             if body.phase is None:
-                invoke_input["phase"] = restored["phase"]
+                invoke_input["phase"] = invoke_input["phase"]  # 已在上面決定，不再被 restored 覆蓋
 
     result = await orchestrator.ainvoke(invoke_input, config=config)
 
-    # 最後一則 AI 訊息
     messages   = result.get("messages") or []
     last_msg   = messages[-1] if messages else AIMessage(content="")
     reply_text = getattr(last_msg, "content", str(last_msg))
 
-    # socrates_phase
     socrates_state = result.get("socrates_state")
     socrates_phase = (
         socrates_state.get("phase")
@@ -119,41 +126,16 @@ async def chat_endpoint(
         else None
     )
 
-    # ── attachments：MainAgent 透過 get_sandbox_file 產生的結構化附件
-    #    （ref/kind/url/filename/created_at/expires_in_hours），這裡只是
-    #    原樣轉成回應 schema，不做任何文字解析——圖片/檔案是否顯示完全
-    #    不依賴 reply_text 裡有沒有正確寫入 [[attachment:N]] 佔位符。
-    attachments = [
-        Attachment(**a) for a in (result.get("attachments") or [])
-    ]
+    attachments = [Attachment(**a) for a in (result.get("attachments") or [])]
 
-
-    # ── 這一輪的「前端展示用」訊息，供之後 GET /me/sessions/{session_id}
-    #    還原聊天畫面使用。與 main_state_messages（LangGraph 還原用，
-    #    格式不同、且過濾了帶 tool_calls 的訊息）刻意分開存，
-    #    因為用途不同：這裡要完整保留使用者實際看到的內容。
     now_ms = int(time.time() * 1000)
     turn_messages = [
-        {
-            "role":        "user",
-            "content":     body.message,
-            "attachments": [],
-            "created_at":  now_ms,
-        },
-        {
-            "role":        "ai",
-            "content":     reply_text,
-            "attachments": [a.model_dump() for a in attachments],
-            "created_at":  now_ms,
-        },
+        {"role": "user", "content": body.message, "attachments": [], "created_at": now_ms},
+        {"role": "ai", "content": reply_text,
+         "attachments": [a.model_dump() for a in attachments], "created_at": now_ms},
     ]
 
-
-    # ── 備份本輪結束後的狀態到 Firestore（best-effort，內部已 try/except）
-    await save_session_snapshot(
-        uid, body.session_id, result,
-        turn_messages=turn_messages,
-    )
+    await save_session_snapshot(uid, body.session_id, result, turn_messages=turn_messages)
 
     return ChatResponse(
         reply          = reply_text,

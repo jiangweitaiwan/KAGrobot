@@ -58,15 +58,19 @@ _SYSTEM_PROMPT = """\
   不需要，也不應該在回覆中列出這份清單或提及其存在。
 - 不需要主動引導使用者選路徑——路徑選擇由前端圖譜介面完成，
   你只需要專注於需求釐清與概念說明。
+- 每輪判斷使用者的分析需求是否已經足夠具體、可以開始搜尋候選概念
+  （例如：已知想分析的現象、機制方向或關鍵變數），並回報於
+  ready_for_search。仍在釐清階段（需求模糊、還在來回確認）時回傳 false。
 
 ## 輸出格式（強制）
 每輪必須輸出合法 JSON，不得有任何前綴文字或 markdown code block：
-{"ai_message": "<繁體中文回覆>", "intent_types": [...], "context_summary": "<英文摘要>"}
+{"ai_message": "<繁體中文回覆>", "intent_types": [...], "context_summary": "<英文摘要>", "ready_for_search": <true|false>}
 
 - intent_types：候選值同前（causal_mechanism, equilibrium_analysis, forecasting,
   event_study, structural_estimation, policy_evaluation, asset_pricing, descriptive）。
 - context_summary：每輪重寫的英文摘要，總結使用者目前完整的分析需求，
   供後端 Semantic 機制做 embedding 相似度比對（前端排名、圖譜點亮皆依賴此欄位）。
+- ready_for_search：需求是否已足夠具體可以開始搜尋，見上方說明。
 """
 
 
@@ -90,6 +94,10 @@ class OutputSchema(BaseModel):
             "供 Semantic 機制做 embedding 相似度比對。"
         ),
     )
+    ready_for_search: bool = Field(
+        default=False,
+        description="使用者的分析需求是否已足夠具體，可以開始搜尋候選概念。",
+    )    
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -171,6 +179,7 @@ class SocratesChatBot:
             state["intent_types"] = new_intents
         if new_summary:
             state["context_summary"] = new_summary
+        state["ready_for_search"] = bool(bot_resp.get("ready_for_search", False))
 
         state["messages"].append(AIMessage(content=ai_text))
         return state
@@ -375,10 +384,11 @@ class SocratesChatBot:
         try:
             data = json.loads(raw)
             if "ai_message" in data:
+                data.setdefault("ready_for_search", False)
                 return data
         except (json.JSONDecodeError, TypeError):
             pass
-        return {"ai_message": raw, "intent_types": []}
+        return {"ai_message": raw, "intent_types": [], "ready_for_search": False}
 
     # ------------------------------------------------------------------
     # Formatting helpers

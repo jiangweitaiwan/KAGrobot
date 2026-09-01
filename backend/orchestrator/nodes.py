@@ -71,21 +71,20 @@ class OrchestratorNodes:
                 messages       = [AIMessage(content="路徑已確認，開始執行分析…")],
                 phase          = "path_confirmed",
                 socrates_state = new_socrates_state,
-                # 進入 main_agent 前的過渡訊息不帶任何附件；
-                # 明確清空，避免前一輪 main_agent 產生的 attachments
-                # 殘留在 checkpoint state 裡被這一輪誤附加顯示。
                 attachments    = [],
             )
 
         new_socrates_state = self._socrates_bot.process_message(old_socrates_state, user_msg)
         reply_text = self._socrates_bot.get_last_reply(new_socrates_state)
 
+        ready        = bool(new_socrates_state.get("ready_for_search", False))
+        walk_enabled = bool(state.get("walk_enabled", False))
+        next_phase   = "walk_pending" if (ready and walk_enabled) else "socratic"
+
         return OrchestratorState(
             messages       = [AIMessage(content=reply_text)],
-            phase          = "socratic",
+            phase          = next_phase,
             socrates_state = new_socrates_state,
-            # 同上：socratic 階段的回覆不含 attachments，明確重置，
-            # 避免使用者切回上一個已確認路徑再問問題時，看到舊圖表重複出現。
             attachments    = [],
         )
 

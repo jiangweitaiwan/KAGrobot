@@ -86,11 +86,13 @@ class SemanticScoresResponse(BaseModel):
     query:  str
     scores: List[RCSemanticScore]
 
+
 class SemanticContextResponse(BaseModel):
-    session_id:   str
-    query:        str
-    intent_types: List[str]
-    summary:      str
+    session_id:       str
+    query:            str
+    intent_types:     List[str]
+    summary:          str
+    thinking_process: str = ""
 
 class FoundationRecommendation(BaseModel):
     element_id: str
@@ -191,11 +193,6 @@ def _get_anchor_label(request: Request, eid: str) -> str:
     return _anchor_label_from_neo4j(request.app.state.driver, eid)
 
 def _get_semantic_context(request: Request, uid: str, session_id: str) -> SemanticContext:
-    """從 orchestrator checkpoint 讀出該 session 目前的 SemanticContext。
-
-    LangGraph 的 MemorySaver checkpointer 是純記憶體 dict 讀取，
-    get_state() 本身開銷極小，這裡不特別包 asyncio.to_thread。
-    """
     orchestrator = request.app.state.orchestrator
     config = {"configurable": {"thread_id": f"{uid}:{session_id}"}}
     try:
@@ -209,6 +206,7 @@ def _get_semantic_context(request: Request, uid: str, session_id: str) -> Semant
         query=socrates_state.get("query") or "",
         intent_types=socrates_state.get("intent_types") or [],
         summary=socrates_state.get("context_summary") or "",
+        thinking_process=values.get("thinking_process") or "",
     )
 
 # ── Routes ────────────────────────────────────────────────────────────
@@ -392,6 +390,7 @@ async def semantic_context(
         query=ctx.query,
         intent_types=ctx.intent_types,
         summary=ctx.summary,
+        thinking_process=ctx.thinking_process,
     )
 
 

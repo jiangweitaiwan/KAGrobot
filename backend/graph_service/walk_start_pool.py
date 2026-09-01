@@ -66,24 +66,34 @@ class StartConceptPool:
         self._loaded = True
         print(f"[StartConceptPool] loaded {len(self._index)} leaf foundation concepts.")
 
-    def retrieve(self, query_text: str, k: int = 3) -> List[WalkNodeRef]:
-        """語意搜尋起點候選，回傳 top-k（依 cosine 相似度排序）。
+    def retrieve(
+        self,
+        query_text:    str,
+        brain_weights: Optional[Dict[str, float]] = None,
+        k:             int = 3,
+        alpha:         float = 0.6,
+    ) -> List[WalkNodeRef]:
+        """語意搜尋起點候選，回傳 top-k（依 alpha*semantic + (1-alpha)*brain_weight 排序）。
 
-        query_text 通常是使用者第一輪輸入的原始描述（或 socratic 精煉過的
-        query），與既有 dialogue mode 的 CandidateRetriever.retrieve_candidates
-        用法一致，只是候選集合換成 leaf foundation concept。
+        brain_weights：eid -> Personal Brain 權重（0~1），不在 brain 裡的
+        concept 視為 0。與 dialogue mode 的 interScore 精神一致——已被
+        使用者手動確認過重要的概念，優先當作 random walk 的起點；
+        但這裡是單點命中（不像 RC 排名要除以 foundation 數），因為
+        起點候選本身就是 leaf concept，沒有下層集合可算比例。
         """
         if not self._loaded:
             self.load()
-
         if not self._index:
             return []
 
+        weights = brain_weights or {}
         query_emb = self._encoder.encode(query_text)[0]
-        scored = [
-            (float(np.dot(query_emb, item["embedding"])), item)
-            for item in self._index
-        ]
+        scored = []
+        for item in self._index:
+            semantic = float(np.dot(query_emb, item["embedding"]))
+            inter    = weights.get(item["eid"], 0.0)
+            score    = alpha * semantic + (1 - alpha) * inter
+            scored.append((score, item))
         scored.sort(key=lambda pair: pair[0], reverse=True)
 
         return [

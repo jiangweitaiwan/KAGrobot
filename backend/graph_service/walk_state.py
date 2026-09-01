@@ -414,21 +414,25 @@ class WalkSession:
 
 
 # ══════════════════════════════════════════════════════════════
-# WalkScheduler — round-robin，跳過已終止 path
+# WalkScheduler — 循序制：完整走完一條 path 才換下一條
 # ══════════════════════════════════════════════════════════════
 
 class WalkScheduler:
-    """決定「這一輪換哪條 path」，不涉及 LLM 判斷。
+    """決定「現在該處理哪條 path」，不涉及 LLM 判斷。
 
-    Round-robin：從上一次指標的下一位開始找，跳過 DEAD_END 的 path；
-    找不到任何非 DEAD_END 的 path 時回傳 None（代表 walk 已全部結束）。
+    新版策略：永遠挑「清單中第一條尚未終止（DEAD_END）的 path」，
+    也就是固定依 path_id 由小到大處理，把某條 path 完整走到終止
+    （no_downstream 或 max_depth）才輪到下一條。效果：
 
-    【變更說明】pointer 現在是建構參數 + 唯讀屬性，而不是純粹的實例私有
-    狀態：LangGraph node 每次被呼叫時都是全新建立這個物件（讀 state 建構、
-    算完即丟棄），因此 pointer 的存續必須交給呼叫端明確存進
-    OrchestratorState["walk_pointer"]、下次呼叫時明確傳回來還原，
-    而不能依賴「同一個 WalkScheduler 實例活過多次呼叫」這個舊架構下才
-    成立的假設。呼叫端慣例：
+      - 任一時刻最多只有一條 path 處於 ACTIVE/PENDING，
+        pending_question 的歸屬永遠明確、不需要額外交叉比對。
+      - 使用者體驗上更像「依序看完三個假設」，而不是三條線同時
+        跳動——對「慢想」這種可解釋性優先的功能更合適。
+      - 犧牲的是「三條 path 平行推進」帶來的總時長優化，但單條
+        path 最多 max_depth 步、K 通常是 3，總步數可接受。
+
+    pointer 仍保留（雖然循序制下它幾乎恆等於目前處理中 path 的
+    path_id），維持與呼叫端既有慣例相容：
 
         scheduler = WalkScheduler(session, state.get("walk_pointer", -1))
         path = scheduler.next_path()
@@ -446,15 +450,15 @@ class WalkScheduler:
         return self._pointer
 
     def next_path(self) -> Optional[PathState]:
-        n = len(self._session.paths)
-        if n == 0:
-            return None
+        """回傳清單中第一條尚未終止的 path（依 path_id 由小到大）。
 
-        for offset in range(1, n + 1):
-            idx = (self._pointer + offset) % n
-            candidate = self._session.paths[idx]
-            if candidate.status != PathStatus.DEAD_END:
-                self._pointer = idx
-                return candidate
-
-        return None   # 所有 path 皆已終止
+        找不到任何非 DEAD_END 的 path 時回傳 None（代表 walk 已全部
+        結束）。與舊版的差異只在於不再使用 self._pointer 做環狀偏移
+        搜尋起點——pointer 純粹是「上次處理到誰」的紀錄，不影響這裡
+        的選取邏輯。
+        """
+        for path in self._session.paths:
+            if path.status != PathStatus.DEAD_END:
+                self._pointer = path.path_id
+                return path
+        return None

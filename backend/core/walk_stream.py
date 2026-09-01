@@ -1,46 +1,57 @@
 # -*- coding: utf-8 -*-
-"""core/walk_stream.py — Random Walk Mode 的 SSE 事件轉譯層（改版）。
+"""core/walk_stream.py — Random Walk（慢想）Mode 的 SSE 事件轉譯層。
 
-【變更說明 — 改吃 orchestrator.astream() 的 chunk，而非 WalkTurnResult】
-舊版 to_sse_event() 的輸入是 core/walk_bot.py::WalkTurnResult，一個手刻的
-dataclass，由 WalkTurnRunner.run_turn() 每輪明確組出來。現在 walk 的推進
-邏輯搬進了 orchestrator/walk_nodes.py 的 LangGraph node，驅動方式也從
-「呼叫端手動 for 迴圈呼叫 run_turn()」改成「orchestrator.astream(...,
-stream_mode='updates')」，每個 tick 吐出的是 `{node_name: state_update}`
-這種形狀的 chunk，或是暫停時的 `{"__interrupt__": (Interrupt(...),)}`。
+【重構說明 — 併入 /chat 主流程後的變化】
+Walk 不再有獨立的 walk_id 與 /walk/start REST endpoint：一趟慢想的
+起點選取（原本 StartConceptPool.retrieve 的呼叫）現在是圖內的第一個
+node —— walk_seed（見 orchestrator/walk_nodes.py），由 socratic 判斷
+語意已收斂且 walk_enabled=True 時，把 phase 轉為 "walk_pending" 觸發
+進圖。因此 SSE 事件流現在多一個起點：
 
-這裡的 to_sse_events() 負責把這些 chunk 翻譯成前端 RandomWalkPanel.tsx
-早已在消費的同一套 event schema（frontier_ready / frontier_expanded /
-path_dead_end / user_question / walk_complete），front-end 完全不需要
-改動。
+  {"walk_seed": update} → walk_started（成功，附上三條 path 的起點）
+                          或 walk_aborted（需求不足 / 找不到起點，
+                          walk_seed 已把 phase 轉回 "socratic"）
 
-翻譯規則（見各 helper function 的說明）：
+walk_finish 完成後不再產生 ranking——排名完全交給既有的
+/brain/rc-semantic-scores（walk 只是把 WalkSession.context_summary
+寫進 OrchestratorState.thinking_process，讓語意排名多吃一份探索過程
+的語料，見 core/semantic_context.py）。walk_complete 事件因此只帶
+walk_finish 產生的說明文字，前端收到後另外重新拉一次語意排名 API
+即可（見 page.tsx::handleWalkEvent 的 "walk_complete" 分支）。
+
+【path_id 的歸屬 — 循序制排程後不再含糊】
+graph_service/walk_state.py::WalkScheduler 已改為循序制：任一時刻
+最多只有一條 path 處於 ACTIVE/PENDING，其餘皆已 DEAD_END 或尚未輪到。
+這代表：
+  - frontier_ready / frontier_expanded / path_dead_end / user_question
+    這幾個事件的 path_id，永遠對應「當下唯一正在被推進的那條 path」，
+    不會出現兩條 path 同時等待使用者回答的情況。
+  - 前端不需要額外邏輯去判斷「這個問題是哪條 path 問的」——它就是
+    目前畫面上唯一活躍的 path。path_id 欄位依然保留在事件裡，
+    是為了讓前端能明確標示（例如「path 1 提問」），而非用於消歧義。
+
+翻譯規則（其餘與前一版相同）：
   - "__interrupt__" 出現 → user_question（不看是哪個 node 產生的）
+  - {"walk_seed": update} → walk_started 或 walk_aborted（見上）
   - {"walk_fetch_frontier": update} → frontier_ready 或 path_dead_end
     （frontier 抓回來發現是空的，代表這條 path 已經走到底）
   - {"walk_decide": update} → 兩種情況：
-      a. update 裡帶了 walk_pending_question → 這個 tick 本身不對應任何
-         使用者可見事件；真正的 user_question 事件會在緊接著的
+      a. update 裡帶了 walk_pending_question → 這個 tick 本身不對應
+         任何使用者可見事件；真正的 user_question 事件會在緊接著的
          "__interrupt__" chunk 出現，這裡刻意不重複發送。
       b. 否則代表 LLM 決定推進了 → frontier_expanded；如果推進後這條
          path 因為達到 max_depth 而直接被標記終止（PathState.advance()
-         內部行為），這個 tick不會再進 walk_fetch_frontier（scheduler
-         之後會跳過已 dead_end 的 path），所以「終止」這件事必須在這裡
-         一併補發一個 path_dead_end，否則這種終止方式永遠不會被前端
-         看到（這是相對舊版 WalkTurnResult 設計補上的一個小改進，
-         no_downstream 終止方式一直都有對應事件，max_depth 終止方式
-         舊版其實也沒有，這裡一併修正）。
+         內部行為），這個 tick 不會再進 walk_fetch_frontier（循序制
+         scheduler 之後會直接跳去下一條 path），所以「終止」這件事
+         必須在這裡一併補發一個 path_dead_end。
   - {"walk_ask": update} → 沒有對應事件（resume 後只是把答案記錄進
     context_summary，使用者早就知道自己回答了什麼，不需要额外通知）。
-  - {"walk_finish": update} → walk_complete。
+  - {"walk_finish": update} → walk_complete（帶 summary 文字，不帶
+    ranking）。
 
-path_id 的取得：WalkSession.start() 建立時 path_id 就等於它在
-session.paths 這個 list 裡的 index（graph_service/walk_state.py），而
-WalkScheduler.next_path() 選中某條 path 時，會把該 index 存進
-self._pointer（也就是 node 回傳、我們存進 state 的 walk_pointer）。
-因此「這個 tick 是在處理哪條 path」，直接讀 update["walk_pointer"] 就是
-該 path 在 session["paths"] 陣列裡的 index，不需要另外比對前後兩份
-session 的差異。
+path_id 的取得：見 graph_service/walk_state.py::WalkSession.start()
+與 WalkScheduler 的說明，直接讀 update["walk_pointer"] 即可對應該
+path 在 session["paths"] 陣列裡的 index。
 """
 
 from __future__ import annotations
@@ -72,6 +83,8 @@ def to_sse_events(chunk: Dict[str, Any]) -> List[dict]:
 
     node_name, update = next(iter(chunk.items()))
 
+    if node_name == "walk_seed":
+        return _events_from_seed(update)
     if node_name == "walk_fetch_frontier":
         return _events_from_fetch_frontier(update)
     if node_name == "walk_decide":
@@ -79,7 +92,7 @@ def to_sse_events(chunk: Dict[str, Any]) -> List[dict]:
     if node_name == "walk_finish":
         return _events_from_finish(update)
 
-    # walk_ask、walk_confirm（不會出現在這裡，見檔尾說明）等其餘 node
+    # walk_ask（resume 後只記錄不通知，見檔頭說明）等其餘 node
     # 沒有對應的使用者可見事件。
     return []
 
@@ -94,6 +107,53 @@ def _events_from_interrupt(interrupts: tuple) -> List[dict]:
             "question": payload.get("question", ""),
         })
     return events
+
+
+def _message_text(update: Dict[str, Any]) -> str:
+    """從 node 回傳的 update["messages"] 取出最後一則訊息的文字內容。
+
+    LangGraph 的 astream(stream_mode="updates") 這裡拿到的是尚未序列化
+    的 BaseMessage 物件（AIMessage 等），不是 dict，因此優先用
+    getattr 讀 .content；防禦性地也接受萬一是 dict 形狀的情況。
+    """
+    msgs = update.get("messages") or []
+    if not msgs:
+        return ""
+    last = msgs[-1]
+    content = getattr(last, "content", None)
+    if content is not None:
+        return content
+    if isinstance(last, dict):
+        return last.get("content", "")
+    return ""
+
+
+def _events_from_seed(update: Dict[str, Any]) -> List[dict]:
+    """walk_seed 的兩種結果：
+
+    成功 → update 帶有 walk_session，代表三條 path 的起點已選定，
+           對應事件 walk_started，附上每條 path 的起點供前端顯示。
+    失敗 → update 沒有 walk_session（需求不夠具體、或找不到合適起點），
+           walk_seed 已經把 phase 轉回 "socratic" 並附上一則說明訊息，
+           對應事件 walk_aborted，前端應將其當作一般 AI 回覆呈現，
+           並結束這段 SSE（walk_seed 沒有出圖到 walk_fetch_frontier，
+           stream 會自然在這裡結束）。
+    """
+    session_dict = update.get("walk_session")
+    if session_dict is None:
+        return [{
+            "type":    "walk_aborted",
+            "message": _message_text(update),
+        }]
+
+    session = WalkSession.from_dict(session_dict)
+    return [{
+        "type": "walk_started",
+        "start_concepts": [
+            {"path_id": p.path_id, "eid": p.start_eid, "label": p.start_label}
+            for p in session.paths
+        ],
+    }]
 
 
 def _events_from_fetch_frontier(update: Dict[str, Any]) -> List[dict]:
@@ -159,9 +219,9 @@ def _events_from_decide(update: Dict[str, Any]) -> List[dict]:
         "reason":   last.get("reason", ""),
     }]
 
-    # advance() 若因為達到 max_depth 而直接終止，這個 tick 不會再進
-    # walk_fetch_frontier（見本檔頭說明），"終止" 這件事必須在這裡
-    # 一併回報。
+    # advance() 若因為達到 max_depth 而直接終止，循序制排程下這條 path
+    # 不會再進 walk_fetch_frontier（scheduler 會直接換到下一條 path），
+    # "終止" 這件事必須在這裡一併回報。
     if path["status"] == "dead_end":
         events.append({
             "type":    "path_dead_end",
@@ -173,9 +233,15 @@ def _events_from_decide(update: Dict[str, Any]) -> List[dict]:
 
 
 def _events_from_finish(update: Dict[str, Any]) -> List[dict]:
-    session_dict = update.get("walk_session") or {"session_id": "", "paths": []}
-    session = WalkSession.from_dict(session_dict)
-    return [{"type": "walk_complete", "ranking": session.all_foundation_eids()}]
+    """walk_finish 完成：不再附帶 ranking——排名交給
+    /brain/rc-semantic-scores（thinking_process 已寫入
+    OrchestratorState，見 orchestrator/walk_nodes.py::walk_finish）。
+    這裡只把說明文字透傳出去，前端收到後另外重新拉一次語意排名。
+    """
+    return [{
+        "type":    "walk_complete",
+        "summary": _message_text(update),
+    }]
 
 
 def _path_at(session_dict: Dict[str, Any], path_id: int) -> Optional[dict]:
@@ -200,20 +266,20 @@ async def stream_walk_via_orchestrator(
     invoke_input: Any,
     max_chunks:   int = _DEFAULT_MAX_CHUNKS,
 ) -> AsyncGenerator[str, None]:
-    """驅動 orchestrator.astream() 跑 random walk 子圖，逐 chunk 轉成 SSE
-    字串。invoke_input 可以是：
+    """驅動 orchestrator.astream() 跑 random walk 子流程，逐 chunk 轉成
+    SSE 字串。invoke_input 可以是：
 
-      - 一份完整的初始 state dict（第一次呼叫，見 api/routes/routes_walk.py
-        的 /walk/start + /walk/stream 兩段式流程）
-      - langgraph.types.Command(resume=answer)（使用者回答問題後，見
-        /walk/answer；也對應 core/walk_bot.py 舊版 stream_walk_turns() 的
-        「resume = 開一段新 stream」設計精神，只是現在 resume 是 LangGraph
-        原生機制，不需要呼叫端手動把答案摺進 context_summary）
+      - 一份最小 state dict（例如 {"messages": []}），單純用來觸發
+        entry_router 重新進圖——phase 早已由 /chat 那次 ainvoke 寫進
+        checkpoint 為 "walk_pending"（見 api/routes/routes_walk.py 的
+        GET /walk/stream/{session_id}）
+      - langgraph.types.Command(resume=answer)（使用者回答問題後，
+        見 POST /walk/answer/{session_id}）
 
-    連線在圖真正跑到 END（walk_finish 之後）或再次卡在 interrupt() 時
-    自然結束——不需要像舊版那樣手動判斷「這輪 kind 是不是 question /
-    walk_complete」才 return，astream() 本身在遇到這兩種情況都會自然
-    停止 yield。
+    連線在圖真正跑到 END（walk_finish 或 walk_seed 失敗提前結束之後）
+    或再次卡在 interrupt() 時自然結束——不需要手動判斷「這輪 kind 是
+    不是 question / walk_complete」才 return，astream() 本身在遇到
+    這兩種情況都會自然停止 yield。
     """
     chunk_count = 0
     async for chunk in orchestrator.astream(invoke_input, config=config, stream_mode="updates"):

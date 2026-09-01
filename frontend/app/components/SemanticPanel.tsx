@@ -3,9 +3,10 @@
 import type { RCSemanticScore } from "./DetailPanel";
 
 export type SemanticContextData = {
-  query:        string;
-  intent_types: string[];
-  summary:      string;
+  query:            string;
+  intent_types:     string[];
+  summary:          string;
+  thinking_process?: string;
 };
 
 export type RecommendedFoundation = {
@@ -117,6 +118,20 @@ export default function SemanticPanel({ context, rcScores, recommendedFoundation
               </p>
             </div>
           )}
+          
+          {context!.thinking_process && (
+            <div style={{ flexShrink: 0 }}>
+              <div className="detail-section-label" style={{ marginBottom: 4 }}>
+                Thinking Process
+                <span style={{ color: "var(--muted)", marginLeft: 6, fontWeight: 400 }}>
+                  · 慢想探索軌跡
+                </span>
+              </div>
+              <p style={{ margin: 0, fontSize: "0.68rem", color: "#80b0a0", lineHeight: 1.6 }}>
+                {context!.thinking_process}
+              </p>
+            </div>
+          )}          
 
           {context!.query && (
             <div style={{ flexShrink: 0 }}>

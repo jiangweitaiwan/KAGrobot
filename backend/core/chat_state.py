@@ -33,6 +33,7 @@ class ChatState(TypedDict, total=False):
     agent_messages:  List[BaseMessage]
     phase:           str
     context_summary: Optional[str]
+    ready_for_search:  bool    
 
 # ═══════════════════════════════════════════════════════════════
 # 公開輔助函數

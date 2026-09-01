@@ -22,8 +22,7 @@ import type { SemanticContextData, RecommendedFoundation } from "./components/Se
 
 import { AttachmentCard, AttachmentTray, type Attachment } from "./components/AttachmentCard";
 
-import RandomWalkPanel from "./components/RandomWalkPanel";
-import type { WalkRankedRC } from "./components/RandomWalkPanel";
+
 
 import { useAuth } from "./components/AuthProvider";
 import AuthPanel from "./components/AuthPanel";
@@ -72,7 +71,11 @@ type SessionDetail = {
   selected_rc_label?: string | null;
 };
 
-type WalkStartConcept = { eid: string; label: string };
+type WalkStatusResponse = {
+  phase: string;
+  has_pending_question: boolean;
+  pending_question: { path_id: number; question: string } | null;
+};
 
 // ─────────────────────────────────────────────────────────────
 // Constants
@@ -333,20 +336,18 @@ async function fetchSessionDetail(sessionId: string): Promise<SessionDetail | nu
 // Random Walk Mode fetch helpers
 // ─────────────────────────────────────────────────────────────
 
-async function startWalkRequest(
-  query: string,
-): Promise<{ walk_id: string; start_concepts: WalkStartConcept[] } | null> {
-  if (!API_BASE) return null;
+// ─────────────────────────────────────────────────────────────
+// Random Walk（慢想）fetch helpers
+// ─────────────────────────────────────────────────────────────
+
+async function fetchWalkStatus(sessionId: string): Promise<WalkStatusResponse | null> {
+  if (!API_BASE || !sessionId) return null;
   try {
-    const r = await apiFetch(`${API_BASE.replace(/\/$/, "")}/walk/start`, {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ query, k: 3, max_depth: 8 }),
-    });
+    const r = await apiFetch(`${API_BASE.replace(/\/$/, "")}/walk/status/${sessionId}`);
     if (!r.ok) throw new Error(`${r.status}`);
     return await r.json();
   } catch (err) {
-    console.warn("[walk/start]", err);
+    console.warn("[walk/status]", err);
     return null;
   }
 }
@@ -412,30 +413,21 @@ export default function Page() {
   const [showHistory,     setShowHistory]     = useState(false);
   const [loadingHistory,  setLoadingHistory]  = useState(false);
 
-  // ── Random Walk Mode ─────────────────────────────────────────
-  // 獨立於 dialogue mode 的第二種對話模式（見 core/walk_bot.py /
-  // orchestrator/walk_nodes.py）。以 modal 呈現，避免跟既有 220px 寬的
-  // chat-column 搶版面——RandomWalkPanel 需要顯示每條 path 的走訪軌跡
-  // 與最終排名，在窄欄位裡會很擠。
-  //
-  // walkId 一旦選定最終 RC（見 handleSelectFinalRC），就會變成這段對話
-  // 往後的 sessionId：orchestrator 那邊 thread_id 是
-  // "{uid}:{session_id}"（見 api/routes/chat.py）與
-  // "{uid}:{walk_id}"（見 api/routes/routes_walk.py）用的是同一個字串
-  // 慣例，entry_router 只要看到 mode="random_walk"（已持久化在該
-  // thread 的 checkpoint 裡）且 selected_rc_eid 有值就會分流進
-  // walk_confirm → main_agent，不需要另外開一支後端 endpoint——直接
-  // 沿用既有 /chat 即可，見 handleLaunchSkill 的 sessionIdOverride 參數。
-  const [showWalkModal, setShowWalkModal]   = useState(false);
-  const [walkQuery, setWalkQuery]           = useState("");
-  const [walkId, setWalkId]                 = useState<string | null>(null);
-  const [walkStartConcepts, setWalkStartConcepts] = useState<WalkStartConcept[]>([]);
-  const [walkStarting, setWalkStarting]     = useState(false);
-  const [walkStartError, setWalkStartError] = useState("");
-  // random walk 過程中，各 path 目前所在節點的 eid 集合，餵給
-  // GlobalBrainExplorer 的 activeCandidateEids，達成「大腦被激活」的
-  // 即時視覺效果（見 RandomWalkPanel.tsx 檔頭說明）。
+
+  // ── Random Walk（慢想）Mode ───────────────────────────────────
+  // 不再是獨立 modal + walk_id：慢想是「手動開關 + 掛在既有 /chat
+  // 對話流程裡的一個中繼 phase（walk_pending）」，sessionId 本身
+  // 就是 walk 的識別（thread_id = "{uid}:{sessionId}"）。
+  const [walkEnabled, setWalkEnabled]     = useState(false);
   const [walkActiveEids, setWalkActiveEids] = useState<string[]>([]);
+  const [walkStreaming, setWalkStreaming]   = useState(false);
+  const [pendingWalkPathId, setPendingWalkPathId] = useState<number>(0);
+
+  // 每次開新的 walk SSE 連線前，先中止上一條，避免同時存在多條
+  // reader 造成事件重複處理；元件卸載時一併中止，避免背景無人消費
+  // 的 stream 持續佔用連線。
+  const walkAbortRef = useRef<AbortController | null>(null);  
+
 
   // ── Global layout ──────────────────────────────────────────
   const [globalLayout,        setGlobalLayout]        = useState<GlobalLayout | null>(null);
@@ -489,7 +481,7 @@ export default function Page() {
   //    本身透過 orchestrator checkpointer 安全保存、不受影響，只是
   //    前端暫時看不到即時進度），因此這裡的判斷同時也隱含「只有
   //    modal 開著才顯示 walk 高亮」。
-  const explorerActiveEids = showWalkModal && walkId ? walkActiveEids : activeCandidateEids;
+  const explorerActiveEids = walkStreaming ? walkActiveEids : activeCandidateEids;
 
   // ── RC Ranking (derived, 前端即時計算) ────────────────────
   const rcRanking = useMemo(
@@ -520,9 +512,29 @@ export default function Page() {
     if (!storedSession) localStorage.setItem(SESSION_KEY, sid);
     setSessionId(sid);
 
-    setPhase(localStorage.getItem(PHASE_KEY) || "socratic");
+    const storedPhase = localStorage.getItem(PHASE_KEY) || "socratic";
+    setPhase(storedPhase);
     const rawHistory = localStorage.getItem(HISTORY_KEY);
     setMessages(rawHistory ? JSON.parse(rawHistory) : []);
+
+    // 若上次關閉頁面時卡在 walk_pending，等 userId 就緒後再檢查
+    // （見下方另一個 effect，因為 recoverWalkIfNeeded 需要已登入）。
+  }, []);
+
+  // ── walk 恢復檢查：需要 userId（apiFetch 才帶得出 Authorization
+  //    header）與 sessionId 都就緒後才能呼叫 ──────────────────────
+  useEffect(() => {
+    if (!userId || !sessionId) return;
+    const storedPhase = localStorage.getItem(PHASE_KEY) || "socratic";
+    if (storedPhase === "walk_pending") {
+      recoverWalkIfNeeded(sessionId, storedPhase);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, sessionId]);
+
+  // ── unmount 時中止任何仍在進行的 walk SSE 連線 ──────────────────
+  useEffect(() => {
+    return () => { walkAbortRef.current?.abort(); };
   }, []);
 
   useEffect(() => { messagesRef.current = messages; }, [messages]);
@@ -642,6 +654,163 @@ export default function Page() {
 
   const handleAskAboutNode = useCallback((eid: string, label: string) => {
     setInput(`關於「${label}」(eid: ${eid})，`);
+  }, []);
+
+  // ──────────────────────────────────────────────────────────
+  // Random Walk（慢想）：SSE 事件消費與狀態機
+  // ──────────────────────────────────────────────────────────
+
+  const handleWalkEvent = useCallback((event: any) => {
+    switch (event.type) {
+      case "walk_started": {
+        const eids: string[] = (event.start_concepts ?? []).map((c: any) => c.eid);
+        setWalkActiveEids(eids);
+        break;
+      }
+      case "frontier_ready":
+      case "frontier_expanded": {
+        if (event.to_eid) {
+          setWalkActiveEids((prev) => Array.from(new Set([...prev, event.to_eid])));
+        }
+        break;
+      }
+      case "path_dead_end": {
+        // 循序制排程：這條 path 結束後，下一個 chunk 會是下一條 path
+        // 的 frontier_ready，或全部完成後的 walk_complete，這裡不需要
+        // 額外處理。
+        break;
+      }
+      case "user_question": {
+        setPendingWalkPathId(event.path_id ?? 0);
+        setMessages((prev) => {
+          const next = [
+            ...prev,
+            { id: createId(), role: "ai" as const, content: `🤔 ${event.question}` },
+          ];
+          saveHistory(next);
+          return next;
+        });
+        setPhase("walk_awaiting_answer");
+        break;
+      }
+      case "walk_complete": {
+        setPhase("socratic");
+        localStorage.setItem(PHASE_KEY, "socratic");
+        setWalkStreaming(false);
+        setWalkActiveEids([]);
+        typewriterAppend(event.summary || "慢想完成。", []);
+        fetchSemanticContextData(sessionId).then(setSemanticContext);
+        fetchSemanticScores(sessionId).then(setRCSemanticScores);
+        fetchFoundationRecommendations(sessionId).then(setRecommendedFoundations);
+        break;
+      }
+      case "walk_aborted": {
+        setPhase("socratic");
+        localStorage.setItem(PHASE_KEY, "socratic");
+        setWalkStreaming(false);
+        typewriterAppend(event.message || "慢想未能開始，我們繼續聊聊。", []);
+        break;
+      }
+      case "walk_error": {
+        setWalkStreaming(false);
+        setError(event.message || "慢想過程發生錯誤");
+        break;
+      }
+      default:
+        console.warn("[walk] unknown event type:", event.type);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  /** 開一段 /walk/stream，驅動後端真正跑 walk 迴圈。呼叫前一律先中止
+   *  上一條連線（若還存在），避免重複消費。*/
+  const runWalkStream = useCallback(async () => {
+    if (!API_BASE || !sessionId) return;
+    walkAbortRef.current?.abort();
+    const controller = new AbortController();
+    walkAbortRef.current = controller;
+
+    setWalkStreaming(true);
+    try {
+      await streamSSE(
+        `${API_BASE.replace(/\/$/, "")}/walk/stream/${sessionId}`,
+        handleWalkEvent,
+        { signal: controller.signal },
+      );
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        console.warn("[walk/stream]", err);
+        setError(err instanceof Error ? err.message : "慢想連線失敗");
+      }
+    } finally {
+      if (walkAbortRef.current === controller) setWalkStreaming(false);
+    }
+  }, [sessionId, handleWalkEvent]);
+
+  /** 回答 walk 提出的問題：POST /walk/answer，回應本身就是新一段
+   *  SSE stream，沿用同一套事件處理。*/
+  const submitWalkAnswer = useCallback(async (answerText: string) => {
+    if (!API_BASE || !sessionId) return;
+    walkAbortRef.current?.abort();
+    const controller = new AbortController();
+    walkAbortRef.current = controller;
+
+    setMessages((prev) => {
+      const next = [...prev, { id: createId(), role: "user" as const, content: answerText }];
+      saveHistory(next);
+      return next;
+    });
+    setIsLoading(true);
+    setWalkStreaming(true);
+    try {
+      await streamSSE(
+        `${API_BASE.replace(/\/$/, "")}/walk/answer/${sessionId}`,
+        handleWalkEvent,
+        {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({ path_id: pendingWalkPathId, answer: answerText }),
+          signal:  controller.signal,
+        },
+      );
+      setPhase((cur) => (cur === "walk_awaiting_answer" ? "walk_pending" : cur));
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        console.warn("[walk/answer]", err);
+        setError(err instanceof Error ? err.message : "回答提交失敗");
+      }
+    } finally {
+      setIsLoading(false);
+      if (walkAbortRef.current === controller) setWalkStreaming(false);
+    }
+  }, [sessionId, pendingWalkPathId, handleWalkEvent]);
+
+  /** 頁面重新整理後（非冷啟動）的恢復：若本機記得上次 phase 是
+   *  walk_pending，先問後端目前真實狀態，再決定：
+   *    - 有 pending question → 直接呈現問題，等待回答（不重新送 SSE
+   *      input，避免干擾正在暫停的 interrupt）。
+   *    - 沒有 pending question 但仍是 walk_pending → 安全地重新接上
+   *      SSE 繼續消費事件。
+   *    - 後端已不是 walk_pending（多半是冷啟動後被 /chat 的降級邏輯
+   *      打回 socratic）→ 校正本機 phase，放棄恢復。
+   */
+  const recoverWalkIfNeeded = useCallback(async (sid: string, localPhase: string) => {
+    if (localPhase !== "walk_pending" || !sid) return;
+    const status = await fetchWalkStatus(sid);
+    if (!status) return;
+
+    if (status.phase !== "walk_pending") {
+      setPhase("socratic");
+      localStorage.setItem(PHASE_KEY, "socratic");
+      return;
+    }
+    if (status.has_pending_question && status.pending_question) {
+      setPendingWalkPathId(status.pending_question.path_id ?? 0);
+      setPhase("walk_awaiting_answer");
+      return;
+    }
+    runWalkStream();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ──────────────────────────────────────────────────────────
@@ -849,7 +1018,7 @@ export default function Page() {
   // Chat
   // ──────────────────────────────────────────────────────────
 
-  const canSend = !!input.trim() && !isLoading && !!sessionId && !!userId;
+  const canSend = !!input.trim() && !isLoading && !!sessionId && !!userId && !walkStreaming;
 
   async function typewriterAppend(fullText: string, attachments: Attachment[] = []): Promise<void> {
     isTypingRef.current = true;
@@ -883,8 +1052,14 @@ export default function Page() {
     const text = input.trim();
     setInput("");
     setError("");
-    setIsLoading(true);
 
+    // ── 正在等待回答 walk 提出的問題：走 /walk/answer，不走 /chat ──
+    if (phase === "walk_awaiting_answer") {
+      await submitWalkAnswer(text);
+      return;
+    }
+
+    setIsLoading(true);
     const userMsg: ChatMessage = { id: createId(), role: "user", content: text };
     setMessages((prev) => [...prev, userMsg]);
 
@@ -893,9 +1068,10 @@ export default function Page() {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({
-          session_id: sessionId,
-          message:    text,
-          phase:      phase === "main_agent" ? "main_agent" : "socratic",
+          session_id:   sessionId,
+          message:      text,
+          phase:        phase === "main_agent" ? "main_agent" : "socratic",
+          walk_enabled: walkEnabled,
         }),
       });
       if (!response.ok) throw new Error(`API error ${response.status}`);
@@ -905,14 +1081,17 @@ export default function Page() {
       setPhase(nextPhase);
       localStorage.setItem(PHASE_KEY, nextPhase);
 
-      // ── Semantic 機制：每輪都刷新。GlobalBrain 點亮 / RCFoundationMap 補齊
-      //    / SemanticPanel 顯示，全部由這三支 fetch 驅動，不再依賴 chat
-      //    response 裡的任何圖譜欄位。──
-      fetchSemanticContextData(sessionId).then(setSemanticContext);
-      fetchSemanticScores(sessionId).then(setRCSemanticScores);
-      fetchFoundationRecommendations(sessionId).then(setRecommendedFoundations);
-
       await typewriterAppend(data.reply || "", data.attachments ?? []);
+
+      if (nextPhase === "walk_pending") {
+        // 慢想開始：這輪 /chat 只負責把 phase 轉場，真正的 walk 迴圈
+        // 由這裡立刻接上的 SSE 驅動。
+        runWalkStream();
+      } else {
+        fetchSemanticContextData(sessionId).then(setSemanticContext);
+        fetchSemanticScores(sessionId).then(setRCSemanticScores);
+        fetchFoundationRecommendations(sessionId).then(setRecommendedFoundations);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "請求失敗,請稍後重試");
       setMessages((prev) => [...prev, { id: createId(), role: "ai", content: "抱歉,連線失敗,請稍後再試。" }]);
@@ -924,6 +1103,8 @@ export default function Page() {
   }
 
   function resetConversation() {
+    walkAbortRef.current?.abort();
+
     const sid = createId();
     setSessionId(sid);
     setPhase("socratic");
@@ -940,9 +1121,11 @@ export default function Page() {
     localStorage.removeItem(HISTORY_KEY);
     setSemanticContext(null);
     setRecommendedFoundations([]);
-    // 新對話跟舊的 random walk 進度沒有關聯，一併清空，避免 GlobalBrain
-    // 殘留上一次 walk 的高亮節點造成混淆。
-    resetWalk();
+
+    // 新對話與舊的慢想進度沒有關聯，一併清空。
+    setWalkActiveEids([]);
+    setWalkStreaming(false);
+    setPendingWalkPathId(0);
   }
 
   const openHistory = useCallback(async () => {
@@ -975,9 +1158,22 @@ export default function Page() {
       attachments: m.attachments ?? [],
     }));
 
+    walkAbortRef.current?.abort();
+
+    // 從歷史對話載入的 phase 若是暫時性的 walk 中繼狀態，代表當初
+    // 存檔時剛好卡在慢想過程中——interrupt 的可執行狀態不可能被還原
+    // （見後端 chat.py 對冷啟動的降級說明），這裡一律校正回 socratic，
+    // 避免使用者下一句輸入被誤路由到 /walk/answer。
+    const sanitizedPhase =
+      sessionDetail.phase === "walk_pending" || sessionDetail.phase === "walk_awaiting_answer"
+        ? "socratic"
+        : sessionDetail.phase;
+
     setSessionId(sessionDetail.session_id);
-    setPhase(sessionDetail.phase);
+    setPhase(sanitizedPhase);
     setMessages(restoredMessages);
+    setWalkActiveEids([]);
+    setWalkStreaming(false);
 
     // ── 清空與舊聚焦狀態相關的暫存，避免殘留上一個 session 的畫面 ──
     setRCFoundationMap(new Map());
@@ -990,7 +1186,7 @@ export default function Page() {
     setRecommendedFoundations([]);
 
     localStorage.setItem(SESSION_KEY, sessionDetail.session_id);
-    localStorage.setItem(PHASE_KEY, sessionDetail.phase);
+    localStorage.setItem(PHASE_KEY, sanitizedPhase);
     saveHistory(restoredMessages);
 
     // ── 補齊 Semantic 機制的畫面（GlobalBrain 點亮 / SemanticPanel），
@@ -1001,7 +1197,9 @@ export default function Page() {
   }, []);
 
   const inputPlaceholder =
-    phase === "main_agent" ? "繼續詢問分析…" : "輸入你的問題…";
+    phase === "walk_awaiting_answer" ? "回答慢想過程中的問題…" :
+    phase === "main_agent"            ? "繼續詢問分析…" :
+    "輸入你的問題…";
 
   // ──────────────────────────────────────────────────────────
   // Render
@@ -1025,13 +1223,25 @@ export default function Page() {
                 </span>
               </>
             )}
+            {walkStreaming && (
+              <>
+                {" · "}
+                <span style={{ color: "var(--teal)" }}>🧠 慢想中…</span>
+              </>
+            )}            
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {!authLoading && <AuthPanel />}
-          <button type="button" onClick={() => setShowWalkModal(true)} disabled={isLoading}>
-            🌀 隨機漫步
-          </button>
+          <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: "0.7rem", color: "var(--muted)" }}>
+            <input
+              type="checkbox"
+              checked={walkEnabled}
+              onChange={(e) => setWalkEnabled(e.target.checked)}
+              disabled={isLoading || walkStreaming || phase !== "socratic"}
+            />
+            🧠 慢想模式
+          </label>
           <button type="button" onClick={openHistory} disabled={isLoading}>
             歷史對話
           </button>
@@ -1207,96 +1417,7 @@ export default function Page() {
         </div>
       )}
 
-      {/* ── Random Walk modal ── */}
-      {showWalkModal && (
-        <div
-          onClick={closeWalkModal}
-          style={{
-            position: "fixed", inset: 0, background: "rgba(3,1,8,0.72)",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            zIndex: 1000, padding: 20,
-          }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              width: 560, maxWidth: "100%", height: "min(78vh, 640px)",
-              background: "var(--panel)", border: "1px solid var(--border)",
-              borderRadius: 14, padding: 16,
-              display: "flex", flexDirection: "column", gap: 10,
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
-              <span style={{
-                fontSize: "0.62rem", letterSpacing: "0.18em", textTransform: "uppercase",
-                color: "var(--orange)",
-              }}>
-                隨機漫步模式
-              </span>
-              <div style={{ display: "flex", gap: 6 }}>
-                {walkId && (
-                  <button type="button" onClick={resetWalk} style={{ padding: "2px 8px", fontSize: "0.62rem" }}>
-                    重新開始
-                  </button>
-                )}
-                <button type="button" onClick={closeWalkModal} style={{ padding: "2px 8px" }}>✕</button>
-              </div>
-            </div>
 
-            {!userId ? (
-              <div className="meta">請先登入 / 以訪客身分初始化後再試</div>
-            ) : !walkId ? (
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                <p style={{ margin: 0, fontSize: "0.72rem", color: "var(--muted)", lineHeight: 1.6 }}>
-                  描述你想探索的方向，AI 會從幾個起點概念出發，在知識圖譜上
-                  自主推進，過程中可能會反問你問題；GlobalBrain 會即時顯示
-                  目前正在探索的節點，走完後會給出 Resulting Concept 推薦排名。
-                </p>
-                <textarea
-                  value={walkQuery}
-                  onChange={(e) => setWalkQuery(e.target.value)}
-                  placeholder="例如：升息對股市的影響"
-                  disabled={walkStarting}
-                  style={{ minHeight: 80 }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      if (walkQuery.trim() && !walkStarting) handleStartWalk();
-                    }
-                  }}
-                />
-                <button
-                  type="button"
-                  className="detail-btn-add"
-                  disabled={!walkQuery.trim() || walkStarting}
-                  onClick={handleStartWalk}
-                >
-                  {walkStarting ? "搜尋起點中…" : "開始探索"}
-                </button>
-                {walkStartError && <div className="status">{walkStartError}</div>}
-              </div>
-            ) : (
-              <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", gap: 6 }}>
-                {walkStartConcepts.length > 0 && (
-                  <div style={{ fontSize: "0.62rem", color: "var(--muted)", flexShrink: 0 }}>
-                    起點：{walkStartConcepts.map((c) => c.label).join("、")}
-                  </div>
-                )}
-                <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
-                  <RandomWalkPanel
-                    walkId={walkId}
-                    streamUrl={`${API_BASE.replace(/\/$/, "")}/walk/stream/${walkId}`}
-                    answerUrl={`${API_BASE.replace(/\/$/, "")}/walk/answer/${walkId}`}
-                    onActiveNodesChange={setWalkActiveEids}
-                    fetchRanking={fetchWalkRanking}
-                    onSelectFinalRC={handleSelectFinalRC}
-                  />
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
     </main>
   );
 }

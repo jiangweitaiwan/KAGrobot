@@ -20,21 +20,27 @@ from typing import List
 
 @dataclass
 class SemanticContext:
-    query:        str       = ""
-    intent_types: List[str] = field(default_factory=list)
-    summary:      str       = ""
+    query:            str       = ""
+    intent_types:     List[str] = field(default_factory=list)
+    summary:          str       = ""
+    thinking_process: str       = ""   # 新增：walk 完成後累積的探索摘要
 
     @property
     def embedding_text(self) -> str:
-        """組合 query + summary，供 embedding 相似度計算使用。
+        """組合 query + summary + thinking_process。
 
-        summary 是每輪重寫的對話需求摘要，涵蓋比單一 query 更完整的
-        上下文重心；query 仍保留，因為它是 socratic 階段刻意提煉過的
-        精確英文查詢語句，兩者疊加比單用其一更穩定。
+        thinking_process 是 random walk（慢想）完成後留下的探索軌跡摘要，
+        與 socratic 的 summary（使用者需求本身）語意角色不同：summary
+        回答「使用者要什麼」，thinking_process 回答「探索過程中發現了
+        什麼、往哪個方向收斂」，兩者疊加比單用其一更貼近真正該推薦的 RC。
         """
-        parts = [p.strip() for p in (self.query, self.summary) if p and p.strip()]
+        parts = [
+            p.strip() for p in (self.query, self.summary, self.thinking_process)
+            if p and p.strip()
+        ]
         return " ".join(parts)
 
     @property
     def is_empty(self) -> bool:
         return not self.embedding_text and not self.intent_types
+

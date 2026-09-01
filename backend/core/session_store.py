@@ -106,6 +106,7 @@ async def save_session_snapshot(
             "selected_rc_label":         state.get("selected_rc_label"),
             "confirmed_rc_eid":          state.get("confirmed_rc_eid"),
             "skill_sandbox_id":          state.get("skill_sandbox_id"),
+            "thinking_process":          state.get("thinking_process") or "",   # 新增
             "socrates_phase":            socrates_state.get("phase"),
             "socrates_intent_types":     socrates_state.get("intent_types") or [],
             "socrates_context_summary":  socrates_state.get("context_summary") or "",
@@ -158,6 +159,7 @@ async def load_session_snapshot(
             "selected_rc_label": data.get("selected_rc_label"),
             "confirmed_rc_eid":  data.get("confirmed_rc_eid"),
             "skill_sandbox_id":  data.get("skill_sandbox_id"),
+            "thinking_process":  data.get("thinking_process") or "", 
             "socrates_state": {
                 "messages":        [],
                 "agent_messages":  [],
