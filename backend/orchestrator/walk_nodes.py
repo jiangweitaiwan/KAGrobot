@@ -67,7 +67,7 @@ class WalkOrchestratorNodes:
             )
 
         session = WalkSession.start(
-            session_id=f"{uid}:walk",
+            session_id=f"{uid}:{state.get('session_id') or 'unknown'}",
             start_concepts=start_concepts,
             max_depth=self._max_depth,
         )
