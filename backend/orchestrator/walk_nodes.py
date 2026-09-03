@@ -56,10 +56,7 @@ class WalkOrchestratorNodes:
             )
 
         brain_weights = await self._brain_weights_loader(uid)
-        start_concepts = await asyncio.to_thread(
-            self._start_pool.retrieve, query, brain_weights, 3
-        )
-
+        start_concepts = await self._start_pool.retrieve(query, brain_weights, 3)
         if not start_concepts:
             return OrchestratorState(
                 messages=[AIMessage(content="找不到合適的起點概念，我們換個角度聊聊？")],
