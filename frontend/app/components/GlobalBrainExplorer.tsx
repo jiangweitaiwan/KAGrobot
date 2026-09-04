@@ -99,6 +99,7 @@ export type GlobalLayout = {
 type Props = {
   layout:              GlobalLayout | null;
   activeCandidateEids: string[];
+  activeNodeColors?:   Map<string, string>;   // eid → hex color, walk mode 用
   rcFoundationMap?:    RCFoundationMap;
   onNodeClick?:        (node: GlobalLayoutNode) => void;
   width?:              number;
@@ -205,6 +206,7 @@ function categoryColor(node: GlobalLayoutNode): THREE.Color {
 export default function GlobalBrainExplorer({
   layout,
   activeCandidateEids,
+  activeNodeColors,
   rcFoundationMap,
   onNodeClick,
   width  = 480,
@@ -760,7 +762,8 @@ export default function GlobalBrainExplorer({
       if (eid === focusedCandidateEid) return;
       const idx = nodeIdxMap.get(eid);
       if (idx === undefined) return;
-      const ring = makeRingSprite("#00e0b8", 4);
+      const color = activeNodeColors?.get(eid) ?? "#00e0b8";
+      const ring = makeRingSprite(color, 4);
       ring.position.copy(nodeWorldPositions[idx]);
       const sz = (isRC(layout.nodes[idx]) ? SIZE.rc : SIZE.other) * SIZE.highlightMultiplier;
       ring.scale.set(sz * 1.5, sz * 1.5, 1);
@@ -769,7 +772,7 @@ export default function GlobalBrainExplorer({
 
     needsRenderRef.current = true;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeCandidateEids, focusedCandidateEid, nodeIdxMap, nodeWorldPositions, layout]);
+  }, [activeCandidateEids, activeNodeColors, focusedCandidateEid, nodeIdxMap, nodeWorldPositions, layout]);
 
   // ── 聚焦候選：光暈 + foundation 路徑（不碰 renderer，維持原樣）──
   useEffect(() => {

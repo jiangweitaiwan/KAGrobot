@@ -28,12 +28,16 @@ import { useAuth } from "./components/AuthProvider";
 import AuthPanel from "./components/AuthPanel";
 import { apiFetch } from "../lib/apiFetch";
 import { streamSSE } from "../lib/sseFetch"; 
-
+import RandomWalkPanel, {
+  type WalkPathState,
+  type FrontierPreviewItem,
+  type WalkOverallStatus,
+} from "./components/RandomWalkPanel";
 
 const GlobalBrainExplorer = dynamic(() => import("./components/GlobalBrainExplorer"), { ssr: false });
 const PersonalBrain       = dynamic(() => import("./components/PersonalBrain"),       { ssr: false });
 const DetailPanel         = dynamic(() => import("./components/DetailPanel"),         { ssr: false });
-
+const WALK_PATH_COLORS = ["#00d4aa", "#7f77dd", "#e8a030"]; // teal / purple / amber
 // ─────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────
@@ -413,13 +417,42 @@ export default function Page() {
 
 
   // ── Random Walk（慢想）Mode ───────────────────────────────────
-  // 不再是獨立 modal + walk_id：慢想是「手動開關 + 掛在既有 /chat
-  // 對話流程裡的一個中繼 phase（walk_pending）」，sessionId 本身
-  // 就是 walk 的識別（thread_id = "{uid}:{sessionId}"）。
+ 
   const [walkEnabled, setWalkEnabled]     = useState(false);
-  const [walkActiveEids, setWalkActiveEids] = useState<string[]>([]);
+  const [walkPaths, setWalkPaths]         = useState<Record<number, WalkPathState>>({});
+  const [pendingWalkQuestion, setPendingWalkQuestion] = useState<{ pathId: number; question: string } | null>(null);
   const [walkStreaming, setWalkStreaming]   = useState(false);
   const [pendingWalkPathId, setPendingWalkPathId] = useState<number>(0);
+  const [walkRankingJustUpdated, setWalkRankingJustUpdated] = useState(false);
+
+  const walkActiveEids = useMemo(
+    () => Object.values(walkPaths).map((p) => p.currentEid).filter(Boolean),
+    [walkPaths],
+  );
+
+  const walkPathColorMap = useMemo(() => {
+    const m = new Map<number, string>();
+    Object.keys(walkPaths).forEach((k) => {
+      const pid = Number(k);
+      m.set(pid, WALK_PATH_COLORS[pid % WALK_PATH_COLORS.length]);
+    });
+    return m;
+  }, [walkPaths]);
+
+  // eid → path color，餵給 GlobalBrainExplorer 畫彩色標示環
+  const explorerActiveNodeColors = useMemo(() => {
+    if (!walkStreaming) return undefined;
+    const m = new Map<string, string>();
+    Object.values(walkPaths).forEach((p) => {
+      if (p.currentEid) m.set(p.currentEid, walkPathColorMap.get(p.pathId) ?? WALK_PATH_COLORS[0]);
+    });
+    return m;
+  }, [walkStreaming, walkPaths, walkPathColorMap]);
+
+  const walkOverallStatus: WalkOverallStatus =
+    phase === "walk_awaiting_answer" ? "awaiting_answer" :
+    walkStreaming                     ? "walking" :
+    "connecting";
 
   // 每次開新的 walk SSE 連線前，先中止上一條，避免同時存在多條
   // reader 造成事件重複處理；元件卸載時一併中止，避免背景無人消費
@@ -646,37 +679,71 @@ export default function Page() {
   // ──────────────────────────────────────────────────────────
   // Random Walk（慢想）：SSE 事件消費與狀態機
   // ──────────────────────────────────────────────────────────
+  const upsertWalkPath = useCallback((pathId: number, patch: Partial<WalkPathState>) => {
+    setWalkPaths((prev) => {
+      const existing = prev[pathId] ?? {
+        pathId, currentEid: "", currentLabel: "", visitedLabels: [],
+        status: "pending" as const, frontierPreview: [],
+      };
+      return { ...prev, [pathId]: { ...existing, ...patch } };
+    });
+  }, []);
 
   const handleWalkEvent = useCallback((event: any) => {
     switch (event.type) {
       case "walk_started": {
-        const eids: string[] = (event.start_concepts ?? []).map((c: any) => c.eid);
-        setWalkActiveEids(eids);
+        const paths: Record<number, WalkPathState> = {};
+        (event.start_concepts ?? []).forEach((c: any) => {
+          paths[c.path_id] = {
+            pathId: c.path_id, currentEid: c.eid, currentLabel: c.label,
+            visitedLabels: [], status: "pending", frontierPreview: [],
+          };
+        });
+        setWalkPaths(paths);
         break;
       }
-      case "frontier_ready":
+      case "frontier_ready": {
+        upsertWalkPath(event.path_id, {
+          status: "active",
+          frontierPreview: (event.candidates ?? []) as FrontierPreviewItem[],
+        });
+        break;
+      }
       case "frontier_expanded": {
-        if (event.to_eid) {
-          setWalkActiveEids((prev) => Array.from(new Set([...prev, event.to_eid])));
-        }
+        setWalkPaths((prev) => {
+          const existing = prev[event.path_id];
+          const visitedLabels = existing
+            ? [...existing.visitedLabels, existing.currentLabel].filter(Boolean)
+            : [];
+          return {
+            ...prev,
+            [event.path_id]: {
+              ...(existing ?? {
+                pathId: event.path_id, currentEid: "", currentLabel: "",
+                visitedLabels: [], status: "pending" as const, frontierPreview: [],
+              }),
+              currentEid:      event.to_eid,
+              currentLabel:    event.to_label,
+              visitedLabels,
+              status:          "pending",
+              frontierPreview: [],
+            },
+          };
+        });
         break;
       }
       case "path_dead_end": {
-        // 循序制排程：這條 path 結束後，下一個 chunk 會是下一條 path
-        // 的 frontier_ready，或全部完成後的 walk_complete，這裡不需要
-        // 額外處理。
+        upsertWalkPath(event.path_id, {
+          status: "dead_end",
+          deadEndReason: event.reason,
+          frontierPreview: [],
+        });
         break;
       }
       case "user_question": {
-        setPendingWalkPathId(event.path_id ?? 0);
-        setMessages((prev) => {
-          const next = [
-            ...prev,
-            { id: createId(), role: "ai" as const, content: `🤔 ${event.question}` },
-          ];
-          saveHistory(next);
-          return next;
-        });
+        const pathId = event.path_id ?? 0;
+        setPendingWalkPathId(pathId);
+        setPendingWalkQuestion({ pathId, question: event.question });
         setPhase("walk_awaiting_answer");
         break;
       }
@@ -684,10 +751,15 @@ export default function Page() {
         setPhase("socratic");
         localStorage.setItem(PHASE_KEY, "socratic");
         setWalkStreaming(false);
-        setWalkActiveEids([]);
+        setWalkPaths({});
+        setPendingWalkQuestion(null);
         typewriterAppend(event.summary || "慢想完成。", []);
         fetchSemanticContextData(sessionId).then(setSemanticContext);
-        fetchSemanticScores(sessionId).then(setRCSemanticScores);
+        fetchSemanticScores(sessionId).then((scores) => {
+          setRCSemanticScores(scores);
+          setWalkRankingJustUpdated(true);
+          setTimeout(() => setWalkRankingJustUpdated(false), 2200);
+        });
         fetchFoundationRecommendations(sessionId).then(setRecommendedFoundations);
         break;
       }
@@ -695,6 +767,8 @@ export default function Page() {
         setPhase("socratic");
         localStorage.setItem(PHASE_KEY, "socratic");
         setWalkStreaming(false);
+        setWalkPaths({});
+        setPendingWalkQuestion(null);
         typewriterAppend(event.message || "慢想未能開始，我們繼續聊聊。", []);
         break;
       }
@@ -707,7 +781,7 @@ export default function Page() {
         console.warn("[walk] unknown event type:", event.type);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId]);
+  }, [sessionId, upsertWalkPath]);  
 
   /** 開一段 /walk/stream，驅動後端真正跑 walk 迴圈。呼叫前一律先中止
    *  上一條連線（若還存在），避免重複消費。*/
@@ -741,12 +815,8 @@ export default function Page() {
     walkAbortRef.current?.abort();
     const controller = new AbortController();
     walkAbortRef.current = controller;
-
-    setMessages((prev) => {
-      const next = [...prev, { id: createId(), role: "user" as const, content: answerText }];
-      saveHistory(next);
-      return next;
-    });
+  
+    setPendingWalkQuestion(null);
     setIsLoading(true);
     setWalkStreaming(true);
     try {
@@ -792,7 +862,9 @@ export default function Page() {
       return;
     }
     if (status.has_pending_question && status.pending_question) {
-      setPendingWalkPathId(status.pending_question.path_id ?? 0);
+      const pathId = status.pending_question.path_id ?? 0;
+      setPendingWalkPathId(pathId);
+      setPendingWalkQuestion({ pathId, question: status.pending_question.question });
       setPhase("walk_awaiting_answer");
       return;
     }
@@ -1061,7 +1133,8 @@ export default function Page() {
     setRecommendedFoundations([]);
 
     // 新對話與舊的慢想進度沒有關聯，一併清空。
-    setWalkActiveEids([]);
+    setWalkPaths({});
+    setPendingWalkQuestion(null);
     setWalkStreaming(false);
     setPendingWalkPathId(0);
   }
@@ -1110,7 +1183,8 @@ export default function Page() {
     setSessionId(sessionDetail.session_id);
     setPhase(sanitizedPhase);
     setMessages(restoredMessages);
-    setWalkActiveEids([]);
+    setWalkPaths({});
+    setPendingWalkQuestion(null);
     setWalkStreaming(false);
 
     // ── 清空與舊聚焦狀態相關的暫存，避免殘留上一個 session 的畫面 ──
@@ -1195,14 +1269,21 @@ export default function Page() {
         {/* ══ Chat ══ */}
         <div className="chat-column">
           <div className="chat-box" ref={boxRef}>
-            {messages.length === 0 ? (
+            {walkStreaming || phase === "walk_awaiting_answer" ? (
+              <RandomWalkPanel
+                paths={Object.values(walkPaths).sort((a, b) => a.pathId - b.pathId)}
+                pathColors={walkPathColorMap}
+                status={walkOverallStatus}
+                pendingQuestion={pendingWalkQuestion}
+              />
+            ) : messages.length === 0 ? (
               <div className="meta" style={{ textAlign: "center", marginTop: 24 }}>
                 輸入問題,開始與知識場域對話
               </div>
             ) : (
               messages.map((msg) => <ChatBubble key={msg.id} msg={msg} />)
             )}
-            {isLoading && (
+            {isLoading && !walkStreaming && phase !== "walk_awaiting_answer" && (
               <div className="meta">
                 <span style={{ color: "var(--orange)", opacity: 0.7 }}>⬡ 思考中…</span>
               </div>
@@ -1239,6 +1320,7 @@ export default function Page() {
           <GlobalBrainExplorer
             layout={globalLayout}
             activeCandidateEids={explorerActiveEids}
+            activeNodeColors={explorerActiveNodeColors}
             rcFoundationMap={rcFoundationMap}
             onNodeClick={handleNodeClick}
             width={explorerSize.w}
@@ -1279,7 +1361,8 @@ export default function Page() {
             personalBrain={personalBrain}
             rcRanking={rcRanking}
             bertopicLayout={bertopicLayout}
-            rcCategoryMap={rcCategoryMap}   
+            rcCategoryMap={rcCategoryMap}
+            justUpdated={walkRankingJustUpdated}
             fetchFoundationTree={fetchFoundationTree}
             onLaunchSkill={handleLaunchSkill}
             fetchRCPaths={fetchRCPaths}
