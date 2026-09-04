@@ -110,22 +110,29 @@ def _events_from_interrupt(interrupts: tuple) -> List[dict]:
 
 
 def _message_text(update: Dict[str, Any]) -> str:
-    """從 node 回傳的 update["messages"] 取出最後一則訊息的文字內容。
-
-    LangGraph 的 astream(stream_mode="updates") 這裡拿到的是尚未序列化
-    的 BaseMessage 物件（AIMessage 等），不是 dict，因此優先用
-    getattr 讀 .content；防禦性地也接受萬一是 dict 形狀的情況。
-    """
     msgs = update.get("messages") or []
     if not msgs:
         return ""
     last = msgs[-1]
     content = getattr(last, "content", None)
-    if content is not None:
+    if content is None and isinstance(last, dict):
+        content = last.get("content", "")
+
+    if isinstance(content, str):
         return content
-    if isinstance(last, dict):
-        return last.get("content", "")
-    return ""
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text", "")
+                if text:
+                    parts.append(str(text))
+            elif isinstance(item, str):
+                parts.append(item)
+        return "".join(parts)
+    if isinstance(content, dict):
+        return str(content.get("text", ""))
+    return str(content) if content is not None else ""
 
 
 def _events_from_seed(update: Dict[str, Any]) -> List[dict]:

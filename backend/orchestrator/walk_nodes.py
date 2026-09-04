@@ -21,7 +21,30 @@ from orchestrator.state import OrchestratorState
 from graph_service.walk_start_pool import StartConceptPool
 from typing import Awaitable
 
+def _extract_text_content(msg: Any) -> str:
 
+    content = getattr(msg, "content", None)
+    if content is None:
+        return ""
+
+    if isinstance(content, str):
+        return content.strip()
+
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text", "")
+                if text:
+                    parts.append(str(text))
+            elif isinstance(item, str):
+                parts.append(item)
+        return "".join(parts).strip()
+
+    if isinstance(content, dict):
+        return str(content.get("text", "")).strip()
+
+    return str(content).strip()
 class WalkOrchestratorNodes:
     def __init__(
         self,
@@ -129,7 +152,7 @@ class WalkOrchestratorNodes:
         tool_calls = getattr(ai_msg, "tool_calls", None) or []
 
         if not tool_calls:
-            question = getattr(ai_msg, "content", "") or ""
+            question = _extract_text_content(ai_msg)
             return {
                 "walk_session":          session.to_dict(),
                 "walk_pointer":          scheduler.pointer,
