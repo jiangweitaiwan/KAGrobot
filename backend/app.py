@@ -23,12 +23,13 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Dict, Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.messages import SystemMessage,HumanMessage
 from neo4j import GraphDatabase
-
+from typing import Optional, Dict
 from settings import get_settings
 from retrieval import (
     SbertOnnxEncoder,

@@ -24,13 +24,8 @@ from pydantic import BaseModel
 
 from core.firebase_auth import require_auth
 from core.session_store import load_session_snapshot, save_session_snapshot
-from graph_service.projector import GraphProjector
 
 router = APIRouter()
-
-
-# 圖片副檔名判斷同前端渲染邏輯保持一致（見 skill_code.py 的 _IMAGE_SUFFIXES）
-_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
 
 
 # ── Schema ────────────────────────────────────────────────────────────

@@ -20,10 +20,8 @@ Skill 注入：
   calibrated_default）解析，回傳 resolved / provenance / unresolved。
   這個工具與 skill 是否真的提供 params_manifest.yaml 無關，永遠掛載，
   沒有 manifest 時呼叫會直接回報「此 Skill 未提供 manifest」，不影響
-  其餘流程。
-  retrieve_param 工具（單一經濟數據序列查詢，FRED/WorldBank/OECD/BEA）
-  則無條件掛載，供 LLM 在一般對話中查詢時效性數據，不限於任何 Skill
-  的 manifest。
+  其餘流程。經濟數據查詢由 resolve_params 內部透過 dispatch_retrieve_param
+  直接呼叫，不透過額外的 LLM tool call。
 
 Sandbox 生命週期：
   - Sandbox 採 lazy 建立：只有在 LLM 第一次真的呼叫沙盒工具時才建立，
@@ -81,10 +79,8 @@ from core.google_llm import create_chat_google_generative_ai
 from core.llm_retry  import call_with_retry
 
 from core.skill_sandbox import SkillSandboxProvisioner
-from tools.base      import _TOOL_IMPLEMENTATIONS
 from tools.params_resolver import make_resolve_params_tool
 from tools.knowledge import (
-    make_knowledge_qa_tool,
     make_trace_rc_logic_tool,
     make_read_skill_reference_tool,
 )
@@ -95,8 +91,6 @@ from tools.skill_code import (
     make_run_skill_code_tool,
     make_write_file_tool,
 )
-
-import tools  # noqa: F401  確保所有工具副作用式註冊已執行
 
 if TYPE_CHECKING:
     from core.skill_loader import RCSkill

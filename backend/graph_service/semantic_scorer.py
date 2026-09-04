@@ -5,10 +5,6 @@
   - embed_score  : SemanticContext.embedding_text 的 SBERT embedding
                    與 RC retrieval_embedding 的 cosine 相似度
   - intent_score : intent_types 與 RC analysis_types 的重疊比例
-
-這裡獨立一份邏輯，不與 graph_service/scorer.py::PathScorer 共用，
-因為 PathScorer 的職責是「已展開候選內部 path 重排」，
-本模組是「全域 RC 排名」，兩者輸入輸出範圍不同，硬合併反而增加耦合。
 """
 
 from __future__ import annotations

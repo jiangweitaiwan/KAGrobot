@@ -23,7 +23,6 @@ from typing import Any, Dict
 
 from langchain_core.tools import tool
 
-from tools.base import register_langchain_tool
 from tools.connectors import bea, fred, oecd, worldbank
 
 # retriever_id 前綴 → connector 的 fetch() 函式

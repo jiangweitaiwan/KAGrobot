@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from core.firebase_auth import require_auth
 from core.session_store import save_session_snapshot
-from core.walk_stream import format_sse, stream_walk_via_orchestrator
+from core.walk_stream import stream_walk_via_orchestrator
 
 router = APIRouter()
 
