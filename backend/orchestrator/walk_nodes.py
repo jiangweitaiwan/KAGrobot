@@ -100,12 +100,25 @@ class WalkOrchestratorNodes:
         if path is None or path.status != PathStatus.ACTIVE:
             return {"walk_pointer": scheduler.pointer, "walk_pending_question": None}
 
-        tool_schema = _build_advance_tool(path)
+        # 唯一候選：不需要 LLM 判斷，直接前進
+        if len(path.frontier) == 1:
+            only = path.frontier[0]
+            path.advance(only.eid, reason="唯一候選，直接前進")
+            return {
+                "walk_session":          session.to_dict(),
+                "walk_pointer":          scheduler.pointer,
+                "walk_pending_question": None,
+            }
+
+        socrates_state = state.get("socrates_state") or {}
+        user_goal = socrates_state.get("context_summary") or "（使用者尚未提供具體目的）"
+
+        tool_schema   = _build_advance_tool(path)
         system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(
             path_id=path.path_id,
-            visited_path=" → ".join(path.visited_labels_only()),
+            user_goal=user_goal,
+            thinking_chain=path.thinking_chain(last_n=3),
             frontier_desc=_format_frontier(path.frontier),
-            context_summary=session.context_summary or "（尚無累積脈絡）",
         )
 
         ai_msg = await asyncio.to_thread(self._llm_caller, system_prompt, tool_schema)
@@ -123,9 +136,7 @@ class WalkOrchestratorNodes:
         args       = call.get("args", {})
         target_eid = args.get("target_eid", "")
         reason     = args.get("reason", "")
-
         path.advance(target_eid, reason=reason)
-        session.record_decision(reason)
 
         return {
             "walk_session":          session.to_dict(),
@@ -145,10 +156,10 @@ class WalkOrchestratorNodes:
             return {"walk_pending_question": None}
 
         session = WalkSession.from_dict(session_dict)
-        answer = interrupt(pending)
+        answer  = interrupt(pending)
 
-        session.record_decision(f"[path {pending['path_id']} 提問]：{pending['question']}")
-        session.record_decision(f"[path {pending['path_id']} 使用者回覆]：{answer}")
+        path = session.get_path(pending["path_id"])
+        path.pending_qa = {"question": pending["question"], "answer": str(answer)}
 
         return {"walk_session": session.to_dict(), "walk_pending_question": None}
 
@@ -170,8 +181,8 @@ class WalkOrchestratorNodes:
 
         return OrchestratorState(
             messages=[AIMessage(content=reply)],
-            phase="socratic",                       # ← 交還 dialogue mode，不再是 path_confirmed
-            thinking_process=session.context_summary,
+            phase="socratic",
+            thinking_process=session.full_thinking_process(),   # ← 改這裡
             walk_session=session.to_dict(),
             walk_pending_question=None,
             attachments=[],

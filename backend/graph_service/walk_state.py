@@ -97,17 +97,20 @@ class FrontierCandidate:
 
 @dataclass
 class DecisionLogEntry:
-    """一次 advance 的決策理由，摺進 context_summary 供可解釋性使用。"""
+    """一次 advance 的決策理由，並附上（若有）觸發這次推進前的問答。"""
     from_eid: str
     to_eid:   str
-    reason:   str   # LLM 給的一句話理由（例如「使用者提到通膨，這個方向與通膨機制相關」）
+    reason:   str
+    qa:       Optional[Dict[str, str]] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"from_eid": self.from_eid, "to_eid": self.to_eid, "reason": self.reason}
+        return {"from_eid": self.from_eid, "to_eid": self.to_eid,
+                "reason": self.reason, "qa": self.qa}
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "DecisionLogEntry":
-        return cls(from_eid=d["from_eid"], to_eid=d["to_eid"], reason=d["reason"])
+        return cls(from_eid=d["from_eid"], to_eid=d["to_eid"],
+                    reason=d["reason"], qa=d.get("qa"))
 
 
 # ══════════════════════════════════════════════════════════════
@@ -142,6 +145,7 @@ class PathState:
     max_depth:  int = 8
 
     decision_log: List[DecisionLogEntry] = field(default_factory=list)
+    pending_qa:   Optional[Dict[str, str]] = None     
 
     def __post_init__(self) -> None:
         if not self.current_eid:
@@ -171,12 +175,6 @@ class PathState:
     # ------------------------------------------------------------------
 
     def advance(self, target_eid: str, reason: str = "") -> None:
-        """推進到 frontier 中指定的節點，frontier 整批清空。
-
-        Raises
-        ------
-        ValueError : target_eid 不在當前 frontier 內，或 path 已終止
-        """
         if self.status == PathStatus.DEAD_END:
             raise ValueError(f"path {self.path_id} 已終止，無法再 advance")
 
@@ -187,19 +185,21 @@ class PathState:
             )
 
         self.decision_log.append(DecisionLogEntry(
-            from_eid=self.current_eid, to_eid=target_eid, reason=reason,
+            from_eid=self.current_eid, to_eid=target_eid,
+            reason=reason, qa=self.pending_qa,
         ))
+        self.pending_qa = None
 
         self.current_eid   = target.eid
         self.current_label = target.label
         self.visited.append(WalkNodeRef(eid=target.eid, label=target.label, is_rc=target.is_rc))
         self.depth += 1
-        self.frontier = []   # 裁剪：sibling 直接丟棄，不留痕跡
+        self.frontier = []
 
         if self.depth >= self.max_depth:
             self.mark_dead_end(DeadEndReason.MAX_DEPTH)
         else:
-            self.status = PathStatus.PENDING   # 等待下一輪 set_frontier
+            self.status = PathStatus.PENDING
 
     def mark_dead_end(self, reason: DeadEndReason) -> None:
         self.status = PathStatus.DEAD_END
@@ -224,6 +224,7 @@ class PathState:
             "depth":           self.depth,
             "max_depth":       self.max_depth,
             "decision_log":    [e.to_dict() for e in self.decision_log],
+            "pending_qa":      self.pending_qa,
         }
 
     @classmethod
@@ -246,6 +247,7 @@ class PathState:
         obj.visited      = [WalkNodeRef.from_dict(n) for n in d.get("visited", [])] or obj.visited
         obj.frontier      = [FrontierCandidate.from_dict(c) for c in d.get("frontier", [])]
         obj.decision_log  = [DecisionLogEntry.from_dict(e) for e in d.get("decision_log", [])]
+        obj.pending_qa    = d.get("pending_qa")
         return obj
 
     # ------------------------------------------------------------------
@@ -308,7 +310,26 @@ class PathState:
             return False
         return self.visited[-1].is_rc
 
+    def thinking_chain(self, last_n: Optional[int] = None) -> str:
+        """把 visited + decision_log 組成 node --reason--> node 的鏈狀敘述。
 
+        每個節點只出現一次；若某一步是在使用者回答問題後才推進的，
+        問答會併進通往下一節點的那一段箭頭裡（不讓節點重複出現）。
+        last_n：只取最近 N 步（decision_log 條目數），None 代表全部。
+        """
+        entries = self.decision_log[-last_n:] if last_n else self.decision_log
+        if not entries:
+            return self.visited[0].label if self.visited else self.start_label
+
+        start_idx = max(len(self.visited) - len(entries) - 1, 0)
+        parts = [self.visited[start_idx].label]
+        for i, entry in enumerate(entries):
+            node = self.visited[start_idx + 1 + i]
+            seg = entry.reason
+            if entry.qa:
+                seg = f"(問：{entry.qa['question']}／答：{entry.qa['answer']}) {seg}"
+            parts.append(f"--{seg}--> {node.label}")
+        return " ".join(parts)
 # ══════════════════════════════════════════════════════════════
 # WalkSession — K 條 path 的集合
 # ══════════════════════════════════════════════════════════════
@@ -320,9 +341,7 @@ class WalkSession:
     paths:      List[PathState] = field(default_factory=list)
     max_depth:  int = 8
 
-    # 累加式 semantic context summary（比照 core/semantic_context.py 的角色，
-    # 隨對話累加，每次 advance 的 reason 會摺進這裡，供最終排名 + 可解釋性使用）
-    context_summary: str = ""
+
 
     @classmethod
     def start(
@@ -342,6 +361,12 @@ class WalkSession:
         ]
         return cls(session_id=session_id, paths=paths, max_depth=max_depth)
 
+    def full_thinking_process(self) -> str:
+        """彙整所有 path 的思考鏈，供 OrchestratorState.thinking_process /
+        SemanticPanel 的 Thinking Process 區塊顯示。"""
+        return "\n".join(
+            f"[path {p.path_id}] {p.thinking_chain()}" for p in self.paths
+        )
     # ------------------------------------------------------------------
     # 查詢
     # ------------------------------------------------------------------
@@ -376,39 +401,22 @@ class WalkSession:
                 result.setdefault(p.final_eid, []).append(p.path_id)
         return result
 
-    def record_decision(self, reason: str) -> None:
-        """把一次 advance 的理由摺進 session 級的 context_summary。"""
-        if not reason:
-            return
-        self.context_summary = (self.context_summary + " " + reason).strip()
 
     # ------------------------------------------------------------------
     # 序列化（供 OrchestratorState 存進 LangGraph checkpointer 使用）
     # ------------------------------------------------------------------
-    #
-    # OrchestratorState["walk_session"] 一律存這裡輸出的 dict，不存
-    # WalkSession 實例本身：LangGraph 目前版本的 checkpointer 序列化層是
-    # msgpack-based，對未註冊的自訂 dataclass/Enum 只給警告、但已明確
-    # 標示「未來版本會直接擋下來」，直接存 dataclass 進去屬於現在能動、
-    # 但注定會壞的寫法。走純 dict 也順便讓這份狀態未來可以直接餵給
-    # core/session_store.py 風格的 Firestore 備援層，不需要另外再寫一次
-    # 轉換邏輯。
+
 
     def to_dict(self) -> dict:
         return {
-            "session_id":      self.session_id,
-            "paths":           [p.to_dict() for p in self.paths],
-            "max_depth":       self.max_depth,
-            "context_summary": self.context_summary,
+            "session_id": self.session_id,
+            "paths":      [p.to_dict() for p in self.paths],
+            "max_depth":  self.max_depth,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "WalkSession":
-        obj = cls(
-            session_id=d["session_id"],
-            max_depth=d.get("max_depth", 8),
-            context_summary=d.get("context_summary", ""),
-        )
+        obj = cls(session_id=d["session_id"], max_depth=d.get("max_depth", 8))
         obj.paths = [PathState.from_dict(p) for p in d.get("paths", [])]
         return obj
 

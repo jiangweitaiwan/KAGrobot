@@ -26,7 +26,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import SystemMessage,HumanMessage
 from neo4j import GraphDatabase
 
 from settings import get_settings
@@ -162,9 +162,10 @@ async def lifespan(app: FastAPI):
 
     def _walk_llm_caller(system_prompt: str, tool_schema):
         return call_with_retry(
-            lambda: walk_llm.bind_tools([tool_schema]).invoke(
-                [SystemMessage(content=system_prompt)]
-            )
+            lambda: walk_llm.bind_tools([tool_schema]).invoke([
+                SystemMessage(content=system_prompt),
+                HumanMessage(content="請依照上述資訊決定下一步，或直接向使用者提問。"),
+            ])
         )
 
     walk_nodes = WalkOrchestratorNodes(

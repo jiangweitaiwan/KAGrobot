@@ -64,14 +64,14 @@ _SYSTEM_PROMPT_TEMPLATE = textwrap.dedent("""\
     你是一位知識圖譜探索助手，正在帶領一條推理路徑，從一個起點概念
     一步步往下游（downstream）走，最終希望走到一個 Resulting Concept（RC）。
 
-    ## 目前狀態
-    這條路徑（path_id={path_id}）已經走過：{visited_path}
+    ## 本次慢想的目的（使用者原始需求）
+    {user_goal}
+
+    ## 這條路徑（path_id={path_id}）目前的思考歷程
+    {thinking_chain}
 
     ## 目前可選的下一步（frontier）
     {frontier_desc}
-
-    ## 對話累積的語意脈絡
-    {context_summary}
 
     ## 你的任務
     從上方 frontier 中選一個最合理的下一步，呼叫 advance_path 工具，
@@ -150,119 +150,4 @@ class WalkTurnResult:
     frontier: Optional[List[dict]] = None
 
 
-# ══════════════════════════════════════════════════════════════
-# WalkTurnRunner（legacy — 見檔頭「併入 orchestrator 後的狀態」說明）
-# ══════════════════════════════════════════════════════════════
 
-class WalkTurnRunner:
-    """對單一 WalkSession 執行「一輪 = 一條 path 的一次決策」。
-
-    Parameters
-    ----------
-    frontier_fetcher : Callable[[str, str], List[FrontierCandidate]]
-        傳入 (current_eid, context_query)，回傳已完成 sbert prefilter
-        top-N 篩選的候選清單。context_query 是 session 目前累積的語意
-        脈絡（見 WalkSession.context_summary），供排序候選使用。
-        注入而非直接依賴 AdjacencyCache，方便測試與之後替換資料源。
-    llm_caller : Callable[[str, type[BaseModel]], Any]
-        傳入 (system_prompt, advance_tool_schema)，回傳一個物件，
-        該物件需暴露 `.tool_calls`（list，可為空）與 `.content`（str）
-        兩個屬性 —— 與 langchain AIMessage 的介面一致，因此正式串接時
-        可以直接把 `llm.bind_tools([tool]).invoke(...)` 包一層當作
-        llm_caller 使用；測試時則可以塞一個回傳 SimpleNamespace 的假函式。
-    """
-
-    def __init__(
-        self,
-        frontier_fetcher: Callable[[str, str], List[FrontierCandidate]],
-        llm_caller:       Callable[[str, type], Any],
-    ) -> None:
-        self._frontier_fetcher = frontier_fetcher
-        self._llm_caller       = llm_caller
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def run_turn(
-        self,
-        session:   WalkSession,
-        scheduler: WalkScheduler,
-    ) -> WalkTurnResult:
-        """跑一輪。呼叫端負責在 kind == "question" 時暫停、等使用者回答，
-        下一次呼叫 run_turn() 時 scheduler 會再選到同一條 path（因為它
-        仍是 ACTIVE、frontier 未清空），該輪會重新問一次 LLM。
-        """
-        if session.all_done():
-            return WalkTurnResult(kind="walk_complete", ranking_hint=session.all_foundation_eids())
-
-        path = scheduler.next_path()
-        if path is None:
-            return WalkTurnResult(kind="walk_complete", ranking_hint=session.all_foundation_eids())
-
-        if path.status == PathStatus.PENDING:
-            return self._fetch_frontier(session, path)
-
-        if path.status == PathStatus.ACTIVE:
-            return self._decide(session, path)
-
-        # 理論上不會到這裡（DEAD_END 的 path 不會被 scheduler 選中）
-        raise RuntimeError(f"unexpected path status: {path.status}")
-
-    # ------------------------------------------------------------------
-    # Step 1：取得 frontier（不涉及 LLM）
-    # ------------------------------------------------------------------
-
-    def _fetch_frontier(self, session: WalkSession, path: PathState) -> WalkTurnResult:
-        candidates = self._frontier_fetcher(path.current_eid, session.context_summary)
-        path.set_frontier(candidates)
-
-        if path.status == PathStatus.DEAD_END:
-            return WalkTurnResult(
-                kind="path_terminated", path_id=path.path_id,
-                dead_end_reason=(path.dead_end_reason.value if path.dead_end_reason else None),
-            )
-        return WalkTurnResult(
-            kind="frontier_ready", path_id=path.path_id,
-            frontier=[
-                {"eid": c.eid, "label": c.label, "is_rc": c.is_rc}
-                for c in path.frontier
-            ],
-        )
-
-    # ------------------------------------------------------------------
-    # Step 2：LLM 決策
-    # ------------------------------------------------------------------
-
-    def _decide(self, session: WalkSession, path: PathState) -> WalkTurnResult:
-        tool_schema = _build_advance_tool(path)
-        system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(
-            path_id=path.path_id,
-            visited_path=" → ".join(path.visited_labels_only()),
-            frontier_desc=_format_frontier(path.frontier),
-            context_summary=session.context_summary or "（尚無累積脈絡）",
-        )
-
-        ai_msg = self._llm_caller(system_prompt, tool_schema)
-
-        tool_calls = getattr(ai_msg, "tool_calls", None) or []
-        if not tool_calls:
-            question = getattr(ai_msg, "content", "") or ""
-            return WalkTurnResult(kind="question", path_id=path.path_id, question=question)
-
-        call   = tool_calls[0]
-        args   = call.get("args", {})
-        target_eid = args.get("target_eid", "")
-        reason     = args.get("reason", "")
-        from_eid   = path.current_eid   # 推進前先記下，advance() 之後 current_eid 就變了
-
-        # PathState.advance() 內部會再次驗證 target_eid 落在 frontier 內，
-        # 即使上方 Literal schema 已限制過，這裡不因此省略防禦。
-        path.advance(target_eid, reason=reason)
-        session.record_decision(reason)
-
-        return WalkTurnResult(
-            kind="advanced", path_id=path.path_id,
-            from_eid=from_eid, target_eid=target_eid,
-            target_label=path.current_label, reason=reason,
-        )
