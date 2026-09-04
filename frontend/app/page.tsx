@@ -33,6 +33,7 @@ import RandomWalkPanel, {
   type FrontierPreviewItem,
   type WalkOverallStatus,
 } from "./components/RandomWalkPanel";
+import WalkDock from "./components/WalkDock";
 
 const GlobalBrainExplorer = dynamic(() => import("./components/GlobalBrainExplorer"), { ssr: false });
 const PersonalBrain       = dynamic(() => import("./components/PersonalBrain"),       { ssr: false });
@@ -425,6 +426,10 @@ export default function Page() {
   const [pendingWalkPathId, setPendingWalkPathId] = useState<number>(0);
   const [walkRankingJustUpdated, setWalkRankingJustUpdated] = useState(false);
 
+    // walk 結果是否仍應顯示（獨立於 walkStreaming，由使用者主動關閉才清空）
+  const [walkResultAvailable, setWalkResultAvailable] = useState(false);
+  const [walkDockCollapsed,  setWalkDockCollapsed]    = useState(false);
+
   const walkActiveEids = useMemo(
     () => Object.values(walkPaths).map((p) => p.currentEid).filter(Boolean),
     [walkPaths],
@@ -439,15 +444,18 @@ export default function Page() {
     return m;
   }, [walkPaths]);
 
-  // eid → path color，餵給 GlobalBrainExplorer 畫彩色標示環
+  const showWalkHighlight = walkStreaming || walkResultAvailable;
+
+  const explorerActiveEids = showWalkHighlight ? walkActiveEids : activeCandidateEids;
+  
   const explorerActiveNodeColors = useMemo(() => {
-    if (!walkStreaming) return undefined;
+    if (!showWalkHighlight) return undefined;
     const m = new Map<string, string>();
     Object.values(walkPaths).forEach((p) => {
       if (p.currentEid) m.set(p.currentEid, walkPathColorMap.get(p.pathId) ?? WALK_PATH_COLORS[0]);
     });
     return m;
-  }, [walkStreaming, walkPaths, walkPathColorMap]);
+  }, [showWalkHighlight, walkPaths, walkPathColorMap]);
 
   const walkOverallStatus: WalkOverallStatus =
     phase === "walk_awaiting_answer" ? "awaiting_answer" :
@@ -512,7 +520,7 @@ export default function Page() {
   //    本身透過 orchestrator checkpointer 安全保存、不受影響，只是
   //    前端暫時看不到即時進度），因此這裡的判斷同時也隱含「只有
   //    modal 開著才顯示 walk 高亮」。
-  const explorerActiveEids = walkStreaming ? walkActiveEids : activeCandidateEids;
+
 
   // ── RC Ranking (derived, 前端即時計算) ────────────────────
   const rcRanking = useMemo(
@@ -700,6 +708,8 @@ export default function Page() {
           };
         });
         setWalkPaths(paths);
+        setWalkResultAvailable(false);   // 新一輪開始，清掉上一輪懸浮結果
+        setWalkDockCollapsed(false);
         break;
       }
       case "frontier_ready": {
@@ -751,7 +761,9 @@ export default function Page() {
         setPhase("socratic");
         localStorage.setItem(PHASE_KEY, "socratic");
         setWalkStreaming(false);
-        setWalkPaths({});
+        // 不再 setWalkPaths({})：保留路徑資料供懸浮面板顯示
+        setWalkResultAvailable(true);
+        setWalkDockCollapsed(false);
         setPendingWalkQuestion(null);
         typewriterAppend(event.summary || "慢想完成。", []);
         fetchSemanticContextData(sessionId).then(setSemanticContext);
@@ -768,6 +780,7 @@ export default function Page() {
         localStorage.setItem(PHASE_KEY, "socratic");
         setWalkStreaming(false);
         setWalkPaths({});
+        setWalkResultAvailable(false);   // 沒有實質路徑，不留懸浮面板
         setPendingWalkQuestion(null);
         typewriterAppend(event.message || "慢想未能開始，我們繼續聊聊。", []);
         break;
@@ -1137,6 +1150,8 @@ export default function Page() {
     setPendingWalkQuestion(null);
     setWalkStreaming(false);
     setPendingWalkPathId(0);
+    setWalkResultAvailable(false);
+    setWalkDockCollapsed(false);
   }
 
   const openHistory = useCallback(async () => {
@@ -1186,6 +1201,8 @@ export default function Page() {
     setWalkPaths({});
     setPendingWalkQuestion(null);
     setWalkStreaming(false);
+    setWalkResultAvailable(false);
+    setWalkDockCollapsed(false);
 
     // ── 清空與舊聚焦狀態相關的暫存，避免殘留上一個 session 的畫面 ──
     setRCFoundationMap(new Map());
@@ -1373,6 +1390,21 @@ export default function Page() {
         </div>
 
       </div>
+      
+      {/* ── 懸浮的慢想紀錄面板 ── */}
+      {walkResultAvailable && !walkStreaming && phase !== "walk_awaiting_answer" && (
+        <WalkDock
+          paths={Object.values(walkPaths).sort((a, b) => a.pathId - b.pathId)}
+          pathColors={walkPathColorMap}
+          collapsed={walkDockCollapsed}
+          onToggle={() => setWalkDockCollapsed((v) => !v)}
+          onDismiss={() => {
+            setWalkResultAvailable(false);
+            setWalkPaths({});
+          }}
+        />
+      )}
+
       {/* ── 歷史對話 modal ── */}
       {showHistory && (
         <div
