@@ -61,8 +61,9 @@ type Props = {
   onLaunchSkill: (rcEid: string, rcLabel: string) => void;
   fetchRCPaths:  (eid: string) => Promise<RCPathData | null>;
   fetchFoundationTree: (eid: string) => Promise<FoundationTreeData | null>;
-  isSubmitting?: boolean;   // ← 新增：main_agent 請求進行中時鎖住按鈕
+  isSubmitting?: boolean;
   rcCategoryMap?: Map<string, { category: string; color?: string | null }>;
+  justUpdated?:  boolean;   // ← 新增：walk 完成後短暫高亮 Top-3 標籤
   width?:        number;
   height?:       number;
 };
@@ -125,6 +126,7 @@ export default function PersonalBrain({
   fetchFoundationTree,
   isSubmitting = false,
   rcCategoryMap,
+  justUpdated = false,
   width  = 480,
   height = 480,
 }: Props) {
@@ -368,6 +370,7 @@ export default function PersonalBrain({
                   fontFamily: "monospace", cursor: "pointer", transition: "all 0.2s ease",
                   boxShadow: isRoot ? `0 0 8px ${color}44` : "none",
                   letterSpacing: "0.03em", backdropFilter: "blur(4px)",
+                  animation: justUpdated ? "pbrain-just-updated 2.2s ease-out" : "none",
                 }}
               >
                 {loadingFocus && isRoot && breadcrumb.length === 1 ? "…" : `${i + 1}. ${rc.label}`}
@@ -476,6 +479,13 @@ export default function PersonalBrain({
           </div>
         </div>
       )}
+      <style>{`
+        @keyframes pbrain-just-updated {
+          0%   { box-shadow: 0 0 0px rgba(0,212,170,0); transform: scale(1); }
+          20%  { box-shadow: 0 0 14px rgba(0,212,170,0.65); transform: scale(1.06); }
+          100% { box-shadow: 0 0 8px rgba(0,212,170,0.27); transform: scale(1); }
+        }
+      `}</style>
     </div>
   );
 }      
