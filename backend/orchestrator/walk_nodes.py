@@ -84,8 +84,12 @@ class WalkOrchestratorNodes:
         if path is None or path.status != PathStatus.PENDING:
             return {"walk_pointer": scheduler.pointer}
 
+        socrates_state = state.get("socrates_state") or {}
+        user_goal = socrates_state.get("context_summary") or ""
+        context_query = f"{user_goal} {path.thinking_chain(last_n=3)}".strip()
+
         candidates = await asyncio.to_thread(
-            self._frontier_fetcher, path.current_eid, session.context_summary
+            self._frontier_fetcher, path.current_eid, context_query
         )
         path.set_frontier(candidates)
 
