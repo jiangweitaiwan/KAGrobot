@@ -69,7 +69,7 @@ _SYSTEM_PROMPT_TEMPLATE = textwrap.dedent("""\
 
     ## 這條路徑（path_id={path_id}）目前的思考歷程
     {thinking_chain}
-
+    {qa_section}
     ## 目前可選的下一步（frontier）
     {frontier_desc}
 
@@ -80,7 +80,7 @@ _SYSTEM_PROMPT_TEMPLATE = textwrap.dedent("""\
     如果 frontier 選項都無法判斷該往哪走——例如需要使用者提供關鍵資訊
     才能決定方向——不要呼叫工具，直接用繁體中文向使用者提出一個
     簡短、具體的問題。使用者回答後，你會在下一輪重新看到同樣的
-    frontier 並可以再次決策。
+    frontier，並且會看到使用者剛才的回答，可以再次決策。
 """)
 
 

@@ -140,11 +140,27 @@ class WalkOrchestratorNodes:
         socrates_state = state.get("socrates_state") or {}
         user_goal = socrates_state.get("context_summary") or "（使用者尚未提供具體目的）"
 
+        # ── 若上一輪 walk_ask 剛拿到使用者的回答，這裡必須明確塞進
+        #    prompt——PathState.advance() 才會把 pending_qa 併入
+        #    decision_log，在那之前 thinking_chain() 完全看不到它，
+        #    否則 LLM 會拿到跟上一輪幾乎相同的 prompt，重複問同樣的
+        #    問題，造成 walk_decide ↔ walk_ask 無限循環。
+        qa_section = ""
+        if path.pending_qa:
+            qa_section = (
+                "\n## 使用者剛回答的問題\n"
+                "請優先根據這個回答判斷方向；若已足夠判斷，"
+                "直接呼叫 advance_path，不要重複問同樣或類似的問題。\n"
+                f"問：{path.pending_qa['question']}\n"
+                f"答：{path.pending_qa['answer']}\n"
+            )
+
         tool_schema   = _build_advance_tool(path)
         system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(
             path_id=path.path_id,
             user_goal=user_goal,
             thinking_chain=path.thinking_chain(last_n=3),
+            qa_section=qa_section,
             frontier_desc=_format_frontier(path.frontier),
         )
 

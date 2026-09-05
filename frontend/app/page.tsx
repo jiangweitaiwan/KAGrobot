@@ -444,7 +444,8 @@ export default function Page() {
     return m;
   }, [walkPaths]);
 
-  const showWalkHighlight = walkStreaming || walkResultAvailable;
+  const showWalkHighlight =
+    walkStreaming || walkResultAvailable || phase === "walk_awaiting_answer";
 
 
   

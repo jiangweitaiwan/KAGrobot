@@ -55,6 +55,9 @@ def socratic_router(state: OrchestratorState) -> str:
     phase = state.get("phase") or "socratic"
     if phase == "path_confirmed":
         return "main_agent"
-    if phase == "walk_pending":
-        return "walk_seed"
+    # walk_pending 不在這裡直接接 walk_seed —— /chat 這次呼叫只負責
+    # 把 phase 轉場，真正驅動 walk_seed 進圖交給 GET /walk/stream 的
+    # entry_router（見 orchestrator/routers.py::entry_router），
+    # 避免 walk_seed ~ walk_ask 在同一次 ainvoke() 裡悄悄跑掉、
+    # 產生沒有經過 astream() 的孤兒 interrupt。
     return "end"
