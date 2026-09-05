@@ -28,11 +28,12 @@ import { useAuth } from "./components/AuthProvider";
 import AuthPanel from "./components/AuthPanel";
 import { apiFetch } from "../lib/apiFetch";
 import { streamSSE } from "../lib/sseFetch"; 
-import RandomWalkPanel, {
+import  {
   type WalkPathState,
   type FrontierPreviewItem,
   type WalkOverallStatus,
-} from "./components/RandomWalkPanel";
+  type WalkQAEntry,
+} from "./components/walkTypes";
 import WalkDock from "./components/WalkDock";
 
 const GlobalBrainExplorer = dynamic(() => import("./components/GlobalBrainExplorer"), { ssr: false });

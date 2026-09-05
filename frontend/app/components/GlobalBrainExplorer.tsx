@@ -66,6 +66,7 @@ import {
   makeRingSprite,
   makeGlowSprite,
   makeFlatDotSprite,
+  makeHollowDotSprite,
   disposeObject3D,
   disposeGroupChildren,
 } from "./three-shared";
