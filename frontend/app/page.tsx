@@ -443,18 +443,6 @@ export default function Page() {
     return m;
   }, [walkPaths]);
 
-  // ── 是否有任何可高亮的節點（語意推薦候選 or 慢想路徑）。
-  //    沒有的話「切換背景」按鈕要 disable，避免使用者切換後畫面整片灰。
-  const hasHighlightableNodes = useMemo(() => {
-    const anyCandidates = activeCandidateEids.length > 0;
-    const anyWalk = Object.values(walkPaths).some((p) => p.visited.length > 0);
-    return anyCandidates || anyWalk;
-  }, [activeCandidateEids, walkPaths]);
-
-  // 激活節點消失（例如換了對話、走完的路徑被清除）時，自動退回全域視圖。
-  useEffect(() => {
-    if (!hasHighlightableNodes && brainModeOn) setBrainModeOn(false);
-  }, [hasHighlightableNodes, brainModeOn]);
 
   // walk 路徑的視覺化不再受「WalkDock 是否還開著」影響：只要 walkPaths 有資料
   // 就一直畫在 GlobalBrain 上，直到使用者按 WalkDock 的 ✕、開新對話、或載入
@@ -530,6 +518,18 @@ export default function Page() {
       .map((s) => s.eid),
     [rcSemanticScores],
   );
+  // ── 是否有任何可高亮的節點（語意推薦候選 or 慢想路徑）。
+  //    沒有的話「切換背景」按鈕要 disable，避免使用者切換後畫面整片灰。  
+  const hasHighlightableNodes = useMemo(() => {
+    const anyCandidates = activeCandidateEids.length > 0;
+    const anyWalk = Object.values(walkPaths).some((p) => p.visited.length > 0);
+    return anyCandidates || anyWalk;
+  }, [activeCandidateEids, walkPaths]);
+
+  // 激活節點消失（例如換了對話、走完的路徑被清除）時，自動退回全域視圖。
+  useEffect(() => {
+    if (!hasHighlightableNodes && brainModeOn) setBrainModeOn(false);
+  }, [hasHighlightableNodes, brainModeOn]);
 
   // ── GlobalBrainExplorer 實際要點亮的節點集合：random walk modal 開著
   //    時，優先顯示 walk 即時走訪的節點（大腦被激活的視覺效果）；
