@@ -526,7 +526,7 @@ export default function Page() {
   //    本身透過 orchestrator checkpointer 安全保存、不受影響，只是
   //    前端暫時看不到即時進度），因此這裡的判斷同時也隱含「只有
   //    modal 開著才顯示 walk 高亮」。
-  const explorerActiveEids = showWalkHighlight ? walkActiveEids : activeCandidateEids;
+
 
   // ── RC Ranking (derived, 前端即時計算) ────────────────────
   const rcRanking = useMemo(
