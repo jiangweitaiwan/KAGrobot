@@ -1010,7 +1010,7 @@ export default function GlobalBrainExplorer({
           walkGroup.add(startRing);
         }
   
-        const rawLabel   = node?.name ?? wp.currentLabel;
+        const rawLabel   = node?.name ?? wp.visitedEids[i];
         const shortLabel = rawLabel.length > 14 ? rawLabel.slice(0, 13) + "…" : rawLabel;
         const label = makeLabelSprite(`${circledNum(i + 1)} ${shortLabel}`, wp.color);
         const minOpacity = 0.32;
