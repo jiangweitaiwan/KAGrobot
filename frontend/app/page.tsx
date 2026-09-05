@@ -431,7 +431,7 @@ export default function Page() {
     // walk 結果是否仍應顯示（獨立於 walkStreaming，由使用者主動關閉才清空）
   const [walkResultAvailable, setWalkResultAvailable] = useState(false);
   const [walkDockCollapsed,  setWalkDockCollapsed]    = useState(false);
-
+  const [brainModeOn,        setBrainModeOn]          = useState(false);
 
 
   const walkPathColorMap = useMemo(() => {
@@ -443,13 +443,25 @@ export default function Page() {
     return m;
   }, [walkPaths]);
 
-  const showWalkHighlight =
-    walkStreaming || walkResultAvailable || phase === "walk_awaiting_answer";
+  // ── 是否有任何可高亮的節點（語意推薦候選 or 慢想路徑）。
+  //    沒有的話「切換背景」按鈕要 disable，避免使用者切換後畫面整片灰。
+  const hasHighlightableNodes = useMemo(() => {
+    const anyCandidates = activeCandidateEids.length > 0;
+    const anyWalk = Object.values(walkPaths).some((p) => p.visited.length > 0);
+    return anyCandidates || anyWalk;
+  }, [activeCandidateEids, walkPaths]);
 
+  // 激活節點消失（例如換了對話、走完的路徑被清除）時，自動退回全域視圖。
+  useEffect(() => {
+    if (!hasHighlightableNodes && brainModeOn) setBrainModeOn(false);
+  }, [hasHighlightableNodes, brainModeOn]);
 
-  
+  // walk 路徑的視覺化不再受「WalkDock 是否還開著」影響：只要 walkPaths 有資料
+  // 就一直畫在 GlobalBrain 上，直到使用者按 WalkDock 的 ✕、開新對話、或載入
+  // 別的歷史對話。是否顯示 WalkDock 面板本身則另外用 walkResultAvailable 等
+  // 既有旗標控制，兩者徹底脫鉤。
   const walkIllumination = useMemo(() => {
-    if (!showWalkHighlight) return undefined;
+    if (Object.keys(walkPaths).length === 0) return undefined;
     return Object.values(walkPaths).map((p) => ({
       pathId: p.pathId,
       color: walkPathColorMap.get(p.pathId) ?? WALK_PATH_COLORS[0],
@@ -461,7 +473,7 @@ export default function Page() {
       })),
       status: p.status,
     }));
-  }, [showWalkHighlight, walkPaths, walkPathColorMap]);
+  }, [walkPaths, walkPathColorMap]);
 
   const walkOverallStatus: WalkOverallStatus =
     phase === "walk_awaiting_answer" ? "awaiting_answer" :
@@ -1172,6 +1184,7 @@ export default function Page() {
     setPendingWalkPathId(0);
     setWalkResultAvailable(false);
     setWalkDockCollapsed(false);
+    setBrainModeOn(false); 
   }
 
   const openHistory = useCallback(async () => {
@@ -1223,6 +1236,7 @@ export default function Page() {
     setWalkStreaming(false);
     setWalkResultAvailable(false);
     setWalkDockCollapsed(false);
+    setBrainModeOn(false); 
 
     // ── 清空與舊聚焦狀態相關的暫存，避免殘留上一個 session 的畫面 ──
     setRCFoundationMap(new Map());
@@ -1347,10 +1361,11 @@ export default function Page() {
           <div className="brain-panel-label">Global Knowledge Field</div>
           <GlobalBrainExplorer
             layout={globalLayout}
-            activeCandidateEids={showWalkHighlight ? [] : activeCandidateEids}
+            activeCandidateEids={activeCandidateEids}
             walkIllumination={walkIllumination}
             rcFoundationMap={rcFoundationMap}
             onNodeClick={handleNodeClick}
+            dimBackground={brainModeOn}
             width={explorerSize.w}
             height={Math.max(explorerSize.h - 32, 280)}
           />
@@ -1413,10 +1428,14 @@ export default function Page() {
           onSubmitAnswer={submitWalkAnswer}
           collapsed={walkDockCollapsed}
           onToggle={() => setWalkDockCollapsed((v) => !v)}
+          brainModeOn={brainModeOn}
+          onToggleBrainMode={() => setBrainModeOn((v) => !v)}
+          brainModeDisabled={!hasHighlightableNodes}
           onDismiss={() => {
             setWalkResultAvailable(false);
             setWalkPaths({});
             setWalkQaLog([]);
+            setBrainModeOn(false);
           }}
         />
       )}

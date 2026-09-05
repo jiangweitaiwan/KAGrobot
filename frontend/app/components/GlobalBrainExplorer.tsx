@@ -67,6 +67,7 @@ import {
   makeGlowSprite,
   makeFlatDotSprite,
   makeHollowDotSprite,
+  makeCrossSprite,          // ← 新增
   disposeObject3D,
   disposeGroupChildren,
 } from "./three-shared";
@@ -109,9 +110,10 @@ export type WalkIllumination = {
 type Props = {
   layout: GlobalLayout | null;
   activeCandidateEids: string[];
-  walkIllumination?: WalkIllumination[];   // replaces activeNodeColors
+  walkIllumination?: WalkIllumination[];
   rcFoundationMap?: RCFoundationMap;
   onNodeClick?: (node: GlobalLayoutNode) => void;
+  dimBackground?: boolean;      // ← 新增：腦內模式開關
   width?: number;
   height?: number;
 };
@@ -148,17 +150,20 @@ const PALETTE = {
   bg:     0x06080f,
   bg_css: "#06080f",
 
-  // 三層概念色
-  article: new THREE.Color(0x00e8ff),   // 青白 — 內核
-  chapter: new THREE.Color(0xb48cff),   // 紫   — 中層
-  paper:   new THREE.Color(0xff9a52),   // 暖橘 — 外層
+  article: new THREE.Color(0x00e8ff),
+  chapter: new THREE.Color(0xb48cff),
+  paper:   new THREE.Color(0xff9a52),
 
-  activeCandidate: new THREE.Color(0x00e0b8),  // 青綠 — 命中候選
-  focusGlow:       new THREE.Color(0x5fe6cc),  // 聚焦光暈
-  foundationPath:  new THREE.Color(0xffb84d),  // 琥珀 — 聚焦路徑
+  activeCandidate: new THREE.Color(0xff5fd1),  // ← 原 0x00e0b8，改洋紅，跟 walk 色系區隔
+  focusGlow:       new THREE.Color(0x5fe6cc),
+  foundationPath:  new THREE.Color(0xffb84d),
 
   strokeCss: "#e8eef8",
 };
+
+// ── 新增：腦內模式的背景淡出色 ──
+const DIM_COLOR = new THREE.Color(0x262b38);
+const DIM_SIZE_MULT = 0.55;
 
 const CLUSTER_COLOR: Record<ClusterKey, THREE.Color> = {
   article: PALETTE.article,
@@ -209,6 +214,11 @@ function categoryColor(node: GlobalLayoutNode): THREE.Color {
   return CLUSTER_COLOR[clusterKeyOf(node)];
 }
 
+const CIRCLED = ["①","②","③","④","⑤","⑥","⑦","⑧","⑨","⑩","⑪","⑫","⑬","⑭","⑮","⑯","⑰","⑱","⑲","⑳"];
+function circledNum(n: number): string {
+  return CIRCLED[n - 1] ?? `${n}.`;
+}
+
 // ─────────────────────────────────────────────────────────────
 // GlobalBrainExplorer
 // ─────────────────────────────────────────────────────────────
@@ -219,6 +229,7 @@ export default function GlobalBrainExplorer({
   walkIllumination,
   rcFoundationMap,
   onNodeClick,
+  dimBackground = false,     // ← 新增
   width  = 480,
   height = 480,
 }: Props) {
@@ -261,6 +272,9 @@ export default function GlobalBrainExplorer({
 
   const walkGroupRef  = useRef<THREE.Group | null>(null);
   const walkPulsesRef = useRef<PulseInfo[]>([]);
+
+  const edgesMaterialRef       = useRef<THREE.LineBasicMaterial | null>(null);
+  const clusterLabelSpritesRef = useRef<THREE.Sprite[]>([]);
 
   useEffect(() => { layoutRef.current = layout; }, [layout]);
   useEffect(() => { widthRef.current = width; heightRef.current = height; }, [width, height]);
@@ -314,6 +328,15 @@ export default function GlobalBrainExplorer({
     () => new Set(activeCandidateEids),
     [activeCandidateEids],
   );
+  const walkActiveEidSet = useMemo(() => {
+    const s = new Set<string>();
+    (walkIllumination ?? []).forEach((wp) => {
+      wp.visitedEids.forEach((e) => s.add(e));
+      wp.frontierPreview.forEach((c) => s.add(c.eid));
+      wp.frontierHistory.forEach((step) => step.candidates.forEach((c) => s.add(c.eid)));
+    });
+    return s;
+  }, [walkIllumination]);  
 
   useEffect(() => { activeCandidateSetRef.current = activeCandidateSet; }, [activeCandidateSet]);
 
@@ -656,6 +679,8 @@ export default function GlobalBrainExplorer({
       focusGroupRef.current   = null;
       hoverRingRef.current    = null;
       markerPointsRef.current = null;
+      edgesMaterialRef.current       = null;
+      clusterLabelSpritesRef.current = [];
       walkGroupRef.current = null;
     };
     // 依賴陣列固定為 []：只在 canvas 掛載／卸載時執行一次。
@@ -690,7 +715,8 @@ export default function GlobalBrainExplorer({
     disposeGroupChildren(layoutGroup);
     layoutGroup.clear();
     markerPointsRef.current = null;
-
+    edgesMaterialRef.current = null;
+    clusterLabelSpritesRef.current = [];
     // 節點標記
     const n = layout.nodes.length;
     const positions = new Float32Array(n * 3);
@@ -754,6 +780,7 @@ export default function GlobalBrainExplorer({
         meshGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(linePos), 3));
         const meshMat = new THREE.LineBasicMaterial({ color: 0x3a4868, transparent: true, opacity: 0.10 });
         layoutGroup.add(new THREE.LineSegments(meshGeo, meshMat));
+        edgesMaterialRef.current = meshMat;   // ← 供腦內模式動態調整透明度
       }
     }
 
@@ -765,6 +792,7 @@ export default function GlobalBrainExplorer({
       );
       label.position.set(c.centroid.x, c.centroid.y + LABEL_Y_OFFSET, c.centroid.z);
       layoutGroup.add(label);
+      clusterLabelSpritesRef.current.push(label);   // ← 供腦內模式淡出
     });
 
     needsRenderRef.current = true;
@@ -780,7 +808,7 @@ export default function GlobalBrainExplorer({
       if (eid === focusedCandidateEid) return;
       const idx = nodeIdxMap.get(eid);
       if (idx === undefined) return;
-      const ring = makeRingSprite("#00e0b8", 4);   // ← was activeNodeColors?.get(eid) ?? "#00e0b8"
+      const ring = makeRingSprite("#ff5fd1", 4);  // ← was activeNodeColors?.get(eid) ?? "#00e0b8"
       ring.position.copy(nodeWorldPositions[idx]);
       const sz = (isRC(layout.nodes[idx]) ? SIZE.rc : SIZE.other) * SIZE.highlightMultiplier;
       ring.scale.set(sz * 1.5, sz * 1.5, 1);
@@ -808,11 +836,14 @@ export default function GlobalBrainExplorer({
       const colorArr  = colorAttr.array as Float32Array;
       const sizeAttr  = markerPts.geometry.attributes.size as THREE.BufferAttribute;
       const sizeArr   = sizeAttr.array as Float32Array;
-
+    
       layout.nodes.forEach((node, i) => {
-        const c = categoryColor(node);
+        const isWalkActive = walkActiveEidSet.has(node.id);
+        const shouldDim     = dimBackground && !isWalkActive;
+        const c = shouldDim ? DIM_COLOR : categoryColor(node);
+        const baseSize = isRC(node) ? SIZE.rc : SIZE.other;
         colorArr[i * 3] = c.r; colorArr[i * 3 + 1] = c.g; colorArr[i * 3 + 2] = c.b;
-        sizeArr[i] = isRC(node) ? SIZE.rc : SIZE.other;
+        sizeArr[i] = shouldDim ? baseSize * DIM_SIZE_MULT : baseSize;
       });
 
       // active candidates → 青綠
@@ -838,6 +869,13 @@ export default function GlobalBrainExplorer({
 
       colorAttr.needsUpdate = true;
       sizeAttr.needsUpdate  = true;
+      // ── 腦內模式：神經網格線與分區標籤一併淡出，讓激活節點更跳出 ──
+      if (edgesMaterialRef.current) {
+        edgesMaterialRef.current.opacity = dimBackground ? 0.03 : 0.10;
+      }
+      clusterLabelSpritesRef.current.forEach((spr) => {
+        (spr.material as THREE.SpriteMaterial).opacity = dimBackground ? 0.06 : 0.28;
+      });   
     }
 
     needsRenderRef.current = true;
@@ -892,8 +930,7 @@ export default function GlobalBrainExplorer({
       });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusedCandidateEid, focusedTreeData, activeCandidateEids, nodeIdxMap, nodeWorldPositions, layout]);
-
+  }, [focusedCandidateEid, focusedTreeData, activeCandidateEids, nodeIdxMap, nodeWorldPositions, layout, dimBackground, walkActiveEidSet]);
   useEffect(() => {
     const walkGroup = walkGroupRef.current;
     if (!walkGroup || !layout) return;
@@ -915,7 +952,7 @@ export default function GlobalBrainExplorer({
   
       const isDead = wp.status === "dead_end";
   
-      // 主幹：實際走過的路徑
+      // ── 主幹：雙層線（外層柔光模擬加粗 + 內層高飽和實線）──
       if (idxs.length > 1) {
         const pts: number[] = [];
         for (let i = 0; i < idxs.length - 1; i++) {
@@ -924,12 +961,32 @@ export default function GlobalBrainExplorer({
         }
         const geo = new THREE.BufferGeometry();
         geo.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
-        const mat = new THREE.LineBasicMaterial({
-          color: wp.color, transparent: true, opacity: isDead ? 0.25 : 0.85,
+  
+        const glowMat = new THREE.LineBasicMaterial({
+          color: wp.color, transparent: true, opacity: isDead ? 0.08 : 0.28,
+          blending: THREE.AdditiveBlending, depthWrite: false,
         });
-        walkGroup.add(new THREE.LineSegments(geo, mat));
+        walkGroup.add(new THREE.LineSegments(geo, glowMat));
+  
+        const coreMat = new THREE.LineBasicMaterial({
+          color: wp.color, transparent: true, opacity: isDead ? 0.3 : 0.95,
+        });
+        walkGroup.add(new THREE.LineSegments(geo, coreMat));
   
         if (!isDead) {
+          // 沿線加密光點，加強「粗線」的視覺密度
+          for (let i = 0; i < idxs.length - 1; i++) {
+            const from = nodeWorldPositions[idxs[i]];
+            const to   = nodeWorldPositions[idxs[i + 1]];
+            [0.3, 0.6, 0.85].forEach((t) => {
+              const dot = makeGlowSprite(wp.color);
+              dot.position.lerpVectors(from, to, t);
+              dot.scale.set(0.12, 0.12, 1);
+              (dot.material as THREE.SpriteMaterial).opacity = 0.35;
+              walkGroup.add(dot);
+            });
+          }
+          // 接力光點（動畫）
           for (let i = 0; i < idxs.length - 1; i++) {
             const from = nodeWorldPositions[idxs[i]].clone();
             const to   = nodeWorldPositions[idxs[i + 1]].clone();
@@ -940,7 +997,33 @@ export default function GlobalBrainExplorer({
         }
       }
   
-      // 目前節點：光暈 + 環
+      // ── 每個走過的節點：常駐編號標籤（新→舊 opacity 漸層，最低 0.32）──
+      idxs.forEach((idx, i) => {
+        const isStart = i === 0;
+        const pos     = nodeWorldPositions[idx];
+        const node    = layout.nodes[idx];
+  
+        if (isStart) {
+          const startRing = makeHollowDotSprite(wp.color, 2.5);
+          startRing.position.copy(pos);
+          startRing.scale.set(0.05, 0.05, 1);
+          walkGroup.add(startRing);
+        }
+  
+        const rawLabel   = node?.name ?? wp.currentLabel;
+        const shortLabel = rawLabel.length > 14 ? rawLabel.slice(0, 13) + "…" : rawLabel;
+        const label = makeLabelSprite(`${circledNum(i + 1)} ${shortLabel}`, wp.color);
+        const minOpacity = 0.32;
+        const opacity = idxs.length > 1
+          ? minOpacity + (1 - minOpacity) * (i / (idxs.length - 1))
+          : 1;
+        (label.material as THREE.SpriteMaterial).opacity = isDead ? opacity * 0.5 : opacity;
+        label.position.set(pos.x, pos.y + 0.16, pos.z);
+        label.scale.set(0.46, 0.1, 1);
+        walkGroup.add(label);
+      });
+  
+      // ── 目前節點：光暈 + 環 ──
       const curIdx = idxs[idxs.length - 1];
       const curPos = nodeWorldPositions[curIdx];
       if (!isDead) {
@@ -955,7 +1038,15 @@ export default function GlobalBrainExplorer({
       if (isDead) (ring.material as THREE.SpriteMaterial).opacity = 0.3;
       walkGroup.add(ring);
   
-      // 歷史分支（樹突，淡）
+      // ── 死路：加上 ✕ 標記 ──
+      if (isDead) {
+        const cross = makeCrossSprite("#e0665f");
+        cross.position.copy(curPos);
+        cross.scale.set(0.09, 0.09, 1);
+        walkGroup.add(cross);
+      }
+  
+      // ── 歷史分支（樹突，淡）── 不變
       wp.frontierHistory.forEach((step) => {
         const fromIdx = nodeIdxMap.get(step.fromEid);
         if (fromIdx === undefined) return;
@@ -978,7 +1069,7 @@ export default function GlobalBrainExplorer({
         });
       });
   
-      // 目前這一步的候選（較亮）
+      // ── 目前這一步的候選（較亮）── 不變
       if (wp.status === "active") {
         wp.frontierPreview.forEach((c) => {
           const idx = nodeIdxMap.get(c.eid);
@@ -1105,7 +1196,7 @@ export default function GlobalBrainExplorer({
           { fill: "#00e8ff", label: "核心概念",   hint: "article" },
           { fill: "#b48cff", label: "教科書概念", hint: "chapter" },
           { fill: "#ff9a52", label: "論文概念",   hint: "paper"   },
-          { fill: "#00e0b8", label: "候選命中",   hint: ""        },
+          { fill: "#ff5fd1", label: "候選命中",   hint: "" },   
           { fill: "#ffb84d", label: "聚焦路徑",   hint: ""        },
         ] as { fill: string; label: string; hint: string }[]).map(({ fill, label }) => (
           <div key={label} style={{ display: "flex", alignItems: "center", gap: 5 }}>
@@ -1131,7 +1222,7 @@ export default function GlobalBrainExplorer({
           bottom:        10,
           left:          12,
           fontSize:      "10px",
-          color:         focusedCandidateEid ? "#5fe6cc" : "#00e0b8",
+          color: focusedCandidateEid ? "#5fe6cc" : "#ff5fd1",
           letterSpacing: "0.1em",
           fontFamily:    "monospace",
           pointerEvents: "none",
@@ -1145,7 +1236,7 @@ export default function GlobalBrainExplorer({
             width:        6,
             height:       6,
             borderRadius: "50%",
-            background:   focusedCandidateEid ? "#5fe6cc" : "#00e0b8",
+            background: focusedCandidateEid ? "#5fe6cc" : "#ff5fd1",
             animation:    "gbrain-pulse 1.8s ease-in-out infinite",
           }} />
           {focusedCandidateEid

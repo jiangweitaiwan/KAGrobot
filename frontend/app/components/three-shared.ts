@@ -219,3 +219,25 @@ export function disposeObject3D(root: THREE.Object3D) {
 export function disposeGroupChildren(group: THREE.Group) {
   group.children.forEach((child) => disposeObject3D(child));
 }
+
+/** 死路終點的 ✕ 標記，供 GlobalBrainExplorer 的 walk 視覺化使用。 */
+export function makeCrossSprite(colorHex: string): THREE.Sprite {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 32;
+  const ctx = canvas.getContext("2d")!;
+  ctx.strokeStyle = colorHex;
+  ctx.lineWidth = 3.5;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(9, 9); ctx.lineTo(23, 23);
+  ctx.moveTo(23, 9); ctx.lineTo(9, 23);
+  ctx.stroke();
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.generateMipmaps = false;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+  const spr = new THREE.Sprite(mat);
+  spr.scale.set(0.05, 0.05, 1);
+  return spr;
+}

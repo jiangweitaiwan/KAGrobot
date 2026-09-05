@@ -16,11 +16,15 @@ type Props = {
   collapsed: boolean;
   onToggle: () => void;
   onDismiss: () => void;
+  brainModeOn: boolean;               
+  onToggleBrainMode: () => void;     
+  brainModeDisabled?: boolean;        
 };
 
 export default function WalkDock({
   paths, pathColors, status, pendingQuestion, qaLog, onSubmitAnswer,
   answerSubmitting = false, collapsed, onToggle, onDismiss,
+  brainModeOn, onToggleBrainMode, brainModeDisabled = false,   // ← 新增
 }: Props) {
   const [draft, setDraft] = useState("");
 
@@ -47,7 +51,9 @@ export default function WalkDock({
           boxShadow: pendingQuestion ? "0 0 12px rgba(232,160,48,0.25)" : "0 0 12px rgba(0,212,170,0.15)",
           backdropFilter: "blur(4px)", cursor: "pointer",
         }}>
-          {pendingQuestion ? "🤔 有問題待回答" : `🧠 慢想紀錄 · ${paths.length} 條路徑`} ▲
+          {pendingQuestion
+            ? "🤔 有問題待回答"
+            : `${brainModeOn ? "🧠" : "🌌"} 慢想紀錄 · ${paths.length} 條路徑`} ▲
         </button>
       ) : (
         <div style={{
@@ -64,6 +70,23 @@ export default function WalkDock({
               🧠 慢想紀錄 <StatusTag status={status} />
             </span>
             <div style={{ display: "flex", gap: 4 }}>
+              <button
+                type="button"
+                onClick={onToggleBrainMode}
+                disabled={brainModeDisabled}
+                title={brainModeDisabled ? "尚無激活節點" : (brainModeOn ? "切回全域視圖" : "切換到腦內模式")}
+                style={{
+                  fontSize:   "0.6rem",
+                  padding:    "2px 8px",
+                  border:     `1px solid ${brainModeOn ? "var(--teal)" : "rgba(127,119,221,0.3)"}`,
+                  background: brainModeOn ? "rgba(0,212,170,0.15)" : "transparent",
+                  color:      brainModeOn ? "var(--teal)" : "rgba(175,169,236,0.6)",
+                  opacity:    brainModeDisabled ? 0.4 : 1,
+                  cursor:     brainModeDisabled ? "not-allowed" : "pointer",
+                }}
+              >
+                {brainModeOn ? "🧠 腦內模式" : "🌌 全域視圖"}
+              </button>
               <button type="button" onClick={onToggle} style={{ fontSize: "0.6rem", padding: "2px 7px" }}>▾ 收合</button>
               <button type="button" onClick={onDismiss} style={{ fontSize: "0.6rem", padding: "2px 7px" }}>✕</button>
             </div>
