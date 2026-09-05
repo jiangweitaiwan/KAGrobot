@@ -96,14 +96,23 @@ export type GlobalLayout = {
   edges: GlobalLayoutEdge[];
 };
 
+export type WalkIllumination = {
+  pathId: number;
+  color: string;
+  visitedEids: string[];
+  frontierPreview: { eid: string; isRc: boolean }[];
+  frontierHistory: { fromEid: string; candidates: { eid: string; isRc: boolean }[] }[];
+  status: "pending" | "active" | "dead_end";
+};
+
 type Props = {
-  layout:              GlobalLayout | null;
+  layout: GlobalLayout | null;
   activeCandidateEids: string[];
-  activeNodeColors?:   Map<string, string>;   // eid → hex color, walk mode 用
-  rcFoundationMap?:    RCFoundationMap;
-  onNodeClick?:        (node: GlobalLayoutNode) => void;
-  width?:              number;
-  height?:             number;
+  walkIllumination?: WalkIllumination[];   // replaces activeNodeColors
+  rcFoundationMap?: RCFoundationMap;
+  onNodeClick?: (node: GlobalLayoutNode) => void;
+  width?: number;
+  height?: number;
 };
 
 type PulseInfo = {
@@ -249,6 +258,9 @@ export default function GlobalBrainExplorer({
   const onNodeClickRef         = useRef(onNodeClick);
   const activeCandidateSetRef  = useRef<Set<string>>(new Set());
 
+  const walkGroupRef  = useRef<THREE.Group | null>(null);
+  const walkPulsesRef = useRef<PulseInfo[]>([]);
+
   useEffect(() => { layoutRef.current = layout; }, [layout]);
   useEffect(() => { widthRef.current = width; heightRef.current = height; }, [width, height]);
   useEffect(() => { onNodeClickRef.current = onNodeClick; }, [onNodeClick]);
@@ -375,7 +387,7 @@ export default function GlobalBrainExplorer({
     const pathGroup  = new THREE.Group(); rg.add(pathGroup);  pathGroupRef.current  = pathGroup;
     const ringGroup  = new THREE.Group(); rg.add(ringGroup);  ringGroupRef.current  = ringGroup;
     const focusGroup = new THREE.Group(); rg.add(focusGroup); focusGroupRef.current = focusGroup;
-
+    const walkGroup = new THREE.Group(); rg.add(walkGroup); walkGroupRef.current = walkGroup;
     // hover ring
     const hoverRing = makeRingSprite("#7a90c0");
     hoverRing.visible = false;
@@ -476,8 +488,12 @@ export default function GlobalBrainExplorer({
       }
 
       // 接力光點動畫（仍在動 → 需要持續渲染）
-      const hasActivePulses = pulsesRef.current.length > 0;
+      const hasActivePulses = pulsesRef.current.length > 0 || walkPulsesRef.current.length > 0;
       pulsesRef.current.forEach((p) => {
+        p.phase = (p.phase + 0.012) % 1;
+        p.dot.position.lerpVectors(p.from, p.to, p.phase);
+      });
+      walkPulsesRef.current.forEach((p) => {
         p.phase = (p.phase + 0.012) % 1;
         p.dot.position.lerpVectors(p.from, p.to, p.phase);
       });
@@ -639,6 +655,7 @@ export default function GlobalBrainExplorer({
       focusGroupRef.current   = null;
       hoverRingRef.current    = null;
       markerPointsRef.current = null;
+      walkGroupRef.current = null;
     };
     // 依賴陣列固定為 []：只在 canvas 掛載／卸載時執行一次。
     // 易變資料（layout/nodeWorldPositions/width/height/onNodeClick）
@@ -877,6 +894,113 @@ export default function GlobalBrainExplorer({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusedCandidateEid, focusedTreeData, activeCandidateEids, nodeIdxMap, nodeWorldPositions, layout]);
 
+  useEffect(() => {
+    const walkGroup = walkGroupRef.current;
+    if (!walkGroup || !layout) return;
+  
+    disposeGroupChildren(walkGroup);
+    walkGroup.clear();
+    walkPulsesRef.current = [];
+  
+    if (!walkIllumination || walkIllumination.length === 0) {
+      needsRenderRef.current = true;
+      return;
+    }
+  
+    walkIllumination.forEach((wp) => {
+      const idxs = wp.visitedEids
+        .map((eid) => nodeIdxMap.get(eid))
+        .filter((i): i is number => i !== undefined);
+      if (idxs.length === 0) return;
+  
+      const isDead = wp.status === "dead_end";
+  
+      // 主幹：實際走過的路徑
+      if (idxs.length > 1) {
+        const pts: number[] = [];
+        for (let i = 0; i < idxs.length - 1; i++) {
+          const a = nodeWorldPositions[idxs[i]], b = nodeWorldPositions[idxs[i + 1]];
+          pts.push(a.x, a.y, a.z, b.x, b.y, b.z);
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
+        const mat = new THREE.LineBasicMaterial({
+          color: wp.color, transparent: true, opacity: isDead ? 0.25 : 0.85,
+        });
+        walkGroup.add(new THREE.LineSegments(geo, mat));
+  
+        if (!isDead) {
+          for (let i = 0; i < idxs.length - 1; i++) {
+            const from = nodeWorldPositions[idxs[i]].clone();
+            const to   = nodeWorldPositions[idxs[i + 1]].clone();
+            const dot  = makeFlatDotSprite(wp.color);
+            walkGroup.add(dot);
+            walkPulsesRef.current.push({ from, to, dot, phase: (i / (idxs.length - 1)) % 1 });
+          }
+        }
+      }
+  
+      // 目前節點：光暈 + 環
+      const curIdx = idxs[idxs.length - 1];
+      const curPos = nodeWorldPositions[curIdx];
+      if (!isDead) {
+        const glow = makeGlowSprite(wp.color);
+        glow.position.copy(curPos);
+        glow.scale.set(0.5, 0.5, 1);
+        walkGroup.add(glow);
+      }
+      const ring = makeRingSprite(wp.color, isDead ? 2 : 4);
+      ring.position.copy(curPos);
+      ring.scale.set(0.24, 0.24, 1);
+      if (isDead) (ring.material as THREE.SpriteMaterial).opacity = 0.3;
+      walkGroup.add(ring);
+  
+      // 歷史分支（樹突，淡）
+      wp.frontierHistory.forEach((step) => {
+        const fromIdx = nodeIdxMap.get(step.fromEid);
+        if (fromIdx === undefined) return;
+        const fromPos = nodeWorldPositions[fromIdx];
+        step.candidates.forEach((c) => {
+          const idx = nodeIdxMap.get(c.eid);
+          if (idx === undefined) return;
+          const toPos = nodeWorldPositions[idx];
+          const geo = new THREE.BufferGeometry().setFromPoints([fromPos, toPos]);
+          const mat = new THREE.LineDashedMaterial({
+            color: wp.color, dashSize: 0.04, gapSize: 0.03, transparent: true, opacity: 0.16,
+          });
+          const line = new THREE.Line(geo, mat);
+          line.computeLineDistances();
+          walkGroup.add(line);
+          const hollow = makeHollowDotSprite(wp.color, 2);
+          hollow.position.copy(toPos);
+          hollow.scale.set(0.03, 0.03, 1);
+          walkGroup.add(hollow);
+        });
+      });
+  
+      // 目前這一步的候選（較亮）
+      if (wp.status === "active") {
+        wp.frontierPreview.forEach((c) => {
+          const idx = nodeIdxMap.get(c.eid);
+          if (idx === undefined) return;
+          const toPos = nodeWorldPositions[idx];
+          const geo = new THREE.BufferGeometry().setFromPoints([curPos, toPos]);
+          const mat = new THREE.LineDashedMaterial({
+            color: wp.color, dashSize: 0.05, gapSize: 0.04, transparent: true, opacity: 0.5,
+          });
+          const line = new THREE.Line(geo, mat);
+          line.computeLineDistances();
+          walkGroup.add(line);
+          const hollow = makeHollowDotSprite(wp.color, 3);
+          hollow.position.copy(toPos);
+          hollow.scale.set(0.04, 0.04, 1);
+          walkGroup.add(hollow);
+        });
+      }
+    });
+  
+    needsRenderRef.current = true;
+  }, [walkIllumination, nodeIdxMap, nodeWorldPositions, layout]);
   // ── Zoom buttons ───────────────────────────────────────────
   function zoomBy(delta: number) {
     const cam = cameraRef.current;

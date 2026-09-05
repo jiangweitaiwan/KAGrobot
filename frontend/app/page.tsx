@@ -420,7 +420,8 @@ export default function Page() {
   // ── Random Walk（慢想）Mode ───────────────────────────────────
  
   const [walkEnabled, setWalkEnabled]     = useState(false);
-  const [walkPaths, setWalkPaths]         = useState<Record<number, WalkPathState>>({});
+  const [walkPaths, setWalkPaths] = useState<Record<number, WalkPathState>>({});
+  const [walkQaLog, setWalkQaLog] = useState<WalkQAEntry[]>([]);
   const [pendingWalkQuestion, setPendingWalkQuestion] = useState<{ pathId: number; question: string } | null>(null);
   const [walkStreaming, setWalkStreaming]   = useState(false);
   const [pendingWalkPathId, setPendingWalkPathId] = useState<number>(0);
@@ -430,10 +431,7 @@ export default function Page() {
   const [walkResultAvailable, setWalkResultAvailable] = useState(false);
   const [walkDockCollapsed,  setWalkDockCollapsed]    = useState(false);
 
-  const walkActiveEids = useMemo(
-    () => Object.values(walkPaths).map((p) => p.currentEid).filter(Boolean),
-    [walkPaths],
-  );
+
 
   const walkPathColorMap = useMemo(() => {
     const m = new Map<number, string>();
@@ -449,13 +447,19 @@ export default function Page() {
 
 
   
-  const explorerActiveNodeColors = useMemo(() => {
+  const walkIllumination = useMemo(() => {
     if (!showWalkHighlight) return undefined;
-    const m = new Map<string, string>();
-    Object.values(walkPaths).forEach((p) => {
-      if (p.currentEid) m.set(p.currentEid, walkPathColorMap.get(p.pathId) ?? WALK_PATH_COLORS[0]);
-    });
-    return m;
+    return Object.values(walkPaths).map((p) => ({
+      pathId: p.pathId,
+      color: walkPathColorMap.get(p.pathId) ?? WALK_PATH_COLORS[0],
+      visitedEids: p.visited.map((n) => n.eid),
+      frontierPreview: p.frontierPreview.map((c) => ({ eid: c.eid, isRc: c.is_rc })),
+      frontierHistory: p.frontierHistory.map((step) => ({
+        fromEid: step.fromEid,
+        candidates: step.candidates.map((c) => ({ eid: c.eid, isRc: c.is_rc })),
+      })),
+      status: p.status,
+    }));
   }, [showWalkHighlight, walkPaths, walkPathColorMap]);
 
   const walkOverallStatus: WalkOverallStatus =
@@ -691,25 +695,28 @@ export default function Page() {
   const upsertWalkPath = useCallback((pathId: number, patch: Partial<WalkPathState>) => {
     setWalkPaths((prev) => {
       const existing = prev[pathId] ?? {
-        pathId, currentEid: "", currentLabel: "", visitedLabels: [],
-        status: "pending" as const, frontierPreview: [],
+        pathId, visited: [], currentEid: "", currentLabel: "",
+        status: "pending" as const, frontierPreview: [], frontierHistory: [],
       };
       return { ...prev, [pathId]: { ...existing, ...patch } };
     });
   }, []);
-
+  
   const handleWalkEvent = useCallback((event: any) => {
     switch (event.type) {
       case "walk_started": {
         const paths: Record<number, WalkPathState> = {};
         (event.start_concepts ?? []).forEach((c: any) => {
           paths[c.path_id] = {
-            pathId: c.path_id, currentEid: c.eid, currentLabel: c.label,
-            visitedLabels: [], status: "pending", frontierPreview: [],
+            pathId: c.path_id,
+            visited: [{ eid: c.eid, label: c.label, isRc: false }],
+            currentEid: c.eid, currentLabel: c.label,
+            status: "pending", frontierPreview: [], frontierHistory: [],
           };
         });
         setWalkPaths(paths);
-        setWalkResultAvailable(false);   // 新一輪開始，清掉上一輪懸浮結果
+        setWalkQaLog([]);
+        setWalkResultAvailable(false);
         setWalkDockCollapsed(false);
         break;
       }
@@ -723,21 +730,27 @@ export default function Page() {
       case "frontier_expanded": {
         setWalkPaths((prev) => {
           const existing = prev[event.path_id];
-          const visitedLabels = existing
-            ? [...existing.visitedLabels, existing.currentLabel].filter(Boolean)
-            : [];
+          if (!existing) return prev;
+  
+          const chosen = existing.frontierPreview.find((c) => c.eid === event.to_eid);
+          const unchosen = existing.frontierPreview.filter((c) => c.eid !== event.to_eid);
+  
+          const frontierHistory = unchosen.length > 0
+            ? [...existing.frontierHistory, { fromEid: event.from_eid, candidates: unchosen }]
+            : existing.frontierHistory;
+  
           return {
             ...prev,
             [event.path_id]: {
-              ...(existing ?? {
-                pathId: event.path_id, currentEid: "", currentLabel: "",
-                visitedLabels: [], status: "pending" as const, frontierPreview: [],
-              }),
-              currentEid:      event.to_eid,
-              currentLabel:    event.to_label,
-              visitedLabels,
-              status:          "pending",
+              ...existing,
+              visited: [...existing.visited, {
+                eid: event.to_eid, label: event.to_label, isRc: chosen?.is_rc ?? false,
+              }],
+              currentEid: event.to_eid,
+              currentLabel: event.to_label,
+              status: "pending",
               frontierPreview: [],
+              frontierHistory,
             },
           };
         });
@@ -745,9 +758,7 @@ export default function Page() {
       }
       case "path_dead_end": {
         upsertWalkPath(event.path_id, {
-          status: "dead_end",
-          deadEndReason: event.reason,
-          frontierPreview: [],
+          status: "dead_end", deadEndReason: event.reason, frontierPreview: [],
         });
         break;
       }
@@ -755,14 +766,15 @@ export default function Page() {
         const pathId = event.path_id ?? 0;
         setPendingWalkPathId(pathId);
         setPendingWalkQuestion({ pathId, question: event.question });
+        setWalkQaLog((prev) => [...prev, { pathId, question: event.question }]);
         setPhase("walk_awaiting_answer");
+        setWalkDockCollapsed(false);   // never let a question hide behind a collapsed dock
         break;
       }
       case "walk_complete": {
         setPhase("socratic");
         localStorage.setItem(PHASE_KEY, "socratic");
         setWalkStreaming(false);
-        // 不再 setWalkPaths({})：保留路徑資料供懸浮面板顯示
         setWalkResultAvailable(true);
         setWalkDockCollapsed(false);
         setPendingWalkQuestion(null);
@@ -781,7 +793,8 @@ export default function Page() {
         localStorage.setItem(PHASE_KEY, "socratic");
         setWalkStreaming(false);
         setWalkPaths({});
-        setWalkResultAvailable(false);   // 沒有實質路徑，不留懸浮面板
+        setWalkQaLog([]);
+        setWalkResultAvailable(false);
         setPendingWalkQuestion(null);
         typewriterAppend(event.message || "慢想未能開始，我們繼續聊聊。", []);
         break;
@@ -794,8 +807,7 @@ export default function Page() {
       default:
         console.warn("[walk] unknown event type:", event.type);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, upsertWalkPath]);  
+  }, [sessionId, upsertWalkPath]); 
 
   /** 開一段 /walk/stream，驅動後端真正跑 walk 迴圈。呼叫前一律先中止
    *  上一條連線（若還存在），避免重複消費。*/
@@ -830,18 +842,28 @@ export default function Page() {
     const controller = new AbortController();
     walkAbortRef.current = controller;
   
+    const answeredPathId = pendingWalkPathId;
+    const answeredQuestion = pendingWalkQuestion?.question ?? "";
+    setWalkQaLog((prev) => {
+      const idx = [...prev].reverse().findIndex(
+        (q) => q.pathId === answeredPathId && q.question === answeredQuestion && q.answer === undefined,
+      );
+      if (idx === -1) return prev;
+      const realIdx = prev.length - 1 - idx;
+      const next = [...prev];
+      next[realIdx] = { ...next[realIdx], answer: answerText };
+      return next;
+    });
     setPendingWalkQuestion(null);
-    setIsLoading(true);
     setWalkStreaming(true);
     try {
       await streamSSE(
         `${API_BASE.replace(/\/$/, "")}/walk/answer/${sessionId}`,
         handleWalkEvent,
         {
-          method:  "POST",
-          headers: { "Content-Type": "application/json" },
-          body:    JSON.stringify({ path_id: pendingWalkPathId, answer: answerText }),
-          signal:  controller.signal,
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path_id: answeredPathId, answer: answerText }),
+          signal: controller.signal,
         },
       );
       setPhase((cur) => (cur === "walk_awaiting_answer" ? "walk_pending" : cur));
@@ -851,10 +873,9 @@ export default function Page() {
         setError(err instanceof Error ? err.message : "回答提交失敗");
       }
     } finally {
-      setIsLoading(false);
       if (walkAbortRef.current === controller) setWalkStreaming(false);
     }
-  }, [sessionId, pendingWalkPathId, handleWalkEvent]);
+  }, [sessionId, pendingWalkPathId, pendingWalkQuestion, handleWalkEvent]);
 
   /** 頁面重新整理後（非冷啟動）的恢復：若本機記得上次 phase 是
    *  walk_pending，先問後端目前真實狀態，再決定：
@@ -1042,7 +1063,8 @@ export default function Page() {
   // Chat
   // ──────────────────────────────────────────────────────────
 
-  const canSend = !!input.trim() && !isLoading && !!sessionId && !!userId && !walkStreaming;
+  const canSend = !!input.trim() && !isLoading && !!sessionId && !!userId
+  && !walkStreaming && phase !== "walk_awaiting_answer";
 
   async function typewriterAppend(fullText: string, attachments: Attachment[] = []): Promise<void> {
     isTypingRef.current = true;
@@ -1077,11 +1099,7 @@ export default function Page() {
     setInput("");
     setError("");
 
-    // ── 正在等待回答 walk 提出的問題：走 /walk/answer，不走 /chat ──
-    if (phase === "walk_awaiting_answer") {
-      await submitWalkAnswer(text);
-      return;
-    }
+
 
     setIsLoading(true);
     const userMsg: ChatMessage = { id: createId(), role: "user", content: text };
@@ -1287,24 +1305,15 @@ export default function Page() {
         {/* ══ Chat ══ */}
         <div className="chat-column">
           <div className="chat-box" ref={boxRef}>
-            {walkStreaming || phase === "walk_awaiting_answer" ? (
-              <RandomWalkPanel
-                paths={Object.values(walkPaths).sort((a, b) => a.pathId - b.pathId)}
-                pathColors={walkPathColorMap}
-                status={walkOverallStatus}
-                pendingQuestion={pendingWalkQuestion}
-              />
-            ) : messages.length === 0 ? (
+            {messages.length === 0 ? (
               <div className="meta" style={{ textAlign: "center", marginTop: 24 }}>
                 輸入問題,開始與知識場域對話
               </div>
             ) : (
               messages.map((msg) => <ChatBubble key={msg.id} msg={msg} />)
             )}
-            {isLoading && !walkStreaming && phase !== "walk_awaiting_answer" && (
-              <div className="meta">
-                <span style={{ color: "var(--orange)", opacity: 0.7 }}>⬡ 思考中…</span>
-              </div>
+            {isLoading && !walkStreaming && (
+              <div className="meta"><span style={{ color: "var(--orange)", opacity: 0.7 }}>⬡ 思考中…</span></div>
             )}
           </div>
 
@@ -1337,8 +1346,8 @@ export default function Page() {
           <div className="brain-panel-label">Global Knowledge Field</div>
           <GlobalBrainExplorer
             layout={globalLayout}
-            activeCandidateEids={explorerActiveEids}
-            activeNodeColors={explorerActiveNodeColors}
+            activeCandidateEids={showWalkHighlight ? [] : activeCandidateEids}
+            walkIllumination={walkIllumination}
             rcFoundationMap={rcFoundationMap}
             onNodeClick={handleNodeClick}
             width={explorerSize.w}
@@ -1393,15 +1402,20 @@ export default function Page() {
       </div>
       
       {/* ── 懸浮的慢想紀錄面板 ── */}
-      {walkResultAvailable && !walkStreaming && phase !== "walk_awaiting_answer" && (
+      {(walkStreaming || phase === "walk_awaiting_answer" || walkResultAvailable) && (
         <WalkDock
           paths={Object.values(walkPaths).sort((a, b) => a.pathId - b.pathId)}
           pathColors={walkPathColorMap}
+          status={walkOverallStatus}
+          pendingQuestion={pendingWalkQuestion}
+          qaLog={walkQaLog}
+          onSubmitAnswer={submitWalkAnswer}
           collapsed={walkDockCollapsed}
           onToggle={() => setWalkDockCollapsed((v) => !v)}
           onDismiss={() => {
             setWalkResultAvailable(false);
             setWalkPaths({});
+            setWalkQaLog([]);
           }}
         />
       )}
