@@ -154,7 +154,7 @@ const ZOOM_MIN     = 1.6;
 const ZOOM_MAX      = 9;
 const ZOOM_DEFAULT  = 4.4;
 const PICK_PIXEL_RADIUS = 18;
-const BADGE_PICK_PIXEL_RADIUS = 12;
+const BADGE_PICK_PIXEL_RADIUS = 22; 
 const MAX_PIXEL_RATIO   = 1.5;
 const RENDER_FRAME_MS   = 1000 / 30;
 
@@ -786,8 +786,10 @@ export default function HourglassViz({
           isSelected ? "#ffffff" : T.skill_badge,
           isSelected ? T.skill_badge : T.skill_badge_stroke,
         );
-        const bx = n.x + scale * 0.9;
-        const by = n.y + scale * 0.9;
+        const badgeScale = 0.1;
+        badge.scale.set(badgeScale, badgeScale, 1);
+        const bx = n.x + scale * 1.15;
+        const by = n.y + scale * 1.15;
         const bz = n.z;
         badge.position.set(bx, by, bz);
         badge.userData.eid = n.id;
@@ -797,7 +799,7 @@ export default function HourglassViz({
         if (isSelected) {
           const glow = makeGlowSprite(T.skill_badge);
           glow.position.set(bx, by, bz);
-          glow.scale.set(0.22, 0.22, 1);
+          glow.scale.set(0.36, 0.36, 1);
           nodeGroup.add(glow);
           skillGlowRef.current = glow;
         }

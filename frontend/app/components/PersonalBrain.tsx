@@ -397,7 +397,7 @@ export default function PersonalBrain({
       {breadcrumb.length > 1 && (
         <div style={{
           position: "absolute",
-          bottom: pendingSkill ? 52 : 14,   // ← 讓出下方空間給確認列
+          bottom: pendingSkill ? 152 : 14,   // ← 讓出下方空間給確認列
           left: 0, right: 0, padding: "0 12px",
           display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 4,
           pointerEvents: "auto",
@@ -425,24 +425,24 @@ export default function PersonalBrain({
       {/* ── Skill 確認列（選取後才出現）── */}
       {pendingSkill && (
         <div style={{
-          position: "absolute", bottom: 14, left: 0, right: 0,
+          position: "absolute", bottom: 92, left: 0, right: 0,
           display: "flex", justifyContent: "center", padding: "0 12px",
           pointerEvents: "auto", boxSizing: "border-box",
         }}>
           <div style={{
-            display: "flex", alignItems: "center", gap: 6,
+            display: "flex", alignItems: "center", gap: 10,
             background: "rgba(3,1,8,0.85)",
-            border: "1px solid rgba(255,204,77,0.4)",
-            borderRadius: 20,
-            padding: "6px 8px 6px 14px",
+            border: "1.5px solid rgba(255,204,77,0.5)",
+            borderRadius: 28,
+            padding: "10px 12px 10px 20px",
             backdropFilter: "blur(4px)",
-            boxShadow: "0 0 12px rgba(255,204,77,0.15)",
+            boxShadow: "0 0 16px rgba(255,204,77,0.2)",
             maxWidth: "100%",
             minWidth: 0,
             boxSizing: "border-box",
           }}>
             <span style={{
-              fontSize: "0.68rem", color: "#ffcc4d", fontFamily: "monospace",
+              fontSize: "0.86rem", color: "#ffcc4d", fontFamily: "monospace",
               whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
               minWidth: 0, flexShrink: 1,
             }}>
@@ -452,8 +452,8 @@ export default function PersonalBrain({
               onClick={() => setPendingSkill(null)}
               disabled={isSubmitting}
               style={{
-                fontSize: "0.62rem", padding: "3px 8px", borderRadius: 14,
-                border: "1px solid rgba(127,119,221,0.3)", background: "transparent",
+                fontSize: "0.76rem", padding: "6px 14px", borderRadius: 18,
+                border: "1.5px solid rgba(127,119,221,0.4)", background: "transparent",
                 color: "rgba(175,169,236,0.7)",
                 cursor: isSubmitting ? "default" : "pointer", fontFamily: "monospace",
                 flexShrink: 0, whiteSpace: "nowrap",
@@ -465,8 +465,8 @@ export default function PersonalBrain({
               onClick={handleConfirmLaunch}
               disabled={isSubmitting}
               style={{
-                fontSize: "0.62rem", padding: "3px 10px", borderRadius: 14,
-                border: "1px solid #ffcc4d",
+                fontSize: "0.8rem", padding: "7px 18px", borderRadius: 18,
+                border: "1.5px solid #ffcc4d",
                 background: isSubmitting ? "rgba(255,204,77,0.08)" : "rgba(255,204,77,0.18)",
                 color: "#ffcc4d",
                 cursor: isSubmitting ? "default" : "pointer",
