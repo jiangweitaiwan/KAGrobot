@@ -71,11 +71,13 @@ type SessionDisplayMessage = {
 };
 
 type SessionDetail = {
-  session_id:        string;
-  phase:             string;
-  display_messages:  SessionDisplayMessage[];
-  selected_rc_eid?:  string | null;
-  selected_rc_label?: string | null;
+  session_id:             string;
+  phase:                  string;
+  display_messages:       SessionDisplayMessage[];
+  selected_rc_eid?:       string | null;
+  selected_rc_label?:     string | null;
+  walk_session?:          WalkSessionDto | null;
+  walk_pending_question?: { path_id: number; question: string } | null;
 };
 
 type WalkStatusResponse = {
@@ -83,6 +85,32 @@ type WalkStatusResponse = {
   has_pending_question: boolean;
   pending_question: { path_id: number; question: string } | null;
 };
+type WalkNodeRefDto = { eid: string; label: string; is_rc: boolean };
+type FrontierCandidateDto = { eid: string; label: string; definition?: string | null; mechanism?: string | null; node_type?: string | null };
+type DecisionLogEntryDto = { from_eid: string; to_eid: string; reason: string; qa?: { question: string; answer: string } | null };
+
+type PathStateDto = {
+  path_id: number;
+  start_eid: string;
+  start_label: string;
+  current_eid: string;
+  current_label: string;
+  visited: WalkNodeRefDto[];
+  frontier: FrontierCandidateDto[];
+  status: "pending" | "active" | "dead_end";
+  dead_end_reason: string | null;
+  depth: number;
+  max_depth: number;
+  decision_log: DecisionLogEntryDto[];
+  pending_qa: { question: string; answer: string } | null;
+};
+
+type WalkSessionDto = {
+  session_id: string;
+  paths: PathStateDto[];
+  max_depth: number;
+};
+
 
 // ─────────────────────────────────────────────────────────────
 // Constants
@@ -193,6 +221,37 @@ function computeRCRanking(
   });
 
   return results.sort((a, b) => b.totalScore - a.totalScore).slice(0, 3);
+}
+
+function walkSessionDtoToPathStates(dto: WalkSessionDto): Record<number, WalkPathState> {
+  const out: Record<number, WalkPathState> = {};
+  for (const p of dto.paths) {
+    out[p.path_id] = {
+      pathId: p.path_id,
+      visited: p.visited.map((n) => ({ eid: n.eid, label: n.label, isRc: n.is_rc })),
+      currentEid: p.current_eid,
+      currentLabel: p.current_label,
+      status: p.status,
+      deadEndReason: p.dead_end_reason ?? undefined,
+      // frontier / frontierHistory 只有「即時走動」時才有意義的分支預覽，
+      // 重播模式下沒有 live interrupt 可互動，一律留空，只呈現主幹軌跡。
+      frontierPreview: [],
+      frontierHistory: [],
+    };
+  }
+  return out;
+}
+
+function walkSessionDtoToQaLog(dto: WalkSessionDto): WalkQAEntry[] {
+  const out: WalkQAEntry[] = [];
+  for (const p of dto.paths) {
+    for (const entry of p.decision_log) {
+      if (entry.qa) {
+        out.push({ pathId: p.path_id, question: entry.qa.question, answer: entry.qa.answer });
+      }
+    }
+  }
+  return out;
 }
 
 /** eid → {category, color} 查表，供 DetailPanel 標題列 / PersonalBrain
@@ -432,6 +491,7 @@ export default function Page() {
   const [walkResultAvailable, setWalkResultAvailable] = useState(false);
   const [walkDockCollapsed,  setWalkDockCollapsed]    = useState(false);
   const [brainModeOn,        setBrainModeOn]          = useState(false);
+  const [walkReadOnly,       setWalkReadOnly]         = useState(false);
 
 
   const walkPathColorMap = useMemo(() => {
@@ -731,6 +791,7 @@ export default function Page() {
         setWalkQaLog([]);
         setWalkResultAvailable(false);
         setWalkDockCollapsed(false);
+        setWalkReadOnly(false); 
         break;
       }
       case "frontier_ready": {
@@ -1185,6 +1246,8 @@ export default function Page() {
     setWalkResultAvailable(false);
     setWalkDockCollapsed(false);
     setBrainModeOn(false); 
+    setWalkReadOnly(false);
+    setWalkQaLog([]); 
   }
 
   const openHistory = useCallback(async () => {
@@ -1237,7 +1300,24 @@ export default function Page() {
     setWalkResultAvailable(false);
     setWalkDockCollapsed(false);
     setBrainModeOn(false); 
+    // ── 還原慢想（Random Walk）唯讀重播狀態 ──────────────────
+    if (sessionDetail.walk_session && sessionDetail.walk_session.paths.length > 0) {
+      setWalkPaths(walkSessionDtoToPathStates(sessionDetail.walk_session));
+      setWalkQaLog(walkSessionDtoToQaLog(sessionDetail.walk_session));
+      setWalkResultAvailable(true);
+      setWalkReadOnly(true);
 
+      if (sessionDetail.walk_pending_question) {
+        setPendingWalkQuestion({
+          pathId: sessionDetail.walk_pending_question.path_id,
+          question: sessionDetail.walk_pending_question.question,
+        });
+      } else {
+        setPendingWalkQuestion(null);
+      }
+    } else {
+      setWalkReadOnly(false);
+    }
     // ── 清空與舊聚焦狀態相關的暫存，避免殘留上一個 session 的畫面 ──
     setRCFoundationMap(new Map());
     setRCSemanticScores([]);
@@ -1426,6 +1506,7 @@ export default function Page() {
           pendingQuestion={pendingWalkQuestion}
           qaLog={walkQaLog}
           onSubmitAnswer={submitWalkAnswer}
+          readOnly={walkReadOnly}
           collapsed={walkDockCollapsed}
           onToggle={() => setWalkDockCollapsed((v) => !v)}
           brainModeOn={brainModeOn}

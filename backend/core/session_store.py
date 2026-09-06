@@ -76,26 +76,12 @@ def _deserialize_messages(raw: List[Dict[str, str]]) -> List[BaseMessage]:
 # ── Public API ───────────────────────────────────────────────────
 
 async def save_session_snapshot(
-    uid:           str,
-    session_id:    str,
-    state:         Dict[str, Any],
+    uid: str,
+    session_id: str,
+    state: Dict[str, Any],
     *,
     turn_messages: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
-    """把本輪結束後的 OrchestratorState 摘要寫回 Firestore（best-effort）。
-
-    Parameters
-    ----------
-    turn_messages : 這一輪新增的「前端展示用」訊息（通常是一則 user +
-                    一則 ai，ai 訊息內含 attachments），由呼叫端
-                    （api/routes/chat.py）組好傳入。會 append 到既有的
-                    display_messages 陣列，並裁剪只保留最後
-                    _MAX_DISPLAY_MESSAGES 筆，避免文件無限增長。
-                    傳 None 時只更新 LangGraph 還原用的欄位，不動
-                    display_messages（例如未來若有非對話性質的狀態更新）。
-
-    失敗不拋出例外——這是輔助性的持久化備份，不該讓 /chat 因此掛掉。
-    """
     try:
         socrates_state = state.get("socrates_state") or {}
         now = int(time.time() * 1000)
@@ -106,11 +92,14 @@ async def save_session_snapshot(
             "selected_rc_label":         state.get("selected_rc_label"),
             "confirmed_rc_eid":          state.get("confirmed_rc_eid"),
             "skill_sandbox_id":          state.get("skill_sandbox_id"),
-            "thinking_process":          state.get("thinking_process") or "",   # 新增
+            "thinking_process":          state.get("thinking_process") or "",
             "socrates_phase":            socrates_state.get("phase"),
             "socrates_intent_types":     socrates_state.get("intent_types") or [],
             "socrates_context_summary":  socrates_state.get("context_summary") or "",
             "main_state_messages":       _serialize_messages(state.get("main_state") or []),
+            # ← 新增：walk 的展示用狀態（唯讀重播，不代表可續答）
+            "walk_session":              state.get("walk_session"),
+            "walk_pending_question":     state.get("walk_pending_question"),
             "updated_at":                now,
         }
 
@@ -174,20 +163,7 @@ async def load_session_snapshot(
               f"(uid={uid}, session={session_id}): {exc}")
         return None
 
-async def load_session_display(
-    uid:        str,
-    session_id: str,
-) -> Optional[Dict[str, Any]]:
-    """讀出供前端還原聊天畫面用的完整明細。
-
-    與 load_session_snapshot 的差異：load_session_snapshot 是給
-    orchestrator 冷啟動重建 LangGraph state 用（socrates_state /
-    main_state 等內部格式）；這裡回傳的 display_messages 是前端
-    ChatMessage 可以直接渲染的格式（role/content/attachments），
-    供 GET /me/sessions/{session_id} 使用。
-
-    回傳 None 代表沒有此 session 或讀取失敗。
-    """
+async def load_session_display(uid: str, session_id: str) -> Optional[Dict[str, Any]]:
     try:
         db  = _get_db()
         ref = (
@@ -200,13 +176,15 @@ async def load_session_display(
 
         data = doc.to_dict() or {}
         return {
-            "session_id":        session_id,
-            "phase":             data.get("phase", "socratic"),
-            "display_messages":  data.get("display_messages") or [],
-            "selected_rc_eid":   data.get("selected_rc_eid"),
-            "selected_rc_label": data.get("selected_rc_label"),
-            "updated_at":        data.get("updated_at"),
-            "created_at":        data.get("created_at"),
+            "session_id":            session_id,
+            "phase":                 data.get("phase", "socratic"),
+            "display_messages":      data.get("display_messages") or [],
+            "selected_rc_eid":       data.get("selected_rc_eid"),
+            "selected_rc_label":     data.get("selected_rc_label"),
+            "updated_at":            data.get("updated_at"),
+            "created_at":            data.get("created_at"),
+            "walk_session":          data.get("walk_session"),
+            "walk_pending_question": data.get("walk_pending_question"),
         }
     except Exception as exc:
         print(f"[session_store] load_session_display failed "

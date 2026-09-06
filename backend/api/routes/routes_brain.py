@@ -26,6 +26,7 @@ from pathlib import Path
 from core.semantic_context import SemanticContext
 from graph_service.semantic_scorer import combine_score, type_overlap
 from core.firebase_auth import require_auth
+from core.session_store import load_session_snapshot
 router = APIRouter()
 
 
@@ -192,15 +193,30 @@ def _get_anchor_label(request: Request, eid: str) -> str:
         return label
     return _anchor_label_from_neo4j(request.app.state.driver, eid)
 
-def _get_semantic_context(request: Request, uid: str, session_id: str) -> SemanticContext:
+async def _get_semantic_context(request: Request, uid: str, session_id: str) -> SemanticContext:
     orchestrator = request.app.state.orchestrator
     config = {"configurable": {"thread_id": f"{uid}:{session_id}"}}
+
     try:
         snapshot = orchestrator.get_state(config)
+        values = snapshot.values or {}
     except Exception:
-        return SemanticContext()
+        values = {}
 
-    values = snapshot.values or {}
+    if not values:
+        # MemorySaver 對這個 thread 已無記錄（冷啟動／重啟），
+        # 降級讀 Firestore 備份，邏輯與 chat.py 的還原路徑一致。
+        restored = await load_session_snapshot(uid, session_id)
+        if not restored:
+            return SemanticContext()
+        socrates_state = restored.get("socrates_state") or {}
+        return SemanticContext(
+            query=socrates_state.get("query") or "",
+            intent_types=socrates_state.get("intent_types") or [],
+            summary=socrates_state.get("context_summary") or "",
+            thinking_process=restored.get("thinking_process") or "",
+        )
+
     socrates_state = values.get("socrates_state") or {}
     return SemanticContext(
         query=socrates_state.get("query") or "",
@@ -351,7 +367,7 @@ async def rc_semantic_scores(
     candidate_retriever = request.app.state.candidate_retriever
 
     ctx = (
-        _get_semantic_context(request, uid, session_id)
+        await _get_semantic_context(request, uid, session_id)
         if session_id
         else SemanticContext(query=query or "")
     )
@@ -384,7 +400,7 @@ async def semantic_context(
     request:    Request,
     uid:        str = Depends(require_auth),
 ) -> SemanticContextResponse:
-    ctx = _get_semantic_context(request, uid, session_id)
+    ctx = await _get_semantic_context(request, uid, session_id)
     return SemanticContextResponse(
         session_id=session_id,
         query=ctx.query,
@@ -470,7 +486,7 @@ async def foundation_recommendations(
     request:    Request,
     uid:        str = Depends(require_auth),
 ) -> FoundationRecommendationsResponse:
-    ctx = _get_semantic_context(request, uid, session_id)
+    ctx = await _get_semantic_context(request, uid, session_id)
     if not ctx.embedding_text.strip():
         return FoundationRecommendationsResponse(session_id=session_id, recommendations=[])
 

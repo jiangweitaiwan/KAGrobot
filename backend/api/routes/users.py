@@ -79,11 +79,13 @@ class SessionDisplayMessage(BaseModel):
 
 
 class SessionDetailResponse(BaseModel):
-    session_id:        str
-    phase:             str
-    display_messages:  List[SessionDisplayMessage]
-    selected_rc_eid:   Optional[str] = None
-    selected_rc_label: Optional[str] = None
+    session_id:             str
+    phase:                  str
+    display_messages:       List[SessionDisplayMessage]
+    selected_rc_eid:        Optional[str] = None
+    selected_rc_label:      Optional[str] = None
+    walk_session:           Optional[Dict[str, Any]] = None
+    walk_pending_question:  Optional[Dict[str, Any]] = None
 
 class DeleteAccountResponse(BaseModel):
     ok: bool
@@ -211,11 +213,6 @@ async def get_session_detail(
     session_id: str,
     uid:        str = Depends(require_auth),
 ) -> SessionDetailResponse:
-    """回傳指定 session 的完整聊天紀錄，供前端「接續歷史對話」還原畫面。
-
-    display_messages 已是前端 ChatMessage 可直接渲染的格式
-    （role/content/attachments），不需要再額外轉換。
-    """
     detail = await load_session_display(uid, session_id)
     if not detail:
         raise HTTPException(status_code=404, detail="找不到此對話紀錄")
@@ -228,6 +225,8 @@ async def get_session_detail(
         ],
         selected_rc_eid=detail.get("selected_rc_eid"),
         selected_rc_label=detail.get("selected_rc_label"),
+        walk_session=detail.get("walk_session"),
+        walk_pending_question=detail.get("walk_pending_question"),
     )
 
 

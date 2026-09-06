@@ -12,6 +12,7 @@ type Props = {
   pendingQuestion: { pathId: number; question: string } | null;
   qaLog: WalkQAEntry[];
   onSubmitAnswer: (answer: string) => void;
+  readOnly?: boolean;
   answerSubmitting?: boolean;
   collapsed: boolean;
   onToggle: () => void;
@@ -24,7 +25,8 @@ type Props = {
 export default function WalkDock({
   paths, pathColors, status, pendingQuestion, qaLog, onSubmitAnswer,
   answerSubmitting = false, collapsed, onToggle, onDismiss,
-  brainModeOn, onToggleBrainMode, brainModeDisabled = false,   // ← 新增
+  brainModeOn, onToggleBrainMode, brainModeDisabled = false, 
+  readOnly = false,
 }: Props) {
   const [draft, setDraft] = useState("");
 
@@ -45,15 +47,21 @@ export default function WalkDock({
       {collapsed ? (
         <button type="button" onClick={onToggle} style={{
           display: "flex", alignItems: "center", gap: 6, borderRadius: 20,
-          padding: "8px 14px", border: `1px solid ${pendingQuestion ? "var(--orange)" : "rgba(0,212,170,0.4)"}`,
-          background: "rgba(13,18,32,0.9)", color: pendingQuestion ? "var(--orange)" : "var(--teal)",
+          padding: "8px 14px",
+          border: `1px solid ${pendingQuestion && !readOnly ? "var(--orange)" : "rgba(0,212,170,0.4)"}`,
+          background: "rgba(13,18,32,0.9)",
+          color: pendingQuestion && !readOnly ? "var(--orange)" : "var(--teal)",
           fontSize: "0.72rem",
-          boxShadow: pendingQuestion ? "0 0 12px rgba(232,160,48,0.25)" : "0 0 12px rgba(0,212,170,0.15)",
+          boxShadow: pendingQuestion && !readOnly
+            ? "0 0 12px rgba(232,160,48,0.25)"
+            : "0 0 12px rgba(0,212,170,0.15)",
           backdropFilter: "blur(4px)", cursor: "pointer",
         }}>
-          {pendingQuestion
-            ? "🤔 有問題待回答"
-            : `${brainModeOn ? "🧠" : "🌌"} 慢想紀錄 · ${paths.length} 條路徑`} ▲
+          {readOnly
+            ? `📜 慢想紀錄（唯讀） · ${paths.length} 條路徑`
+            : pendingQuestion
+              ? "🤔 有問題待回答"
+              : `${brainModeOn ? "🧠" : "🌌"} 慢想紀錄 · ${paths.length} 條路徑`} ▲
         </button>
       ) : (
         <div style={{
@@ -67,7 +75,7 @@ export default function WalkDock({
             padding: "8px 10px", borderBottom: "1px solid rgba(0,212,170,0.2)", flexShrink: 0,
           }}>
             <span style={{ fontSize: "0.68rem", color: "var(--teal)" }}>
-              🧠 慢想紀錄 <StatusTag status={status} />
+              {readOnly ? "📜 慢想紀錄（唯讀）" : "🧠 慢想紀錄"} <StatusTag status={status} />
             </span>
             <div style={{ display: "flex", gap: 4 }}>
               <button
@@ -117,24 +125,30 @@ export default function WalkDock({
                     <span style={{ fontSize: "0.7rem", fontStyle: "italic", color: "var(--orange)" }}>
                       「{pendingQuestion.question}」
                     </span>
-                    <div style={{ display: "flex", gap: 4 }}>
-                      <input
-                        value={draft}
-                        onChange={(e) => setDraft(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
-                        placeholder="回答…"
-                        disabled={answerSubmitting}
-                        style={{
-                          flex: 1, fontSize: "0.68rem", padding: "4px 8px", borderRadius: 8,
-                          border: "1px solid rgba(232,160,48,0.35)", background: "rgba(13,18,32,0.7)",
-                          color: "var(--text)", fontFamily: "IBM Plex Mono, monospace",
-                        }}
-                      />
-                      <button type="button" onClick={submit} disabled={answerSubmitting || !draft.trim()}
-                        style={{ fontSize: "0.65rem", padding: "4px 10px" }}>
-                        送出
-                      </button>
-                    </div>
+                    {readOnly ? (
+                      <span style={{ fontSize: "0.62rem", color: "var(--muted)", opacity: 0.7 }}>
+                        ⚠ 此慢想過程已中斷（伺服器重啟），無法繼續回答
+                      </span>
+                    ) : (
+                      <div style={{ display: "flex", gap: 4 }}>
+                        <input
+                          value={draft}
+                          onChange={(e) => setDraft(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+                          placeholder="回答…"
+                          disabled={answerSubmitting}
+                          style={{
+                            flex: 1, fontSize: "0.68rem", padding: "4px 8px", borderRadius: 8,
+                            border: "1px solid rgba(232,160,48,0.35)", background: "rgba(13,18,32,0.7)",
+                            color: "var(--text)", fontFamily: "IBM Plex Mono, monospace",
+                          }}
+                        />
+                        <button type="button" onClick={submit} disabled={answerSubmitting || !draft.trim()}
+                          style={{ fontSize: "0.65rem", padding: "4px 10px" }}>
+                          送出
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
