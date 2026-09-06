@@ -1,6 +1,7 @@
 sbert_onnx/
 __pycache__/
 rc_bertopic.json
+bertopic_rc_categories.json
 # 系統檔案 (Windows / Mac)
 Thumbs.db
 .DS_Store

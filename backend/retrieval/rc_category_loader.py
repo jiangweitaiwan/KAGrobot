@@ -2,16 +2,22 @@
 """retrieval/rc_category_loader.py — 從 GCS 載入 RC 分類標籤。
 
 資料來源：另一個專案把所有 RC 丟進 BERTopic 分類器後，
-輸出 rc_categories.json 到 GCS：
+輸出 bertopic_rc_categories.json 到 GCS：
     {
       "categories": [
-        {"rc_name": "動能效應", "category": "因子投資",
-         "topic_id": 3, "color": "#e8a030"},
+        {"rc_name": "Calvo (1983) Staggered Prices Model",
+         "category": "Momentum Investing",
+         "topic_id": 1, "color": "#f78250"},
         ...
-      ]
+      ],
+      "generated_at": "...",
+      "rc_count": 36,
+      "topic_count": 2,
+      "unmatched_count": 0,
+      "config_id": "config"
     }
 
-此處只負責下載、解析、依 rc_name 建索引，不做任何分類邏輯——
+此處只負責下載、解析 categories、依 rc_name 建索引，不做任何分類邏輯——
 分類本身完全交給外部專案離線產生，設計哲學同 routes_brain.py
 的 _load_bertopic_layout。
 """
@@ -24,7 +30,7 @@ from typing import Any, Dict
 
 
 class RCCategoryLoader:
-    def __init__(self, bucket_name: str, gcs_object: str = "rc_categories.json") -> None:
+    def __init__(self, bucket_name: str, gcs_object: str = "bertopic_rc_categories.json") -> None:
         self._bucket_name = bucket_name
         self._gcs_object = gcs_object
 
@@ -67,10 +73,10 @@ class RCCategoryLoader:
             except Exception as exc:
                 print(f"[RCCategoryLoader] GCS load failed: {exc}")
 
-        local_path = Path(__file__).resolve().parent.parent / "rc_categories.json"
+        local_path = Path(__file__).resolve().parent.parent.parent / "bertopic_rc_categories.json"
         if local_path.exists():
             with open(local_path, encoding="utf-8") as f:
                 return json.load(f)
 
-        print("[RCCategoryLoader] no rc_categories.json found, returning empty")
+        print("[RCCategoryLoader] no bertopic_rc_categories.json found, returning empty")
         return {"categories": []}
