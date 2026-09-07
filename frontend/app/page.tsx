@@ -455,9 +455,30 @@ function ChatBubble({ msg }: { msg: ChatMessage }) {
 }
 
 type IntroductionProps = { onEnter: () => void };
+type IntroductionMode = "knowledge" | "feeling" | "belief";
+
+const INTRODUCTION_MODES: Record<IntroductionMode, { label: string; eyebrow: string; title: string; copy: string; note: string }> = {
+  knowledge: {
+    label: "知識", eyebrow: "KNOWLEDGE / NODES", title: "每一個 node，都是一則可被理解的知識。",
+    copy: "GlobalBrain 將概念、模型與事實視覺化成節點。它們分布在不同層次，彼此連結，讓龐雜的知識不再只是資料，而是一張可探索的地圖。",
+    note: "點亮節點，開始辨識問題的知識脈絡。",
+  },
+  feeling: {
+    label: "感覺", eyebrow: "FEELING / LIMBIC CORE", title: "直覺，從最內層開始影響思考。",
+    copy: "水藍色的邊緣系統匯聚直覺性的概念：理性主義、存在主義，以及我們對世界最先產生的感受與傾向。它是思考開始有方向的地方。",
+    note: "由內而外，感覺為知識賦予優先順序。",
+  },
+  belief: {
+    label: "信念", eyebrow: "BELIEF / RC PATH", title: "被選擇的連結，會形成可行動的信念。",
+    copy: "當 foundations 在 GlobalBrain 中彼此呼應，演算法會描繪出匯聚至推薦 RC 的光徑網路。這條路徑代表你此刻相信、並能據以行動的推理結論。",
+    note: "光暈所在，即為被推薦的 RC。",
+  },
+};
 
 /** The landing briefing keeps the operational dashboard intentionally dense. */
 function Introduction({ onEnter }: IntroductionProps) {
+  const [mode, setMode] = useState<IntroductionMode>("knowledge");
+  const active = INTRODUCTION_MODES[mode];
   return (
     <main className="introduction" aria-labelledby="intro-title">
       <nav className="intro-nav" aria-label="KAGrobot introduction">
@@ -467,39 +488,51 @@ function Introduction({ onEnter }: IntroductionProps) {
 
       <section className="intro-hero">
         <div className="intro-kicker">COGNITIVE OPERATING SYSTEM / 01</div>
-        <h1 id="intro-title">讓知識不只被搜尋，<br /><em>而是開始推理。</em></h1>
+        <h1 id="intro-title">知識・信念・感覺，<br /><em>讓思考看得見。</em></h1>
         <p className="intro-lead">
-          KAGrobot 將龐大的知識場轉化為可操作的思考介面：從對話中的問題出發，
-          建立屬於你的推理基礎，最後交給 Agent 執行。
+          GlobalBrain 是一個知識場：以節點保存知識、以內核承接感覺、
+          以光徑凝聚信念，最後形成能夠行動的推理結論。
         </p>
         <div className="intro-actions">
           <button type="button" className="intro-enter" onClick={onEnter}>進入知識操作系統 <span>→</span></button>
           <a className="intro-scroll" href="#workflow">探索操作流程 <span>↓</span></a>
         </div>
-        <div className="intro-orbit" aria-hidden="true">
-          <div className="intro-orbit-ring ring-one" />
-          <div className="intro-orbit-ring ring-two" />
-          <div className="intro-orbit-core"><span>GLOBAL</span><strong>BRAIN</strong></div>
-          <i className="intro-signal signal-one" /><i className="intro-signal signal-two" /><i className="intro-signal signal-three" />
-          <span className="intro-orbit-label label-one">LIMBIC SYSTEM</span>
-          <span className="intro-orbit-label label-two">CORTEX / CONTEXT</span>
+        <div className="intro-sim-wrap">
+          <div className="intro-sim-header"><span>GLOBAL KNOWLEDGE FIELD</span><span>LIVE MODEL</span></div>
+          <div className="intro-sim" data-mode={mode} aria-label="Simplified GlobalBrain visualization">
+            <svg viewBox="0 0 580 510" role="img" aria-label="GlobalBrain concept layers and reasoning path">
+              <circle className="sim-shell sim-cortex" cx="292" cy="260" r="207" />
+              <circle className="sim-shell sim-knowledge" cx="292" cy="260" r="143" />
+              <circle className="sim-shell sim-limbic" cx="292" cy="260" r="77" />
+              <g className="sim-mesh"><path d="M111 193L185 155 253 211 327 137 396 182 458 133M104 303L184 357 246 298 329 367 404 320 481 349M185 155L184 357M253 211L246 298M327 137L329 367M396 182L404 320M111 193L246 298 396 182M184 357L327 137 481 349" /></g>
+              <g className="sim-path"><path d="M290 259L232 226 184 196M290 259L354 228 404 185M290 259L335 313 407 321M232 226L354 228M354 228L407 321" /></g>
+              <g className="sim-nodes"><circle className="node node-core" cx="290" cy="259" r="9" /><circle className="node node-feeling" cx="232" cy="226" r="6" /><circle className="node node-feeling" cx="354" cy="228" r="6" /><circle className="node node-feeling" cx="335" cy="313" r="6" /><circle className="node node-knowledge" cx="184" cy="196" r="6" /><circle className="node node-knowledge" cx="404" cy="185" r="6" /><circle className="node node-knowledge" cx="407" cy="321" r="6" /><circle className="node node-cortex" cx="111" cy="193" r="5" /><circle className="node node-cortex" cx="458" cy="133" r="5" /><circle className="node node-cortex" cx="481" cy="349" r="5" /></g>
+              <g className="sim-labels"><text x="266" y="251">INTUITION</text><text x="170" y="181">RATIONALISM</text><text x="374" y="171">NEW KEYNESIAN</text><text x="361" y="337">EXISTENTIALISM</text><text className="sim-rc-label" x="416" y="309">RECOMMENDED RC</text></g>
+              <circle className="sim-rc-halo" cx="407" cy="321" r="23" /><circle className="sim-rc" cx="407" cy="321" r="8" />
+            </svg>
+            <div className="intro-sim-legend"><span className="legend-feeling">邊緣系統 / 感覺</span><span className="legend-knowledge">知識節點</span><span className="legend-cortex">皮質 / 高階概念</span></div>
+          </div>
         </div>
       </section>
 
       <section className="intro-principle">
-        <div className="intro-section-number">02 / THE FIELD</div>
-        <div><h2>一座會思考的<br />知識場。</h2></div>
-        <p>GlobalBrain 模擬大腦的知識結構：核心如邊緣系統，承載動機、價值與關聯；外層皮質延展出概念與脈絡。演算法在兩者之間尋路，計算出能真正採取行動的 RC（Reasoning Conclusion）。</p>
-        <div className="intro-rc">RC <span>Reasoning Conclusion</span></div>
+        <div className="intro-section-number">02 / EXPLORE THE FIELD</div>
+        <div><h2>同一個知識場，<br />三種理解方式。</h2></div>
+        <div className="intro-explorer">
+          <div className="intro-tabs" role="tablist" aria-label="GlobalBrain concepts">
+            {(Object.keys(INTRODUCTION_MODES) as IntroductionMode[]).map((key) => <button key={key} type="button" role="tab" aria-selected={mode === key} className={mode === key ? "active" : ""} onClick={() => setMode(key)}>{INTRODUCTION_MODES[key].label}</button>)}
+          </div>
+          <div className="intro-concept-copy"><span>{active.eyebrow}</span><h3>{active.title}</h3><p>{active.copy}</p><small>↳ {active.note}</small></div>
+        </div>
       </section>
 
       <section className="intro-workflow" id="workflow" aria-labelledby="workflow-title">
-        <div className="intro-workflow-heading"><div className="intro-section-number">03 / WORKFLOW</div><h2 id="workflow-title">從問題，走向行動。</h2></div>
+        <div className="intro-workflow-heading"><div className="intro-section-number">03 / FROM FIELD TO ACTION</div><h2 id="workflow-title">從看見，到相信，<br />再走向行動。</h2></div>
         <ol className="intro-steps">
-          <li><span className="intro-step-number">01</span><div className="intro-step-icon">⌁</div><h3>開始對話</h3><p>在 Chat-box 描述你的目標或問題。對話會同步喚醒相關的知識訊號。</p></li>
-          <li><span className="intro-step-number">02</span><div className="intro-step-icon">◎</div><h3>觀察與探索</h3><p>從 GlobalBrain 看見知識大腦的即時狀態，點選節點深入特定 concept。</p></li>
-          <li><span className="intro-step-number">03</span><div className="intro-step-icon">＋</div><h3>建立 foundation</h3><p>在 DetailPanel 將關鍵 concept 加入 PersonalBrain，形成專屬的推理基礎。</p></li>
-          <li><span className="intro-step-number">04</span><div className="intro-step-icon">↗</div><h3>執行推薦 RC</h3><p>在 PersonalBrain 檢視推理結果與推薦 RC，點選後送入 main_agent 執行任務。</p></li>
+          <li><span className="intro-step-number">01</span><div className="intro-step-icon">⌁</div><h3>喚醒知識</h3><p>在 Chat-box 描述你的問題，讓相關 node 在 GlobalBrain 中浮現。</p></li>
+          <li><span className="intro-step-number">02</span><div className="intro-step-icon">◎</div><h3>感受核心</h3><p>從內層直覺性概念到外層高階概念，探索問題正在靠近什麼。</p></li>
+          <li><span className="intro-step-number">03</span><div className="intro-step-icon">＋</div><h3>凝聚信念</h3><p>將關鍵 concept 加入 PersonalBrain，讓 foundations 形成自己的光徑。</p></li>
+          <li><span className="intro-step-number">04</span><div className="intro-step-icon">↗</div><h3>執行 RC</h3><p>觀察被推薦的 RC，點選後送入 main_agent，把推理轉為任務。</p></li>
         </ol>
       </section>
 
