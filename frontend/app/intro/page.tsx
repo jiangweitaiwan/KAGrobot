@@ -8,8 +8,9 @@ import TabCarousel, { type IntroTab } from "./components/TabCarousel";
 import PipelineStrip from "./components/PipelineStrip";
 import "./intro.css";
 
+
+
 const IntroGlobalBrain = dynamic(() => import("./components/IntroGlobalBrain"), { ssr: false });
-const IntroHourglass = dynamic(() => import("./components/IntroHourglass"), { ssr: false });
 
 const spaceGrotesk = Space_Grotesk({
   subsets: ["latin"],
@@ -26,24 +27,28 @@ const TABS: IntroTab[] = [
 
 const TAB_COPY = [
   {
-    headline: "感受：最核心、最抽象的直覺",
-    body: "邊緣系統藏在大腦最深處，負責稀缺、公平、風險這類還沒被驗證、卻左右每個判斷的原型情感。在 GlobalBrain 裡，這是最靠近核心的 article 概念層。",
-    anatomy: "對應機制：article concept · 核心殼層",
+    headline: "感受:邊緣系統的原型直覺",
+    mechanism: "邊緣系統(limbic system)是大腦掌管情緒與本能反應的區域,座落在演化上最古老的位置。神經科學研究指出,像杏仁核這類邊緣結構,會在還沒經過理性分析前就先對情境做出快速的情緒評估——這些直覺不是憑空出現的,而是長期生活經驗被大腦不斷內化、濃縮後留下的『總結性』判斷。",
+    example: "『稀缺性直覺』就是一個例子:看到限量商品或倒數計時,大部分人會不自覺地想搶購,這種反應早在意識到自己在『分析』之前就已經發生。在 GlobalBrain 裡,這類概念被放在最核心的 article 層。",
+    anatomy: "對應機制:article concept · 核心殼層(邊緣系統)",
   },
   {
-    headline: "知識：向外擴散的皮質",
-    body: "越靠近皮質表層，概念越具體、越可驗證——一篇篇論文、一個個模型，構成可以被檢驗的知識庫。慢想（random walk）就是在這一層裡遊走，蒐集與需求相關的線索。",
-    anatomy: "對應機制：paper concept · 外層殼層",
+    headline: "知識:大腦皮質累積的具體知識",
+    mechanism: "大腦皮質,尤其是負責高階認知的新皮質(neocortex),是儲存可驗證、可教授知識的地方。它比邊緣系統晚演化出現,負責邏輯推理、長期記憶與抽象思考——這也是為什麼具體的理論、模型、研究文獻,會被歸類在皮質對應的外層。",
+    example: "『Calvo 定價模型』是一篇具體、可以被檢驗的經濟學理論,對應到皮質裡儲存的一個知識模組。慢想(random walk)實際上就是在這一層裡遊走,蒐集與需求相關的線索。",
+    anatomy: "對應機制:paper concept · 外層殼層(大腦皮質)",
   },
   {
-    headline: "信念：線索收斂，神經被激活",
-    body: "當散落各處的知識線索指向同一個方向，foundation tree 開始收斂成一個推薦的 Resulting Concept——就像多個神經元同步放電，一個信念於是成形。",
-    anatomy: "對應機制：foundation tree 收斂 → 推薦 RC",
+    headline: "信念:神經同步放電,線索收斂成迴路",
+    mechanism: "神經科學裡有一條經典的 Hebb 法則:『一起放電的神經元,會連在一起』(cells that fire together wire together)。當來自不同腦區的訊號——邊緣系統的直覺、皮質累積的知識——同時、反覆地被激活,它們之間的突觸連結就會被強化,形成一個穩定的迴路。這正是大腦形成新概念與鞏固記憶的核心機制之一。",
+    example: "當『稀缺性直覺』『菜單成本理論』『價格僵固性』『Calvo 定價模型』等幾條分散的線索同步指向同一個方向,foundation tree 就會收斂成一個新的信念——『通膨黏性價格假說』,就像多個神經元同步放電、最終連成一條穩定迴路。",
+    anatomy: "對應機制:foundation tree 收斂 → 推薦 RC(突觸連結強化)",
   },
   {
-    headline: "行動：信念驅動推理落地",
-    body: "信念不會停在腦中。選定一個 RC 之後，MainAgent 依據這個信念與其 foundation 執行具體分析——沙漏的腰身是剛形成的信念，上錐收斂成一次可執行的行動。",
-    anatomy: "對應機制：select RC skill → MainAgent 執行",
+    headline: "行動:前額葉把信念轉譯成執行",
+    mechanism: "前額葉皮質(prefrontal cortex)負責大腦的『執行功能』(executive function)——把已經形成的判斷與意圖,轉換成具體的行動計畫與動作執行。信念不會停在腦中,需要這一層把『知道』變成『做』。",
+    example: "選定『通膨黏性價格假說』這個信念之後,MainAgent 會依據它與其 foundation 執行具體分析,例如『模擬升息衝擊路徑』——這就是前額葉把腦內確立的判斷,轉譯成外顯行動的過程。",
+    anatomy: "對應機制:select RC skill → MainAgent 執行(前額葉執行功能)",
   },
 ];
 
@@ -136,19 +141,27 @@ export default function IntroPage() {
           >
             {(activeIndex) => {
               const copy = TAB_COPY[activeIndex];
-              const brainMode = activeIndex === 0 ? "feel" : activeIndex === 1 ? "knowledge" : "belief";
+              const mode = TABS[activeIndex].key as IntroBrainMode;
               return (
                 <>
                   <div className="intro-stage-visual" ref={visualRef}>
-                    {activeIndex === 3 ? (
-                      <IntroHourglass width={visualSize.w} height={visualSize.h} />
-                    ) : (
-                      <IntroGlobalBrain mode={brainMode} width={visualSize.w} height={visualSize.h} />
-                    )}
+                    <IntroGlobalBrain
+                      mode={mode}
+                      onRegionClick={(clicked) => {
+                        const idx = TABS.findIndex((t) => t.key === clicked);
+                        if (idx !== -1) selectTab(idx);
+                      }}
+                      width={visualSize.w}
+                      height={visualSize.h}
+                    />
                   </div>
                   <div className="intro-stage-copy">
                     <h3 className="intro-tab-headline">{copy.headline}</h3>
-                    <p className="intro-tab-body">{copy.body}</p>
+                    <p className="intro-tab-body">{copy.mechanism}</p>
+                    <div className="intro-tab-example">
+                      <span className="intro-tab-example-label">舉例</span>
+                      <p>{copy.example}</p>
+                    </div>
                     <p className="intro-tab-anatomy">{copy.anatomy}</p>
                   </div>
                 </>

@@ -44,12 +44,16 @@ export const KNOWLEDGE_NODES: DemoNode[] = [
 
 export const ALL_SPHERE_NODES: DemoNode[] = [...FEEL_NODES, ...KNOWLEDGE_NODES];
 
-// ── 信念：這幾個知識/感受節點的線索收斂成一個新的信念節點 ──────
-export const FOUNDATION_IDS = ["k1", "k4", "k10", "f3"];
+// ── 信念:這幾個知識/感受節點的線索收斂成一個新的信念節點 ──────
+// (擴充到 7 個節點,收斂網絡更密集)
+export const FOUNDATION_IDS = ["k1", "k4", "k10", "f3", "k6", "k9", "f1"];
 
 export const BELIEF_NODE = {
   id: "belief",
   label: "通膨黏性價格假說",
+  x: 0.15,
+  y: 0.05,
+  z: 1.9,
 };
 
 export const BELIEF_EDGES: DemoEdge[] = FOUNDATION_IDS.map((id) => ({
@@ -57,8 +61,11 @@ export const BELIEF_EDGES: DemoEdge[] = FOUNDATION_IDS.map((id) => ({
   target: BELIEF_NODE.id,
 }));
 
-// ── 行動：信念驅動出的下一步 ─────────────────────────────────
+// ── 行動:信念驅動出的下一步(座標放在 belief 更外側,象徵推理落地延伸出去)
 export const ACTION_NODE = {
   id: "action",
   label: "模擬升息衝擊路徑",
+  x: 0.4,
+  y: 0.6,
+  z: 2.75,
 };
