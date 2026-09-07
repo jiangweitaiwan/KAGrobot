@@ -123,7 +123,7 @@ export default function IntroPage() {
           <p className="intro-subhead">
             禪，是一顆包羅萬象的心。這個系統把龐雜、抽象的感知收攏成脈絡清晰的信念，
             再讓信念驅動出具體可執行的行動——從感受出發、經知識累積、至信念收斂，
-            最終落地成行動，是同一顆心智完整的因果鏈。往下滑，看看四個層次分別
+            最終圓滿成為行動，是同一顆心智完整的因果鏈。往下滑，看看四個層次分別
             對應 ZenMind 裡的哪一種心智活動。
           </p>
           <div className="intro-hero-actions">

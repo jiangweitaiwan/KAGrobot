@@ -27,6 +27,8 @@ import {
   makeFlatDotSprite,
   makeLabelSprite,
   makeBadgeSprite,
+  makeSquareDotSprite,
+  makeLightningNodeSprite,
   disposeObject3D,
   disposeGroupChildren,
   hashStr,
@@ -353,11 +355,11 @@ export default function IntroGlobalBrain({ mode, onRegionClick, width, height }:
     // ── 信念節點(球體上永遠存在)─────────────────────────────
     {
       const active = beliefActive || beliefSecondary;
-      const dot = makeFlatDotSprite(
-        active ? "#ff5fd1" : `#${BASE_COLOR.getHexString()}`,
-        active ? "#ffffff" : BASE_STROKE,
+      const dot = makeLightningNodeSprite(
+        actionActive ? "#ffcc4d" : `#${BASE_COLOR.getHexString()}`,
+        actionActive ? "#ffffff" : BASE_STROKE,
       );
-      const scale = beliefActive ? 0.17 : beliefSecondary ? 0.12 : 0.08;
+      const scale = actionActive ? 0.26 : 0.12;   // ← 閃電形狀視覺重心偏移，需要更大 scale 才夠醒目
       dot.scale.set(scale, scale, 1);
       dot.position.copy(beliefPos);
       dot.material.opacity = beliefActive ? 1 : beliefSecondary ? 0.85 : BASE_OPACITY;
@@ -382,11 +384,11 @@ export default function IntroGlobalBrain({ mode, onRegionClick, width, height }:
     //    並掛上閃電徽章 — 送入 MainAgent 的開關)────────────────
     {
       const rcVisible = mode === "belief" || mode === "action";
-      const dot = makeFlatDotSprite(
+      const dot = makeSquareDotSprite(
         rcVisible ? RC_COLOR_HEX : `#${BASE_COLOR.getHexString()}`,
         rcVisible ? "#ffffff" : BASE_STROKE,
       );
-      const scale = rcVisible ? 0.14 : 0.08;
+      const scale = rcVisible ? 0.22 : 0.11;
       dot.scale.set(scale, scale, 1);
       dot.position.copy(rcPos);
       dot.material.opacity = rcVisible ? 1 : BASE_OPACITY;
@@ -508,7 +510,7 @@ export default function IntroGlobalBrain({ mode, onRegionClick, width, height }:
         letterSpacing: "0.06em", fontFamily: "monospace",
         pointerEvents: "none", userSelect: "none",
       }}>
-        點擊球體上的區域,切換視角 · 點擊 RC 旁的閃電送入行動
+        點擊球體上的區域,切換視角 · ▲方塊=推薦方案 ▲大閃電=行動,可直接點擊聚焦
       </div>
     </div>
   );

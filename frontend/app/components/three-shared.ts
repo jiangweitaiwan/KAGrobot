@@ -151,6 +151,60 @@ export function makeFlatDotSprite(colorHex: string, strokeHex = "#e8eef8"): THRE
   return spr;
 }
 
+
+
+/** 方塊 sprite：RC（Resulting Concept）節點專用主體圖示，
+ *  與其他圓點節點做形狀區隔，讓使用者一眼認出「這是可執行方案」。 */
+export function makeSquareDotSprite(colorHex: string, strokeHex = "#e8eef8"): THREE.Sprite {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 32;
+  const ctx = canvas.getContext("2d")!;
+  ctx.fillStyle = colorHex;
+  roundRectPath(ctx, 5, 5, 22, 22, 4);
+  ctx.fill();
+  ctx.strokeStyle = strokeHex;
+  ctx.lineWidth = 2;
+  roundRectPath(ctx, 5, 5, 22, 22, 4);
+  ctx.stroke();
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.generateMipmaps = false;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+  const spr = new THREE.Sprite(mat);
+  spr.scale.set(0.05, 0.05, 1);
+  return spr;
+}
+
+/** 大閃電 sprite：ACTION 節點專用主體圖示。
+ *  與 makeBadgeSprite（RC 旁的小徽章、「送入 MainAgent」開關）不同——
+ *  這是節點本體，筆畫更粗、輪廓更飽滿，縮小到列表尺寸也能辨識。 */
+export function makeLightningNodeSprite(colorHex: string, strokeHex = "#fff3c4"): THREE.Sprite {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 32;
+  const ctx = canvas.getContext("2d")!;
+  ctx.fillStyle = colorHex;
+  ctx.beginPath();
+  ctx.moveTo(19, 2);
+  ctx.lineTo(8, 18);
+  ctx.lineTo(15, 18);
+  ctx.lineTo(12, 30);
+  ctx.lineTo(25, 12);
+  ctx.lineTo(17, 12);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = strokeHex;
+  ctx.lineWidth = 1.6;
+  ctx.stroke();
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.generateMipmaps = false;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+  const spr = new THREE.Sprite(mat);
+  spr.scale.set(0.05, 0.05, 1);
+  return spr;
+}
 /** 空心版 flat dot：只畫描邊、中心透空，供「尚未加入 Personal Brain 的
  *  foundation」使用，與實心版做出「已選 / 未選」的視覺區隔。 */
 export function makeHollowDotSprite(strokeHex: string, lineWidth = 3): THREE.Sprite {
