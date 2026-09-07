@@ -3,8 +3,8 @@ import type { Metadata } from "next";
 import { AuthProvider } from "./components/AuthProvider";
 
 export const metadata: Metadata = {
-  title: "KAGrobot Chat",
-  description: "Vercel frontend for KAGrobot backend",
+  title: "ZenMind",
+  description: "ZenMind — 從感知到行動的因果引擎",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

@@ -38,7 +38,7 @@ const TAB_COPY = [
   {
     headline: "感受:邊緣系統的原型直覺",
     mechanism: "邊緣系統(limbic system)是大腦掌管情緒與本能反應的區域,座落在演化上最古老的位置。神經科學研究指出,像杏仁核這類邊緣結構,會在還沒經過理性分析前就先對情境做出快速的情緒評估——這些直覺不是憑空出現的,而是長期生活經驗被大腦不斷內化、濃縮後留下的『總結性』判斷。",
-    example: "『稀缺性直覺』就是一個例子:看到限量商品或倒數計時,大部分人會不自覺地想搶購,這種反應早在意識到自己在『分析』之前就已經發生。在 GlobalBrain 裡,這類概念被放在最核心的 article 層。",
+    example: "『稀缺性直覺』就是一個例子:看到限量商品或倒數計時,大部分人會不自覺地想搶購,這種反應早在意識到自己在『分析』之前就已經發生。在 ZenMind 裡,這類概念被放在最核心的 article 層。",
     anatomy: "對應機制:article concept · 核心殼層(邊緣系統)",
   },
   {
@@ -115,12 +115,16 @@ export default function IntroPage() {
     <div className={`intro-root ${spaceGrotesk.variable} ${cormorant.variable}`}>
       <div className="intro-inner">
         <section className="intro-hero">
-          <span className="intro-eyebrow">KAG Robot</span>
-          <h1 className="intro-headline">一顆會思考的知識腦</h1>
+          <svg className="intro-enso" viewBox="0 0 400 400" aria-hidden="true">
+            <circle cx="200" cy="200" r="170" />
+          </svg>
+          <span className="intro-eyebrow">ZenMind</span>
+          <h1 className="intro-headline">ZenMind：建立感知到行動的因果關係</h1>
           <p className="intro-subhead">
-            這個系統把推理過程模擬成人腦的樣子：從最核心的直覺出發，
-            向外累積知識，讓線索收斂成信念，再由信念驅動具體的行動。
-            往下滑，看看四個層次分別對應 GlobalBrain 裡的哪一種激活型態。
+            禪，是一顆包羅萬象的心。這個系統把龐雜、抽象的感知收攏成脈絡清晰的信念，
+            再讓信念驅動出具體可執行的行動——從感受出發、經知識累積、至信念收斂，
+            最終落地成行動，是同一顆心智完整的因果鏈。往下滑，看看四個層次分別
+            對應 ZenMind 裡的哪一種心智活動。
           </p>
           <div className="intro-hero-actions">
             <Link href="/" className="intro-btn-primary">開始使用</Link>
@@ -140,7 +144,7 @@ export default function IntroPage() {
           <h2 className="intro-section-title">四個層次</h2>
           <p className="intro-section-lede">
             人腦從邊緣系統的直覺，到皮質的具體知識，再到神經網絡同步放電形成的信念，
-            最終驅動行動——GlobalBrain 的殼層結構與這個歷程一一對應。
+            最終驅動行動—— ZenMind 的殼層結構與這個歷程一一對應。
           </p>
 
           <TabCarousel

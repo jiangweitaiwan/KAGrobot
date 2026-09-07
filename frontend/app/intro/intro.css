@@ -49,6 +49,27 @@
   padding: 0 24px 96px;
 }
 
+/* 枯山水:同心圓紋,靜靜從畫面上方向外擴散,線條保持銳利(硬邊 1px)
+   而非模糊光暈,呼應「寧靜但銳利」的質感要求 */
+.intro-root::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image: repeating-radial-gradient(
+    circle at 50% 22%,
+    rgba(201, 162, 39, 0.05) 0px,
+    rgba(201, 162, 39, 0.05) 1px,
+    transparent 1px,
+    transparent 36px
+  );
+}
+
+.intro-root {
+  overflow-x: hidden; /* Ensō 允許略微出血,避免產生水平捲軸 */
+}
+
 /* ── 段落間的裝飾分隔 ─────────────────────────────────────── */
 .intro-ornament {
   text-align: center;
@@ -79,6 +100,27 @@
   gap: 20px;
   border-bottom: 1px solid var(--ic-gold-dim);
   padding-bottom: 28px;
+  position: relative;
+}
+
+.intro-enso {
+  position:  absolute;
+  top:       50%;
+  right:     -60px;
+  width:     clamp(320px, 42vw, 560px);
+  height:    clamp(320px, 42vw, 560px);
+  transform: translateY(-50%);
+  z-index:   -1;
+  pointer-events: none;
+}
+.intro-enso circle {
+  fill:              none;
+  stroke:            var(--ic-gold);
+  stroke-width:      2;
+  stroke-linecap:    round;
+  stroke-dasharray:  900 140; /* 留一道未合攏的筆觸缺口,是 Ensō 的核心特徵 */
+  stroke-dashoffset: 40;
+  opacity:           0.28;
 }
 
 .intro-eyebrow {

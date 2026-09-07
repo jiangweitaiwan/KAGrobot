@@ -51,9 +51,9 @@ export const FOUNDATION_IDS = ["k1", "k4", "k10", "f3", "k6", "k9", "f1"];
 export const BELIEF_NODE = {
   id: "belief",
   label: "通膨黏性價格假說",
-  x: 0.15,
+  x: 0.06,
   y: 0.05,
-  z: 1.9,
+  z: 0.34,
 };
 
 export const BELIEF_EDGES: DemoEdge[] = FOUNDATION_IDS.map((id) => ({
@@ -67,9 +67,9 @@ export const BELIEF_EDGES: DemoEdge[] = FOUNDATION_IDS.map((id) => ({
 export const RC_NODE = {
   id: "rc",
   label: "升息衝擊分析（RC）",
-  x: 0.28,
-  y: 0.34,
-  z: 2.3,
+  x: 0.11,
+  y: 0.17,
+  z: 0.40,
 };
 
 // ── 行動:閃電按下之後,信念透過 RC 驅動出的下一步
@@ -77,7 +77,7 @@ export const RC_NODE = {
 export const ACTION_NODE = {
   id: "action",
   label: "模擬升息衝擊路徑",
-  x: 0.4,
-  y: 0.6,
-  z: 2.75,
+  x: 0.16,
+  y: 0.30,
+  z: 0.46,
 };
