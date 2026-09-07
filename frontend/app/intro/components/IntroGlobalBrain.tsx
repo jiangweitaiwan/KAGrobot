@@ -355,11 +355,11 @@ export default function IntroGlobalBrain({ mode, onRegionClick, width, height }:
     // ── 信念節點(球體上永遠存在)─────────────────────────────
     {
       const active = beliefActive || beliefSecondary;
-      const dot = makeLightningNodeSprite(
+      const dot = makeSquareDotSprite(        // ← 原本 makeLightningNodeSprite
         actionActive ? "#ffcc4d" : `#${BASE_COLOR.getHexString()}`,
         actionActive ? "#ffffff" : BASE_STROKE,
       );
-      const scale = actionActive ? 0.26 : 0.12;   // ← 閃電形狀視覺重心偏移，需要更大 scale 才夠醒目
+      const scale = actionActive ? 0.2 : 0.12;   // 方形不需要閃電那種偏移補償，scale 略降
       dot.scale.set(scale, scale, 1);
       dot.position.copy(beliefPos);
       dot.material.opacity = beliefActive ? 1 : beliefSecondary ? 0.85 : BASE_OPACITY;
@@ -384,7 +384,7 @@ export default function IntroGlobalBrain({ mode, onRegionClick, width, height }:
     //    並掛上閃電徽章 — 送入 MainAgent 的開關)────────────────
     {
       const rcVisible = mode === "belief" || mode === "action";
-      const dot = makeSquareDotSprite(
+      const dot = makeFlatDotSprite(          // ← 原本 makeSquareDotSprite
         rcVisible ? RC_COLOR_HEX : `#${BASE_COLOR.getHexString()}`,
         rcVisible ? "#ffffff" : BASE_STROKE,
       );
@@ -425,11 +425,11 @@ export default function IntroGlobalBrain({ mode, onRegionClick, width, height }:
 
     // ── 行動節點(球體上永遠存在)─────────────────────────────
     {
-      const dot = makeFlatDotSprite(
+      const dot = makeLightningNodeSprite(    // ← 原本 makeFlatDotSprite
         actionActive ? "#ffcc4d" : `#${BASE_COLOR.getHexString()}`,
         actionActive ? "#ffffff" : BASE_STROKE,
       );
-      const scale = actionActive ? 0.14 : 0.075;
+      const scale = actionActive ? 0.26 : 0.14;   // ← 閃電形狀視覺重心偏移，需要更大 scale 才夠醒目
       dot.scale.set(scale, scale, 1);
       dot.position.copy(actionPos);
       dot.material.opacity = actionActive ? 1 : BASE_OPACITY;
