@@ -61,7 +61,19 @@ export const BELIEF_EDGES: DemoEdge[] = FOUNDATION_IDS.map((id) => ({
   target: BELIEF_NODE.id,
 }));
 
-// ── 行動:信念驅動出的下一步(座標放在 belief 更外側,象徵推理落地延伸出去)
+// ── RC（Resulting Concept）:foundation tree 匯聚出的具體、可執行
+// 行動方案。座落在信念與行動之間 —— 它是信念的「下一步」，但要等
+// 使用者按下它旁邊的閃電（送入 MainAgent 的開關）才真正變成行動。
+export const RC_NODE = {
+  id: "rc",
+  label: "升息衝擊分析（RC）",
+  x: 0.28,
+  y: 0.34,
+  z: 2.3,
+};
+
+// ── 行動:閃電按下之後,信念透過 RC 驅動出的下一步
+// (座標放在 belief/RC 更外側,象徵推理落地延伸出去)
 export const ACTION_NODE = {
   id: "action",
   label: "模擬升息衝擊路徑",

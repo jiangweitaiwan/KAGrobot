@@ -3,23 +3,21 @@
 /**
  * IntroGlobalBrain.tsx — /intro 頁面的簡化版 3D 球體(單一場景版)。
  *
- * 與前一版的差異:
- *   - 不再有獨立的 IntroHourglass 場景。belief / action 現在是這顆球體
- *     座標系裡兩個真實存在的節點(見 demoData.ts 的 x/y/z),四個分頁
- *     (感受/知識/信念/行動)共用同一顆持續自轉的球體,差別只在於
- *     「目前 highlight 哪一群」。
- *   - 所有節點永遠以統一的「基底色」正常顯示(不再把非選中節點壓到
- *     快看不見),球體任何時刻都看得出是一個完整、有網絡感的結構;
- *     選中的那一群才升級成該分頁的 accent 色 + glow + label。
- *   - 新增可點擊:點擊任一群節點(不論目前是否 highlight)都能透過
- *     onRegionClick 通知外部切換分頁,採用與正式系統
- *     GlobalBrainExplorer/HourglassViz 一致的「螢幕空間最近節點」
- *     pick 手法。純點擊,不做 hover 提示。
- *   - 切換分頁(不論是點擊或 autoplay 觸發)時,球體自轉會短暫暫停
- *     ~2.2 秒讓使用者好好看清楚,之後恢復緩慢自轉。
- *   - foundation → belief 的收斂線,以及 belief → action 的連結線,
- *     改用 CatmullRomCurve3 產生的「曲折路徑」,而不是直線,視覺上
- *     更像神經傳導路徑。
+ * ── 本次改版重點 ──────────────────────────────────────────────
+ *   1. 全面放大節點/光暈/字級,搭配外部改為全寬長方形視窗,畫面更飽滿,
+ *      同時把 camera 拉近、放大點擊熱區(PICK_PIXEL_RADIUS),避免節點
+ *      在較大尺寸下反而難點到。
+ *   2. 新增 RC（Resulting Concept）節點:foundation tree 收斂出的信念
+ *      (belief)再往下一步,是「可被執行」的具體方案,座落在 belief 與
+ *      action 之間。RC 節點右上角掛一個閃電徽章(視覺語言沿用正式系統
+ *      HourglassViz 的 makeBadgeSprite),代表「送入 MainAgent」的開關:
+ *        - 點擊 RC 節點本體 → 跳回「信念」分頁(回頭看它是哪個信念收斂出來的)
+ *        - 點擊閃電徽章     → 跳到「行動」分頁,並沿 belief→RC→action
+ *                              的路徑播放一次高亮的「送出脈衝」動畫,
+ *                              動畫結束後場景維持一條較暗的常駐脈衝,
+ *                              象徵「這條路徑已啟用」。
+ *
+ * 其餘結構(四分頁球體、可點擊拾取、pause-then-resume 自轉)沿用前一版。
  */
 
 import { useEffect, useMemo, useRef } from "react";
@@ -28,6 +26,7 @@ import {
   makeGlowSprite,
   makeFlatDotSprite,
   makeLabelSprite,
+  makeBadgeSprite,
   disposeObject3D,
   disposeGroupChildren,
   hashStr,
@@ -37,6 +36,7 @@ import {
   ALL_SPHERE_NODES,
   FOUNDATION_IDS,
   BELIEF_NODE,
+  RC_NODE,
   ACTION_NODE,
   type DemoNode,
 } from "../demoData";
@@ -54,7 +54,7 @@ type PickTarget = { group: IntroBrainMode; pos: THREE.Vector3 };
 
 type Pulse = { curve: THREE.CatmullRomCurve3; dot: THREE.Sprite; phase: number };
 
-const WORLD_SCALE = 2.4;
+const WORLD_SCALE = 2.65;
 
 // ── 基底色:所有節點預設用這個,亮度足以看出整顆球體的形狀 ──────
 const BASE_COLOR = new THREE.Color(0x6b7aa0);
@@ -64,9 +64,13 @@ const BASE_STROKE = "#8a97b8";
 const FEEL_COLOR = new THREE.Color(0x00e8ff);
 const KNOWLEDGE_COLOR = new THREE.Color(0xff9a52);
 const BELIEF_COLOR = new THREE.Color(0xff5fd1);
+const RC_COLOR_HEX = "#f0a83c";
 const ACTION_COLOR = new THREE.Color(0xffcc4d);
 
-const PICK_PIXEL_RADIUS = 26;
+// RC 節點右上角閃電徽章相對於節點本體的世界座標偏移量
+const RC_BADGE_OFFSET = 0.2;
+
+const PICK_PIXEL_RADIUS = 32;
 const ROTATE_SPEED = 0.0012;
 const ROTATE_PAUSE_MS = 2200;
 
@@ -74,23 +78,24 @@ function toWorld(n: { x: number; y: number; z: number }): THREE.Vector3 {
   return new THREE.Vector3(n.x * WORLD_SCALE, n.y * WORLD_SCALE, n.z * WORLD_SCALE);
 }
 
-/** 產生一條有兩個彎折點的曲線,取代直線,視覺上更像神經傳導路徑。
- *  bend 的方向與幅度由 seed 決定,同一對節點每次 render 結果一致。 */
-function buildWindingCurve(from: THREE.Vector3, to: THREE.Vector3, seed: number): THREE.CatmullRomCurve3 {
+/** 依序連接一串節點,每一段都插入一個決定性偏移的彎折點,取代直線,
+ *  整體組成一條 CatmullRomCurve3。同一組節點/seed 每次 render 結果一致。 */
+function buildWindingPath(points: THREE.Vector3[], seed: number): THREE.CatmullRomCurve3 {
   const rng = mulberry32(seed);
-  const dir = to.clone().sub(from);
-  const dist = dir.length();
-  dir.normalize();
-  const arbitrary = Math.abs(dir.y) > 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
-  const perp = new THREE.Vector3().crossVectors(dir, arbitrary).normalize();
-
-  const bend1 = (rng() - 0.5) * dist * 0.55;
-  const bend2 = (rng() - 0.5) * dist * 0.55;
-
-  const p1 = from.clone().lerp(to, 0.33).add(perp.clone().multiplyScalar(bend1));
-  const p2 = from.clone().lerp(to, 0.67).add(perp.clone().multiplyScalar(bend2));
-
-  return new THREE.CatmullRomCurve3([from, p1, p2, to]);
+  const all: THREE.Vector3[] = [points[0]];
+  for (let i = 0; i < points.length - 1; i++) {
+    const from = points[i];
+    const to = points[i + 1];
+    const dir = to.clone().sub(from);
+    const dist = dir.length();
+    dir.normalize();
+    const arbitrary = Math.abs(dir.y) > 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+    const perp = new THREE.Vector3().crossVectors(dir, arbitrary).normalize();
+    const bend = (rng() - 0.5) * dist * 0.5;
+    const mid = from.clone().lerp(to, 0.5).add(perp.clone().multiplyScalar(bend));
+    all.push(mid, to);
+  }
+  return new THREE.CatmullRomCurve3(all);
 }
 
 export default function IntroGlobalBrain({ mode, onRegionClick, width, height }: Props) {
@@ -102,6 +107,7 @@ export default function IntroGlobalBrain({ mode, onRegionClick, width, height }:
   const contentGroupRef = useRef<THREE.Group | null>(null);
   const breathingRef = useRef<THREE.Sprite[]>([]);
   const pulseRef = useRef<Pulse | null>(null);
+  const burstRef = useRef<Pulse | null>(null);
   const pauseUntilRef = useRef(0);
   const animFrameRef = useRef<number>(0);
   const widthRef = useRef(width);
@@ -120,6 +126,14 @@ export default function IntroGlobalBrain({ mode, onRegionClick, width, height }:
     }));
     arr.push({ group: "belief", pos: toWorld(BELIEF_NODE) });
     arr.push({ group: "action", pos: toWorld(ACTION_NODE) });
+
+    // RC 節點本體 → 點了跳回「信念」;RC 旁的閃電徽章 → 點了跳到「行動」
+    const rcWorld = toWorld(RC_NODE);
+    arr.push({ group: "belief", pos: rcWorld });
+    arr.push({
+      group: "action",
+      pos: rcWorld.clone().add(new THREE.Vector3(RC_BADGE_OFFSET, RC_BADGE_OFFSET, 0)),
+    });
     return arr;
   }, []);
   useEffect(() => { pickTargetsRef.current = pickTargets; }, [pickTargets]);
@@ -138,8 +152,8 @@ export default function IntroGlobalBrain({ mode, onRegionClick, width, height }:
     const scene = new THREE.Scene();
     sceneRef.current = scene;
 
-    const camera = new THREE.PerspectiveCamera(50, widthRef.current / Math.max(heightRef.current, 1), 0.01, 100);
-    camera.position.set(0, 0.2, 4.4);
+    const camera = new THREE.PerspectiveCamera(52, widthRef.current / Math.max(heightRef.current, 1), 0.01, 100);
+    camera.position.set(0, 0.15, 3.9);
     cameraRef.current = camera;
 
     const rotGroup = new THREE.Group();
@@ -201,11 +215,24 @@ export default function IntroGlobalBrain({ mode, onRegionClick, width, height }:
         (spr.material as THREE.SpriteMaterial).opacity = pulse;
       });
 
+      // 常駐環境脈衝(慢速循環,象徵這條路徑目前「已啟用」)
       if (pulseRef.current) {
         const p = pulseRef.current;
         p.phase = (p.phase + 0.006) % 1;
         p.dot.position.copy(p.curve.getPointAt(p.phase));
         (p.dot.material as THREE.SpriteMaterial).opacity = 1 - Math.abs(p.phase - 0.5) * 1.2;
+      }
+
+      // 送出脈衝(一次性、較亮較快,象徵閃電剛被按下的瞬間)
+      if (burstRef.current) {
+        const b = burstRef.current;
+        if (b.phase < 1) {
+          b.phase = Math.min(1, b.phase + 0.022);
+          b.dot.position.copy(b.curve.getPointAt(b.phase));
+          (b.dot.material as THREE.SpriteMaterial).opacity = 0.35 + 0.65 * Math.sin(b.phase * Math.PI);
+        } else {
+          (b.dot.material as THREE.SpriteMaterial).opacity *= 0.9;
+        }
       }
 
       renderer.render(scene, camera);
@@ -252,6 +279,7 @@ export default function IntroGlobalBrain({ mode, onRegionClick, width, height }:
       contentGroupRef.current = null;
       breathingRef.current = [];
       pulseRef.current = null;
+      burstRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -275,6 +303,7 @@ export default function IntroGlobalBrain({ mode, onRegionClick, width, height }:
     contentGroup.clear();
     breathingRef.current = [];
     pulseRef.current = null;
+    burstRef.current = null;
     pauseUntilRef.current = performance.now() + ROTATE_PAUSE_MS;
 
     const nodeById = new Map<string, DemoNode>(ALL_SPHERE_NODES.map((n) => [n.id, n]));
@@ -295,7 +324,7 @@ export default function IntroGlobalBrain({ mode, onRegionClick, width, height }:
       const pos = toWorld(n);
       const hex = `#${color.getHexString()}`;
       const dot = makeFlatDotSprite(hex, active ? "#ffffff" : BASE_STROKE);
-      const scale = active ? 0.09 : 0.055;
+      const scale = active ? 0.13 : 0.075;
       dot.scale.set(scale, scale, 1);
       dot.position.copy(pos);
       dot.material.opacity = active ? 1 : BASE_OPACITY;
@@ -304,17 +333,18 @@ export default function IntroGlobalBrain({ mode, onRegionClick, width, height }:
       if (active) {
         const glow = makeGlowSprite(hex);
         glow.position.copy(pos);
-        glow.scale.set(0.32, 0.32, 1);
+        glow.scale.set(0.42, 0.42, 1);
         contentGroup.add(glow);
 
         const label = makeLabelSprite(n.label, hex);
-        label.position.set(pos.x, pos.y + 0.18, pos.z);
-        label.scale.set(0.5, 0.11, 1);
+        label.position.set(pos.x, pos.y + 0.2, pos.z);
+        label.scale.set(0.56, 0.12, 1);
         contentGroup.add(label);
       }
     });
 
     const beliefPos = toWorld(BELIEF_NODE);
+    const rcPos = toWorld(RC_NODE);
     const actionPos = toWorld(ACTION_NODE);
     const beliefActive = mode === "belief";
     const beliefSecondary = mode === "action";
@@ -327,7 +357,7 @@ export default function IntroGlobalBrain({ mode, onRegionClick, width, height }:
         active ? "#ff5fd1" : `#${BASE_COLOR.getHexString()}`,
         active ? "#ffffff" : BASE_STROKE,
       );
-      const scale = beliefActive ? 0.13 : beliefSecondary ? 0.09 : 0.06;
+      const scale = beliefActive ? 0.17 : beliefSecondary ? 0.12 : 0.08;
       dot.scale.set(scale, scale, 1);
       dot.position.copy(beliefPos);
       dot.material.opacity = beliefActive ? 1 : beliefSecondary ? 0.85 : BASE_OPACITY;
@@ -336,15 +366,58 @@ export default function IntroGlobalBrain({ mode, onRegionClick, width, height }:
       if (active) {
         const glow = makeGlowSprite("#ff5fd1");
         glow.position.copy(beliefPos);
-        const glowScale = beliefActive ? 0.7 : 0.45;
+        const glowScale = beliefActive ? 0.85 : 0.55;
         glow.scale.set(glowScale, glowScale, 1);
         contentGroup.add(glow);
         breathingRef.current.push(glow);
 
         const label = makeLabelSprite(BELIEF_NODE.label, "#ffd8f2");
-        label.position.set(beliefPos.x, beliefPos.y + (beliefActive ? 0.22 : 0.18), beliefPos.z);
-        label.scale.set(0.58, 0.13, 1);
+        label.position.set(beliefPos.x, beliefPos.y + (beliefActive ? 0.24 : 0.2), beliefPos.z);
+        label.scale.set(0.62, 0.13, 1);
         contentGroup.add(label);
+      }
+    }
+
+    // ── RC 節點(球體上永遠存在;belief/action 模式時展開為主要節點,
+    //    並掛上閃電徽章 — 送入 MainAgent 的開關)────────────────
+    {
+      const rcVisible = mode === "belief" || mode === "action";
+      const dot = makeFlatDotSprite(
+        rcVisible ? RC_COLOR_HEX : `#${BASE_COLOR.getHexString()}`,
+        rcVisible ? "#ffffff" : BASE_STROKE,
+      );
+      const scale = rcVisible ? 0.14 : 0.08;
+      dot.scale.set(scale, scale, 1);
+      dot.position.copy(rcPos);
+      dot.material.opacity = rcVisible ? 1 : BASE_OPACITY;
+      contentGroup.add(dot);
+
+      if (rcVisible) {
+        const glow = makeGlowSprite(RC_COLOR_HEX);
+        glow.position.copy(rcPos);
+        glow.scale.set(0.55, 0.55, 1);
+        contentGroup.add(glow);
+        breathingRef.current.push(glow);
+
+        const label = makeLabelSprite(RC_NODE.label, "#ffd9a0");
+        label.position.set(rcPos.x, rcPos.y + 0.22, rcPos.z);
+        label.scale.set(0.66, 0.13, 1);
+        contentGroup.add(label);
+
+        // 閃電:送入 MainAgent 的開關。action 模式時代表「已按下」。
+        const firing = mode === "action";
+        const badge = makeBadgeSprite(firing ? "#ffffff" : RC_COLOR_HEX, firing ? RC_COLOR_HEX : "#fff3c4");
+        badge.scale.set(0.14, 0.14, 1);
+        badge.position.set(rcPos.x + RC_BADGE_OFFSET, rcPos.y + RC_BADGE_OFFSET, rcPos.z);
+        contentGroup.add(badge);
+
+        if (firing) {
+          const bglow = makeGlowSprite("#ffcc4d");
+          bglow.position.copy(badge.position);
+          bglow.scale.set(0.42, 0.42, 1);
+          contentGroup.add(bglow);
+          breathingRef.current.push(bglow);
+        }
       }
     }
 
@@ -354,7 +427,7 @@ export default function IntroGlobalBrain({ mode, onRegionClick, width, height }:
         actionActive ? "#ffcc4d" : `#${BASE_COLOR.getHexString()}`,
         actionActive ? "#ffffff" : BASE_STROKE,
       );
-      const scale = actionActive ? 0.1 : 0.055;
+      const scale = actionActive ? 0.14 : 0.075;
       dot.scale.set(scale, scale, 1);
       dot.position.copy(actionPos);
       dot.material.opacity = actionActive ? 1 : BASE_OPACITY;
@@ -363,23 +436,24 @@ export default function IntroGlobalBrain({ mode, onRegionClick, width, height }:
       if (actionActive) {
         const glow = makeGlowSprite("#ffcc4d");
         glow.position.copy(actionPos);
-        glow.scale.set(0.45, 0.45, 1);
+        glow.scale.set(0.55, 0.55, 1);
         contentGroup.add(glow);
         breathingRef.current.push(glow);
 
         const label = makeLabelSprite(ACTION_NODE.label, "#fff3c4");
-        label.position.set(actionPos.x, actionPos.y + 0.2, actionPos.z);
-        label.scale.set(0.58, 0.13, 1);
+        label.position.set(actionPos.x, actionPos.y + 0.22, actionPos.z);
+        label.scale.set(0.62, 0.13, 1);
         contentGroup.add(label);
       }
     }
 
-    // ── 信念模式:foundation → belief 的曲折收斂線 ────────────
+    // ── 信念模式:foundation → belief 的曲折收斂線,
+    //    以及 belief → RC 的預告連結(虛線,尚未送出)────────────
     if (mode === "belief") {
       FOUNDATION_IDS.forEach((id) => {
         const n = nodeById.get(id);
         if (!n) return;
-        const curve = buildWindingCurve(toWorld(n), beliefPos, hashStr(id));
+        const curve = buildWindingPath([toWorld(n), beliefPos], hashStr(id));
         const geo = new THREE.BufferGeometry().setFromPoints(curve.getPoints(30));
         const mat = new THREE.LineDashedMaterial({
           color: 0xff5fd1, dashSize: 0.05, gapSize: 0.04, transparent: true, opacity: 0.5,
@@ -388,21 +462,37 @@ export default function IntroGlobalBrain({ mode, onRegionClick, width, height }:
         line.computeLineDistances();
         contentGroup.add(line);
       });
+
+      const previewPath = buildWindingPath([beliefPos, rcPos], hashStr("belief-rc-preview"));
+      const previewGeo = new THREE.BufferGeometry().setFromPoints(previewPath.getPoints(24));
+      const previewMat = new THREE.LineDashedMaterial({
+        color: 0xf0a83c, dashSize: 0.05, gapSize: 0.05, transparent: true, opacity: 0.45,
+      });
+      const previewLine = new THREE.Line(previewGeo, previewMat);
+      previewLine.computeLineDistances();
+      contentGroup.add(previewLine);
     }
 
-    // ── 行動模式:belief → action 的曲折連結線 + 接力光點 ────
+    // ── 行動模式:belief → RC → action 的曲折路徑 + 送出脈衝 ────
     if (mode === "action") {
-      const curve = buildWindingCurve(beliefPos, actionPos, hashStr("belief-action"));
-      const geo = new THREE.BufferGeometry().setFromPoints(curve.getPoints(30));
+      const sendPath = buildWindingPath([beliefPos, rcPos, actionPos], hashStr("belief-rc-action"));
+      const geo = new THREE.BufferGeometry().setFromPoints(sendPath.getPoints(48));
       contentGroup.add(new THREE.Line(
         geo,
         new THREE.LineBasicMaterial({ color: 0xffcc4d, transparent: true, opacity: 0.75 }),
       ));
 
-      const pulseDot = makeFlatDotSprite("#ffcc4d");
-      pulseDot.scale.set(0.05, 0.05, 1);
-      contentGroup.add(pulseDot);
-      pulseRef.current = { curve, dot: pulseDot, phase: 0 };
+      // 常駐環境光點(慢速循環,象徵這條路徑「已啟用」)
+      const ambientDot = makeFlatDotSprite("#ffcc4d");
+      ambientDot.scale.set(0.06, 0.06, 1);
+      contentGroup.add(ambientDot);
+      pulseRef.current = { curve: sendPath, dot: ambientDot, phase: 0 };
+
+      // 送出脈衝:一次性、更亮更快,象徵閃電剛被按下的瞬間
+      const burstDot = makeGlowSprite("#fff3c4");
+      burstDot.scale.set(0.3, 0.3, 1);
+      contentGroup.add(burstDot);
+      burstRef.current = { curve: sendPath, dot: burstDot, phase: 0 };
     }
   }, [mode]);
 
@@ -418,7 +508,7 @@ export default function IntroGlobalBrain({ mode, onRegionClick, width, height }:
         letterSpacing: "0.06em", fontFamily: "monospace",
         pointerEvents: "none", userSelect: "none",
       }}>
-        點擊球體上的區域,切換視角
+        點擊球體上的區域,切換視角 · 點擊 RC 旁的閃電送入行動
       </div>
     </div>
   );

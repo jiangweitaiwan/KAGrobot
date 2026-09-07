@@ -2,37 +2,90 @@
    刻意用 .intro-root 做 position:fixed 的獨立捲動容器，避免被
    globals.css 裡 `html, body { overflow: hidden }` 與
    `main { height: 100vh; overflow: hidden }` 影響（那兩條規則是為
-   既有的儀表板頁面設計的，這裡不套用同一顆 <main>）。 */
+   既有的儀表板頁面設計的，這裡不套用同一顆 <main>）。
+
+   ── 本次改版:古典人文風格 ──────────────────────────────────
+   從賽博科技色調(冷藍黑 + 螢光藍/粉)改為古籍書房調性:暖胡桃木/墨色
+   底、做舊金與暗紅酒色點綴。3D 球體內部節點顏色刻意保留科技感,
+   形成「古典畫框 + 會發光思考的科技內核」的對比張力,呼應「一顆會
+   思考的知識腦」——用現代智能重新叩問古老的人文問題。 */
 
 .intro-root {
+  --ic-bg-0: #0c0906;
+  --ic-bg-1: #1d160e;
+  --ic-ink: #ece3d2;
+  --ic-muted: #a89a80;
+  --ic-gold: #c9a227;
+  --ic-gold-dim: rgba(201, 162, 39, 0.32);
+  --ic-wine: #8a3a3a;
+
   position: fixed;
   inset: 0;
   overflow-y: auto;
-  background: radial-gradient(ellipse at 50% 20%, #10131f 0%, #06080f 60%);
-  color: #e8ddd0;
+  background:
+    radial-gradient(ellipse at 50% 0%, rgba(201, 162, 39, 0.07), transparent 55%),
+    radial-gradient(ellipse at 50% 105%, rgba(138, 58, 58, 0.12), transparent 60%),
+    linear-gradient(180deg, var(--ic-bg-1) 0%, var(--ic-bg-0) 70%);
+  color: var(--ic-ink);
+}
+
+/* 極細紙紋/雜訊疊層,營造做舊感,透明度很低不影響閱讀 */
+.intro-root::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.05;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='140' height='140'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
 }
 
 .intro-inner {
+  position: relative;
+  z-index: 1;
   max-width: 1160px;
   margin: 0 auto;
   padding: 0 24px 96px;
 }
 
+/* ── 段落間的裝飾分隔 ─────────────────────────────────────── */
+.intro-ornament {
+  text-align: center;
+  color: var(--ic-gold);
+  opacity: 0.55;
+  font-size: 0.9rem;
+  letter-spacing: 0.3em;
+  padding: 4px 0;
+}
+.intro-ornament::before,
+.intro-ornament::after {
+  content: "";
+  display: inline-block;
+  width: 64px;
+  height: 1px;
+  background: var(--ic-gold-dim);
+  vertical-align: middle;
+  margin: 0 14px;
+}
+
 /* ── Hero ─────────────────────────────────────────────────── */
 
 .intro-hero {
-  min-height: 78vh;
+  min-height: 72vh;
   display: flex;
   flex-direction: column;
   justify-content: center;
   gap: 20px;
-  border-bottom: 1px solid rgba(232, 238, 248, 0.08);
+  border-bottom: 1px solid var(--ic-gold-dim);
+  padding-bottom: 28px;
 }
 
 .intro-eyebrow {
   font-size: 0.72rem;
-  color: #7a8a9a;
-  letter-spacing: 0.02em;
+  color: var(--ic-muted);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
 }
 
 .intro-headline {
@@ -41,14 +94,14 @@
   font-size: clamp(2.1rem, 5vw, 3.4rem);
   line-height: 1.15;
   max-width: 14ch;
-  color: #f2ede2;
+  color: var(--ic-ink);
 }
 
 .intro-subhead {
   font-size: 1rem;
   line-height: 1.7;
   max-width: 58ch;
-  color: #9aa8b8;
+  color: var(--ic-muted);
 }
 
 .intro-hero-actions {
@@ -58,145 +111,180 @@
 }
 
 .intro-btn-primary {
-  border: 1px solid #ffcc4d;
-  background: rgba(255, 204, 77, 0.12);
-  color: #ffcc4d;
-  border-radius: 8px;
+  border: 1px solid var(--ic-gold);
+  background: rgba(201, 162, 39, 0.12);
+  color: var(--ic-gold);
+  border-radius: 4px;
   padding: 10px 18px;
   font-size: 0.85rem;
   font-family: "IBM Plex Mono", monospace;
   cursor: pointer;
   transition: background 0.15s;
 }
-.intro-btn-primary:hover { background: rgba(255, 204, 77, 0.22); }
+.intro-btn-primary:hover { background: rgba(201, 162, 39, 0.22); }
 
 .intro-btn-secondary {
-  border: 1px solid rgba(232, 238, 248, 0.18);
+  border: 1px solid var(--ic-gold-dim);
   background: transparent;
-  color: #c8d8e8;
-  border-radius: 8px;
+  color: var(--ic-ink);
+  border-radius: 4px;
   padding: 10px 18px;
   font-size: 0.85rem;
   font-family: "IBM Plex Mono", monospace;
   cursor: pointer;
 }
-.intro-btn-secondary:hover { border-color: rgba(232, 238, 248, 0.4); }
+.intro-btn-secondary:hover { border-color: var(--ic-gold); }
 
-/* ── Stage (tabs + 3D visual) ─────────────────────────────── */
+/* ── Stage(視覺置頂全寬 + 小方形分頁鈕 + 說明文字)────────────── */
 
 .intro-stage-section {
-  padding: 72px 0 56px;
-  border-bottom: 1px solid rgba(232, 238, 248, 0.08);
+  padding: 60px 0 48px;
+  border-bottom: 1px solid var(--ic-gold-dim);
 }
 
 .intro-section-title {
   font-family: var(--font-display), "IBM Plex Mono", monospace;
   font-size: 1.5rem;
   font-weight: 600;
-  color: #f2ede2;
+  color: var(--ic-ink);
   margin: 0 0 8px;
 }
 
 .intro-section-lede {
-  color: #7a8a9a;
+  color: var(--ic-muted);
   font-size: 0.9rem;
   max-width: 62ch;
   line-height: 1.6;
-  margin: 0 0 40px;
+  margin: 0 0 32px;
 }
 
-.intro-tab-carousel {
-  display: grid;
-  grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); /* 原本 1.3fr,加大主視覺比例 */
-  gap: 36px;
-  align-items: stretch;
+.intro-tab-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
 }
 
+/* 視覺外框:仿古畫框,內部維持深色科技感做對比 */
 .intro-stage-visual {
   position: relative;
-  aspect-ratio: 1 / 1;
-  max-height: 520px; /* 原本 480px */
-  border-radius: 20px;
-  border: 1px solid rgba(232, 238, 248, 0.08);
-  background: rgba(13, 18, 32, 0.4);
+  width: 100%;
+  height: clamp(360px, 60vh, 640px);
+  border-radius: 10px;
+  border: 1px solid rgba(201, 162, 39, 0.4);
+  background: linear-gradient(160deg, #171009, #08050300);
+  background-color: #0a0704;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.6) inset,
+    0 20px 50px rgba(0, 0, 0, 0.55);
   overflow: hidden;
 }
+.intro-stage-visual::after {
+  content: "";
+  position: absolute;
+  inset: 8px;
+  border: 1px solid rgba(201, 162, 39, 0.16);
+  border-radius: 6px;
+  pointer-events: none;
+}
+.intro-stage-visual-inner {
+  position: absolute;
+  inset: 0;
+}
 
-/* 新增:舉例卡 */
+/* 四個小方形分頁鈕,置中放在視覺下方 */
+.intro-tab-list {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.intro-tab-square {
+  width: 46px;
+  height: 46px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-serif), "Noto Serif TC", serif;
+  font-size: 1.15rem;
+  border-radius: 6px;
+  border: 1px solid var(--ic-gold-dim);
+  background: rgba(29, 22, 14, 0.6);
+  color: var(--ic-muted);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, box-shadow 0.15s;
+}
+.intro-tab-square.active {
+  background: rgba(201, 162, 39, 0.1);
+}
+
+.intro-stage-copy {
+  width: 100%;
+  max-width: 62ch;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.intro-stage-copy-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.intro-tab-headline {
+  font-family: var(--font-display), "IBM Plex Mono", monospace;
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--ic-ink);
+  margin: 0;
+  text-align: center;
+}
+
+.intro-tab-body {
+  font-size: 0.92rem;
+  line-height: 1.8;
+  color: var(--ic-muted);
+  margin: 0;
+}
+
 .intro-tab-example {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 12px 14px;
-  border-radius: 10px;
-  border: 1px solid rgba(232, 238, 248, 0.12);
-  background: rgba(127, 119, 221, 0.06);
+  padding: 14px 16px;
+  border-radius: 4px;
+  border-left: 2px solid var(--ic-gold);
+  background: rgba(201, 162, 39, 0.05);
 }
 .intro-tab-example-label {
   font-size: 0.62rem;
   letter-spacing: 0.16em;
   text-transform: uppercase;
-  color: #7f77dd;
+  color: var(--ic-gold);
 }
 .intro-tab-example p {
   margin: 0;
-  font-size: 0.85rem;
+  font-family: var(--font-serif), "Noto Serif TC", serif;
+  font-style: italic;
+  font-size: 1.05rem;
   line-height: 1.7;
-  color: #c8d8e8;
-}
-
-.intro-stage-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-  min-width: 0;
-}
-
-.intro-tab-list {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.intro-tab-btn {
-  font-family: "IBM Plex Mono", monospace;
-  font-size: 0.82rem;
-  padding: 7px 16px;
-  border-radius: 20px;
-  border: 1px solid rgba(232, 238, 248, 0.18);
-  background: transparent;
-  color: #7a8a9a;
-  cursor: pointer;
-  transition: border-color 0.15s, color 0.15s;
-}
-.intro-tab-btn.active { background: rgba(232, 238, 248, 0.06); }
-
-.intro-tab-headline {
-  font-family: var(--font-display), "IBM Plex Mono", monospace;
-  font-size: 1.3rem;
-  font-weight: 600;
-  color: #f2ede2;
-  margin: 0;
-}
-
-.intro-tab-body {
-  font-size: 0.92rem;
-  line-height: 1.75;
-  color: #9aa8b8;
-  margin: 0;
+  color: var(--ic-ink);
 }
 
 .intro-tab-anatomy {
-  font-size: 0.76rem;
-  color: #5c6a7a;
-  border-left: 2px solid rgba(232, 238, 248, 0.15);
+  font-family: var(--font-serif), "Noto Serif TC", serif;
+  font-size: 0.82rem;
+  color: var(--ic-muted);
+  border-left: 2px solid var(--ic-gold-dim);
   padding-left: 10px;
   line-height: 1.6;
 }
 
 /* ── Pipeline strip ───────────────────────────────────────── */
 
-.intro-pipeline-section { padding: 56px 0 40px; }
+.intro-pipeline-section { padding: 48px 0 40px; }
 
 .intro-pipeline {
   display: flex;
@@ -217,9 +305,9 @@
   gap: 4px;
   min-width: 148px;
   padding: 14px 16px;
-  border: 1px solid rgba(232, 238, 248, 0.14);
-  border-radius: 12px;
-  background: rgba(13, 18, 32, 0.5);
+  border: 1px solid var(--ic-gold-dim);
+  border-radius: 6px;
+  background: rgba(29, 22, 14, 0.55);
   color: inherit;
   cursor: pointer;
   text-align: left;
@@ -227,26 +315,25 @@
   transition: border-color 0.15s, background 0.15s;
 }
 .intro-pipeline-node:hover {
-  border-color: rgba(232, 238, 248, 0.35);
-  background: rgba(13, 18, 32, 0.8);
+  border-color: var(--ic-gold);
+  background: rgba(29, 22, 14, 0.85);
 }
 
-.intro-pipeline-title { font-size: 0.8rem; color: #e8ddd0; }
-.intro-pipeline-narrative { font-size: 0.68rem; color: #7f77dd; letter-spacing: 0.04em; }
+.intro-pipeline-title { font-size: 0.8rem; color: var(--ic-ink); }
+.intro-pipeline-narrative { font-size: 0.68rem; color: var(--ic-gold); letter-spacing: 0.04em; }
 
 .intro-pipeline-rule {
   width: 28px;
   height: 1px;
-  background: rgba(232, 238, 248, 0.2);
+  background: var(--ic-gold-dim);
   flex-shrink: 0;
 }
 
 /* ── Responsive ───────────────────────────────────────────── */
 
 @media (max-width: 860px) {
-  .intro-tab-carousel { grid-template-columns: 1fr; }
-  .intro-stage-visual { max-height: 340px; }
-  .intro-hero { min-height: 60vh; }
+  .intro-stage-visual { height: clamp(280px, 48vh, 420px); }
+  .intro-hero { min-height: 56vh; }
 }
 
 @media (prefers-reduced-motion: reduce) {

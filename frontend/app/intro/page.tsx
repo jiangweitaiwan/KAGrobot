@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
-import { Space_Grotesk } from "next/font/google";
+import { Space_Grotesk, Cormorant_Garamond } from "next/font/google";
 import Link from "next/link";
 import TabCarousel, { type IntroTab } from "./components/TabCarousel";
 import PipelineStrip from "./components/PipelineStrip";
@@ -18,11 +18,20 @@ const spaceGrotesk = Space_Grotesk({
   variable: "--font-display",
 });
 
+// 古典襯線字體:用在引言、舉例卡、機制註腳等「手稿感」文字上,
+// 與 Space Grotesk 的現代標題形成「古老人文問題 × 現代智能」的對比。
+const cormorant = Cormorant_Garamond({
+  subsets: ["latin"],
+  weight: ["500", "600"],
+  style: ["normal", "italic"],
+  variable: "--font-serif",
+});
+
 const TABS: IntroTab[] = [
-  { key: "feel", label: "感受", accent: "#00e8ff" },
-  { key: "knowledge", label: "知識", accent: "#ff9a52" },
-  { key: "belief", label: "信念", accent: "#ff5fd1" },
-  { key: "action", label: "行動", accent: "#ffcc4d" },
+  { key: "feel", label: "感受", accent: "#00e8ff", glyph: "感" },
+  { key: "knowledge", label: "知識", accent: "#ff9a52", glyph: "知" },
+  { key: "belief", label: "信念", accent: "#ff5fd1", glyph: "信" },
+  { key: "action", label: "行動", accent: "#ffcc4d", glyph: "行" },
 ];
 
 const TAB_COPY = [
@@ -41,14 +50,14 @@ const TAB_COPY = [
   {
     headline: "信念:神經同步放電,線索收斂成迴路",
     mechanism: "神經科學裡有一條經典的 Hebb 法則:『一起放電的神經元,會連在一起』(cells that fire together wire together)。當來自不同腦區的訊號——邊緣系統的直覺、皮質累積的知識——同時、反覆地被激活,它們之間的突觸連結就會被強化,形成一個穩定的迴路。這正是大腦形成新概念與鞏固記憶的核心機制之一。",
-    example: "當『稀缺性直覺』『菜單成本理論』『價格僵固性』『Calvo 定價模型』等幾條分散的線索同步指向同一個方向,foundation tree 就會收斂成一個新的信念——『通膨黏性價格假說』,就像多個神經元同步放電、最終連成一條穩定迴路。",
+    example: "當『稀缺性直覺』『菜單成本理論』『價格僵固性』『Calvo 定價模型』等幾條分散的線索同步指向同一個方向,foundation tree 就會收斂成一個新的信念——『通膨黏性價格假說』。畫面中那條通往 RC 的虛線,是這個信念已經預備好的下一步,就像神經迴路穩定之後,自然會有一條通路準備被使用。",
     anatomy: "對應機制:foundation tree 收斂 → 推薦 RC(突觸連結強化)",
   },
   {
     headline: "行動:前額葉把信念轉譯成執行",
-    mechanism: "前額葉皮質(prefrontal cortex)負責大腦的『執行功能』(executive function)——把已經形成的判斷與意圖,轉換成具體的行動計畫與動作執行。信念不會停在腦中,需要這一層把『知道』變成『做』。",
-    example: "選定『通膨黏性價格假說』這個信念之後,MainAgent 會依據它與其 foundation 執行具體分析,例如『模擬升息衝擊路徑』——這就是前額葉把腦內確立的判斷,轉譯成外顯行動的過程。",
-    anatomy: "對應機制:select RC skill → MainAgent 執行(前額葉執行功能)",
+    mechanism: "前額葉皮質(prefrontal cortex)負責大腦的『執行功能』(executive function)——把已經形成的判斷與意圖,轉換成具體的行動計畫與動作執行。信念不會自動變成行動,中間需要一個「可被執行」的具體方案(RC),再由這一層按下開關,把它送出去。",
+    example: "『通膨黏性價格假說』收斂之後,系統先產生一個可執行的 RC——『升息衝擊分析』。按下它旁邊的閃電,才真正把判斷送進 MainAgent 執行,對應前額葉『決定要做』與『真正去做』之間的最後一道開關,畫面上會看到一道光沿著信念 → RC → 行動的路徑送出去。",
+    anatomy: "對應機制:select RC skill(閃電開關)→ MainAgent 執行(前額葉執行功能)",
   },
 ];
 
@@ -103,7 +112,7 @@ export default function IntroPage() {
   }, [selectTab]);
 
   return (
-    <div className={`intro-root ${spaceGrotesk.variable}`}>
+    <div className={`intro-root ${spaceGrotesk.variable} ${cormorant.variable}`}>
       <div className="intro-inner">
         <section className="intro-hero">
           <span className="intro-eyebrow">KAG Robot</span>
@@ -125,6 +134,8 @@ export default function IntroPage() {
           </div>
         </section>
 
+        <div className="intro-ornament" aria-hidden="true">✦</div>
+
         <section className="intro-stage-section" ref={stageSectionRef}>
           <h2 className="intro-section-title">四個層次</h2>
           <p className="intro-section-lede">
@@ -142,33 +153,33 @@ export default function IntroPage() {
             {(activeIndex) => {
               const copy = TAB_COPY[activeIndex];
               const mode = TABS[activeIndex].key as IntroBrainMode;
-              return (
-                <>
-                  <div className="intro-stage-visual" ref={visualRef}>
-                    <IntroGlobalBrain
-                      mode={mode}
-                      onRegionClick={(clicked) => {
-                        const idx = TABS.findIndex((t) => t.key === clicked);
-                        if (idx !== -1) selectTab(idx);
-                      }}
-                      width={visualSize.w}
-                      height={visualSize.h}
-                    />
+              return [
+                <div className="intro-stage-visual-inner" ref={visualRef} key="visual">
+                  <IntroGlobalBrain
+                    mode={mode}
+                    onRegionClick={(clicked) => {
+                      const idx = TABS.findIndex((t) => t.key === clicked);
+                      if (idx !== -1) selectTab(idx);
+                    }}
+                    width={visualSize.w}
+                    height={visualSize.h}
+                  />
+                </div>,
+                <div className="intro-stage-copy-inner" key="copy">
+                  <h3 className="intro-tab-headline">{copy.headline}</h3>
+                  <p className="intro-tab-body">{copy.mechanism}</p>
+                  <div className="intro-tab-example">
+                    <span className="intro-tab-example-label">舉例</span>
+                    <p>{copy.example}</p>
                   </div>
-                  <div className="intro-stage-copy">
-                    <h3 className="intro-tab-headline">{copy.headline}</h3>
-                    <p className="intro-tab-body">{copy.mechanism}</p>
-                    <div className="intro-tab-example">
-                      <span className="intro-tab-example-label">舉例</span>
-                      <p>{copy.example}</p>
-                    </div>
-                    <p className="intro-tab-anatomy">{copy.anatomy}</p>
-                  </div>
-                </>
-              );
+                  <p className="intro-tab-anatomy">{copy.anatomy}</p>
+                </div>,
+              ];
             }}
           </TabCarousel>
         </section>
+
+        <div className="intro-ornament" aria-hidden="true">✦</div>
 
         <section className="intro-pipeline-section">
           <h2 className="intro-section-title">從感受到行動</h2>
