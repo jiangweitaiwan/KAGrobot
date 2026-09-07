@@ -1,0 +1,231 @@
+/* intro.css — /intro 頁面專屬樣式。
+   刻意用 .intro-root 做 position:fixed 的獨立捲動容器，避免被
+   globals.css 裡 `html, body { overflow: hidden }` 與
+   `main { height: 100vh; overflow: hidden }` 影響（那兩條規則是為
+   既有的儀表板頁面設計的，這裡不套用同一顆 <main>）。 */
+
+.intro-root {
+  position: fixed;
+  inset: 0;
+  overflow-y: auto;
+  background: radial-gradient(ellipse at 50% 20%, #10131f 0%, #06080f 60%);
+  color: #e8ddd0;
+}
+
+.intro-inner {
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: 0 24px 96px;
+}
+
+/* ── Hero ─────────────────────────────────────────────────── */
+
+.intro-hero {
+  min-height: 78vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 20px;
+  border-bottom: 1px solid rgba(232, 238, 248, 0.08);
+}
+
+.intro-eyebrow {
+  font-size: 0.72rem;
+  color: #7a8a9a;
+  letter-spacing: 0.02em;
+}
+
+.intro-headline {
+  font-family: var(--font-display), "IBM Plex Mono", monospace;
+  font-weight: 600;
+  font-size: clamp(2.1rem, 5vw, 3.4rem);
+  line-height: 1.15;
+  max-width: 14ch;
+  color: #f2ede2;
+}
+
+.intro-subhead {
+  font-size: 1rem;
+  line-height: 1.7;
+  max-width: 58ch;
+  color: #9aa8b8;
+}
+
+.intro-hero-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.intro-btn-primary {
+  border: 1px solid #ffcc4d;
+  background: rgba(255, 204, 77, 0.12);
+  color: #ffcc4d;
+  border-radius: 8px;
+  padding: 10px 18px;
+  font-size: 0.85rem;
+  font-family: "IBM Plex Mono", monospace;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.intro-btn-primary:hover { background: rgba(255, 204, 77, 0.22); }
+
+.intro-btn-secondary {
+  border: 1px solid rgba(232, 238, 248, 0.18);
+  background: transparent;
+  color: #c8d8e8;
+  border-radius: 8px;
+  padding: 10px 18px;
+  font-size: 0.85rem;
+  font-family: "IBM Plex Mono", monospace;
+  cursor: pointer;
+}
+.intro-btn-secondary:hover { border-color: rgba(232, 238, 248, 0.4); }
+
+/* ── Stage (tabs + 3D visual) ─────────────────────────────── */
+
+.intro-stage-section {
+  padding: 72px 0 56px;
+  border-bottom: 1px solid rgba(232, 238, 248, 0.08);
+}
+
+.intro-section-title {
+  font-family: var(--font-display), "IBM Plex Mono", monospace;
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: #f2ede2;
+  margin: 0 0 8px;
+}
+
+.intro-section-lede {
+  color: #7a8a9a;
+  font-size: 0.9rem;
+  max-width: 62ch;
+  line-height: 1.6;
+  margin: 0 0 40px;
+}
+
+.intro-tab-carousel {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+  gap: 36px;
+  align-items: stretch;
+}
+
+.intro-stage-visual {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  max-height: 480px;
+  border-radius: 20px;
+  border: 1px solid rgba(232, 238, 248, 0.08);
+  background: rgba(13, 18, 32, 0.4);
+  overflow: hidden;
+}
+
+.intro-stage-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+}
+
+.intro-tab-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.intro-tab-btn {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.82rem;
+  padding: 7px 16px;
+  border-radius: 20px;
+  border: 1px solid rgba(232, 238, 248, 0.18);
+  background: transparent;
+  color: #7a8a9a;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.intro-tab-btn.active { background: rgba(232, 238, 248, 0.06); }
+
+.intro-tab-headline {
+  font-family: var(--font-display), "IBM Plex Mono", monospace;
+  font-size: 1.3rem;
+  font-weight: 600;
+  color: #f2ede2;
+  margin: 0;
+}
+
+.intro-tab-body {
+  font-size: 0.92rem;
+  line-height: 1.75;
+  color: #9aa8b8;
+  margin: 0;
+}
+
+.intro-tab-anatomy {
+  font-size: 0.76rem;
+  color: #5c6a7a;
+  border-left: 2px solid rgba(232, 238, 248, 0.15);
+  padding-left: 10px;
+  line-height: 1.6;
+}
+
+/* ── Pipeline strip ───────────────────────────────────────── */
+
+.intro-pipeline-section { padding: 56px 0 40px; }
+
+.intro-pipeline {
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+  padding-bottom: 8px;
+}
+
+.intro-pipeline-item {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.intro-pipeline-node {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 148px;
+  padding: 14px 16px;
+  border: 1px solid rgba(232, 238, 248, 0.14);
+  border-radius: 12px;
+  background: rgba(13, 18, 32, 0.5);
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  font-family: "IBM Plex Mono", monospace;
+  transition: border-color 0.15s, background 0.15s;
+}
+.intro-pipeline-node:hover {
+  border-color: rgba(232, 238, 248, 0.35);
+  background: rgba(13, 18, 32, 0.8);
+}
+
+.intro-pipeline-title { font-size: 0.8rem; color: #e8ddd0; }
+.intro-pipeline-narrative { font-size: 0.68rem; color: #7f77dd; letter-spacing: 0.04em; }
+
+.intro-pipeline-rule {
+  width: 28px;
+  height: 1px;
+  background: rgba(232, 238, 248, 0.2);
+  flex-shrink: 0;
+}
+
+/* ── Responsive ───────────────────────────────────────────── */
+
+@media (max-width: 860px) {
+  .intro-tab-carousel { grid-template-columns: 1fr; }
+  .intro-stage-visual { max-height: 340px; }
+  .intro-hero { min-height: 60vh; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .intro-root * { animation: none !important; }
+}
