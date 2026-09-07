@@ -454,6 +454,63 @@ function ChatBubble({ msg }: { msg: ChatMessage }) {
   );
 }
 
+type IntroductionProps = { onEnter: () => void };
+
+/** The landing briefing keeps the operational dashboard intentionally dense. */
+function Introduction({ onEnter }: IntroductionProps) {
+  return (
+    <main className="introduction" aria-labelledby="intro-title">
+      <nav className="intro-nav" aria-label="KAGrobot introduction">
+        <div className="intro-brand"><span className="intro-brand-mark">◉</span> KAGrobot</div>
+        <div className="intro-nav-status"><span /> Knowledge field online</div>
+      </nav>
+
+      <section className="intro-hero">
+        <div className="intro-kicker">COGNITIVE OPERATING SYSTEM / 01</div>
+        <h1 id="intro-title">讓知識不只被搜尋，<br /><em>而是開始推理。</em></h1>
+        <p className="intro-lead">
+          KAGrobot 將龐大的知識場轉化為可操作的思考介面：從對話中的問題出發，
+          建立屬於你的推理基礎，最後交給 Agent 執行。
+        </p>
+        <div className="intro-actions">
+          <button type="button" className="intro-enter" onClick={onEnter}>進入知識操作系統 <span>→</span></button>
+          <a className="intro-scroll" href="#workflow">探索操作流程 <span>↓</span></a>
+        </div>
+        <div className="intro-orbit" aria-hidden="true">
+          <div className="intro-orbit-ring ring-one" />
+          <div className="intro-orbit-ring ring-two" />
+          <div className="intro-orbit-core"><span>GLOBAL</span><strong>BRAIN</strong></div>
+          <i className="intro-signal signal-one" /><i className="intro-signal signal-two" /><i className="intro-signal signal-three" />
+          <span className="intro-orbit-label label-one">LIMBIC SYSTEM</span>
+          <span className="intro-orbit-label label-two">CORTEX / CONTEXT</span>
+        </div>
+      </section>
+
+      <section className="intro-principle">
+        <div className="intro-section-number">02 / THE FIELD</div>
+        <div><h2>一座會思考的<br />知識場。</h2></div>
+        <p>GlobalBrain 模擬大腦的知識結構：核心如邊緣系統，承載動機、價值與關聯；外層皮質延展出概念與脈絡。演算法在兩者之間尋路，計算出能真正採取行動的 RC（Reasoning Conclusion）。</p>
+        <div className="intro-rc">RC <span>Reasoning Conclusion</span></div>
+      </section>
+
+      <section className="intro-workflow" id="workflow" aria-labelledby="workflow-title">
+        <div className="intro-workflow-heading"><div className="intro-section-number">03 / WORKFLOW</div><h2 id="workflow-title">從問題，走向行動。</h2></div>
+        <ol className="intro-steps">
+          <li><span className="intro-step-number">01</span><div className="intro-step-icon">⌁</div><h3>開始對話</h3><p>在 Chat-box 描述你的目標或問題。對話會同步喚醒相關的知識訊號。</p></li>
+          <li><span className="intro-step-number">02</span><div className="intro-step-icon">◎</div><h3>觀察與探索</h3><p>從 GlobalBrain 看見知識大腦的即時狀態，點選節點深入特定 concept。</p></li>
+          <li><span className="intro-step-number">03</span><div className="intro-step-icon">＋</div><h3>建立 foundation</h3><p>在 DetailPanel 將關鍵 concept 加入 PersonalBrain，形成專屬的推理基礎。</p></li>
+          <li><span className="intro-step-number">04</span><div className="intro-step-icon">↗</div><h3>執行推薦 RC</h3><p>在 PersonalBrain 檢視推理結果與推薦 RC，點選後送入 main_agent 執行任務。</p></li>
+        </ol>
+      </section>
+
+      <section className="intro-cta">
+        <p>你的下一個結論，正在知識場中成形。</p>
+        <button type="button" className="intro-enter" onClick={onEnter}>啟動推理 <span>→</span></button>
+      </section>
+    </main>
+  );
+}
+
 // ─────────────────────────────────────────────────────────────
 // Page
 // ─────────────────────────────────────────────────────────────
@@ -471,6 +528,7 @@ export default function Page() {
   const [input,     setInput]     = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error,     setError]     = useState("");
+  const [hasEntered, setHasEntered] = useState(false);
 
   const [historySessions, setHistorySessions] = useState<SessionSummary[]>([]);
   const [showHistory,     setShowHistory]     = useState(false);
@@ -1347,6 +1405,8 @@ export default function Page() {
   // ──────────────────────────────────────────────────────────
   // Render
   // ──────────────────────────────────────────────────────────
+
+  if (!hasEntered) return <Introduction onEnter={() => setHasEntered(true)} />;
 
   return (
     <main>
