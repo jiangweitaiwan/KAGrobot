@@ -221,7 +221,7 @@ export default function IntroGlobalBrain({ mode, onRegionClick, width, height }:
       const px = e.clientX - r.left;
       const py = e.clientY - r.top;
 
-      let best: PickTarget | null = null;
+      let bestGroup: IntroBrainMode | null = null;
       let bestDist = PICK_PIXEL_RADIUS * PICK_PIXEL_RADIUS;
       pickTargetsRef.current.forEach((t) => {
         const wp = t.pos.clone();
@@ -232,9 +232,9 @@ export default function IntroGlobalBrain({ mode, onRegionClick, width, height }:
         const sy = ((1 - proj.y) / 2) * heightRef.current;
         const dx = sx - px, dy = sy - py;
         const d2 = dx * dx + dy * dy;
-        if (d2 < bestDist) { bestDist = d2; best = t; }
+        if (d2 < bestDist) { bestDist = d2; bestGroup = t.group; }
       });
-      if (best) onRegionClickRef.current?.(best.group);
+      if (bestGroup) onRegionClickRef.current?.(bestGroup);
     }
 
     const canvas = canvasRef.current;
