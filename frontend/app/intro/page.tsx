@@ -7,7 +7,7 @@ import Link from "next/link";
 import TabCarousel, { type IntroTab } from "./components/TabCarousel";
 import PipelineStrip from "./components/PipelineStrip";
 import "./intro.css";
-
+import type { IntroBrainMode } from "./components/IntroGlobalBrain";
 
 
 const IntroGlobalBrain = dynamic(() => import("./components/IntroGlobalBrain"), { ssr: false });
