@@ -1390,6 +1390,19 @@ export default function Page() {
           >
             ← 回首頁
           </Link>
+          <Link
+            href="/guide"
+            style={{
+              fontSize: "0.75rem",
+              color: "var(--muted)",
+              textDecoration: "none",
+              border: "1px solid var(--border)",
+              borderRadius: 8,
+              padding: "6px 12px",
+            }}
+          >
+            📖 操作心法
+          </Link>          
           <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: "0.7rem", color: "var(--muted)" }}>
             <input
               type="checkbox"

@@ -126,6 +126,7 @@ export default function HomePage() {
           </p>
           <div className="intro-hero-actions">
             <Link href="/dashboard" className="intro-btn-primary">開始使用</Link>
+            <Link href="/guide" className="intro-btn-secondary">操作心法</Link>
             <button
               type="button"
               className="intro-btn-secondary"
