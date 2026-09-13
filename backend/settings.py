@@ -22,8 +22,8 @@ class Settings(BaseSettings):
 
     # --- LLM ---
     google_api_key: str = Field(default="", alias="GOOGLE_API_KEY")
-    main_agent_model: str = Field(default="gemini-2.5-flash", alias="MAIN_AGENT_MODEL")
-    socrates_model: str = Field(default="gemini-2.5-flash", alias="SOCRATES_MODEL")
+    main_agent_model: str = Field(default="gemini-3.6-flash", alias="MAIN_AGENT_MODEL")
+    socrates_model: str = Field(default="gemini-3.6-flash", alias="SOCRATES_MODEL")
     # Vertex AI（設 GOOGLE_GENAI_USE_VERTEXAI=true 且 GOOGLE_CLOUD_PROJECT 時啟用）
     google_genai_use_vertexai: bool = Field(
         default=False, alias="GOOGLE_GENAI_USE_VERTEXAI"
@@ -114,6 +114,44 @@ class Settings(BaseSettings):
     rc_ranking_pool_size: int = Field(
         default=15, alias="RC_RANKING_POOL_SIZE",
         description="Ranking pool 的 top-K 大小，供前端 batch expand 使用",
+    )
+
+    # --- HTML Widget（新增） ---
+    widget_token_secret: str = Field(
+        default="",
+        alias="WIDGET_TOKEN_SECRET",
+        description=(
+            "簽發/驗證 show_interactive_html widget token 的 HMAC 密鑰。"
+            "部署環境務必設定為真隨機值（例如 openssl rand -hex 32）；"
+            "未設定時 core/widget_token.py::issue_token 會直接拒絕簽發，"
+            "避免用空字串當密鑰造成形同虛設的簽章。"
+        ),
+    )
+    widget_token_ttl_s: int = Field(
+        default=3600, alias="WIDGET_TOKEN_TTL_S",
+        description="widget token 有效秒數，預設 1 小時。",
+    )
+    widget_compute_timeout_s: int = Field(
+        default=5, alias="WIDGET_COMPUTE_TIMEOUT_S",
+        description="即時試算 compute function 的 subprocess 逾時秒數。",
+    )
+    widget_compute_mem_limit_mb: int = Field(
+        default=256, alias="WIDGET_COMPUTE_MEM_LIMIT_MB",
+        description="即時試算 compute function 的 subprocess RLIMIT_AS 上限（MB）。",
+    )
+    frontend_origin: str = Field(
+        default="", alias="FRONTEND_ORIGIN",
+        description=(
+            "前端部署的實際 origin（例如 https://your-project.vercel.app），"
+            "供 show_interactive_html 注入的 widget HTML 呼叫 "
+            "window.parent.postMessage(data, targetOrigin) 時使用。"
+            "widget iframe 用 sandbox=\"allow-scripts\"（無 allow-same-origin），"
+            "其 window.location.origin 是 opaque 的 'null'，不能拿來當 "
+            "targetOrigin（會導致訊息永遠送不到 parent），必須由後端明確"
+            "告知真正的前端 origin。未設定時退回 '*'（見 tools/skill_widget.py），"
+            "但生產環境應該一定要設定，避免任何取得簽名 URL 的第三方頁面"
+            "都能接收提交資料。"
+        ),
     )
 
 

@@ -29,6 +29,21 @@ Functions（原 tools）改採目錄掃描為主：
     （見 tools/skill_code.py 的 make_run_skill_code_tool）。
   - RCSkill 本身因此不含任何「執行期」狀態，@lru_cache 快取安全，
     不會有不同 session 共用同一份執行狀態的問題。
+
+【新增 — HTML Widget】
+  比照 references / code_dirs 的「目錄掃描為主」精神：skill_dir/html/
+  底下若存在 manifest.yaml，就解析成 List[HtmlWidgetSpec]，放進
+  RCSkill.html_widgets。與 references 不同的地方是 HTML 全文本身也不
+  在此處讀取（比 references 更晚才讀）——manifest 只提供 widget_id /
+  title / description / compute_functions 這些「索引層」資訊，供
+  system prompt 讓 LLM 知道有哪些 widget 可用；實際 HTML 全文要等
+  LLM 呼叫 show_interactive_html 工具時才讀取並上傳（見
+  tools/skill_widget.py），避免不必要的檔案 I/O 與 prompt token 浪費。
+
+  compute_functions 的白名單（action_name -> "module_path:func_name"）
+  也在這裡一併解析好，直接交給 core/widget_token.py::issue_token 當作
+  token payload 的一部分，dispatch endpoint（POST /skill/widget/dispatch）
+  驗證時不需要重新解析 manifest.yaml。
 """
 
 from __future__ import annotations
@@ -38,15 +53,17 @@ import sys
 import os
 import shutil
 from dataclasses import dataclass, field
-from threading import Lock   # ← 新增，取代 functools.lru_cache
-# 移除: from functools import lru_cache
+from threading import Lock   # ← 取代 functools.lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import yaml
 from google.cloud import storage  # ── 引入 GCS SDK ──
 
 # YAML / TOML frontmatter 解析（僅依賴標準庫可解析的純文字格式）
 # 使用簡易 regex 解析 YAML-like frontmatter，避免額外依賴
+# （注意：html/manifest.yaml 走的是正規 PyYAML，見下方 _scan_html_widgets，
+#  與 SKILL.md frontmatter 的 mini parser 是兩套獨立機制，不要混用）
 
 
 # ══════════════════════════════════════════════════════════════
@@ -64,6 +81,23 @@ class ReferenceEntry:
 
 
 @dataclass
+class HtmlWidgetSpec:
+    """單一 HTML 互動元件的設定（僅索引資訊，不含 HTML 全文）。
+
+    compute_functions : {action_name: "module_path:func_name"}
+        module_path 相對於 skill_dir（例如 "scripts/risk_calc.py"），
+        func_name 是該模組內的函式名稱。這份白名單會被原樣放進
+        widget_token 的 payload，dispatch endpoint 只允許呼叫這裡列出
+        的 action，其餘一律拒絕（見 core/skill_compute.py）。
+    """
+    widget_id:         str
+    rel_path:          str                 # 相對 skill_dir，例如 "html/risk_input.html"
+    title:             str
+    description:       str
+    compute_functions: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class RCSkill:
     """載入完成的 RC Skill，可直接注入 MainAgent。
 
@@ -76,7 +110,8 @@ class RCSkill:
     reference_paths: List[ReferenceEntry]    = field(default_factory=list)  # references 索引（lazy）
     code_dirs:       List[str]               = field(default_factory=list)  # 新增：含 .py 檔案的一級子目錄清單（相對 skill_dir），
                                                                               # "." 代表根目錄本身，供 sandbox 掛載 sys.path 使用
-    skill_dir:       Optional[Path]          = None      # 本地 skill 目錄，供 run_skill_code / read_skill_reference 使用
+    html_widgets:    List[HtmlWidgetSpec]    = field(default_factory=list)  # 新增：html/manifest.yaml 解析出的 widget 索引（lazy）
+    skill_dir:       Optional[Path]          = None      # 本地 skill 目錄，供 run_skill_code / read_skill_reference / show_interactive_html 使用
 
     @property
     def has_functions(self) -> bool:
@@ -90,6 +125,11 @@ class RCSkill:
     @property
     def has_references(self) -> bool:
         return len(self.reference_paths) > 0
+
+    @property
+    def has_html(self) -> bool:
+        """是否需要掛載 show_interactive_html 工具。"""
+        return len(self.html_widgets) > 0
 
 
 # ══════════════════════════════════════════════════════════════
@@ -204,7 +244,11 @@ _IGNORED_FILE_SUFFIXES = {".pyc", ".pyo"}
 # 這些目錄雖然可能含有 .py（例如 examples/ 內的展示腳本），
 # 但不視為「正式函式庫程式碼」，不計入 has_functions 判斷，
 # 也不掛進 sys.path（避免 import 到範例/測試碼造成混淆）。
-_NON_LIBRARY_TOP_DIRS = {"references", "examples", "tests", "test"}
+# 注意：html/ 底下的 scripts/ 是給 compute_functions 用的獨立子目錄，
+# 不受這個排除清單影響——它仍然可能同時是 has_functions 的一部分
+# （skill 若同時提供 run_skill_code 用的 scripts/ 與 widget 用的
+# compute function，兩者實務上常常就是同一個 scripts/ 目錄）。
+_NON_LIBRARY_TOP_DIRS = {"references", "examples", "tests", "test", "html"}
 
 
 def _is_ignored_path(rel_path: Path) -> bool:
@@ -220,7 +264,7 @@ def _scan_code_dirs(skill_dir: Path) -> List[str]:
     """掃描 skill_dir 底下實際存在的「函式庫程式碼」目錄，取代 frontmatter `tools:` 判斷。
 
     慣例：
-      - 若根目錄直接有 .py 檔案（不含 references/examples/tests 底下的），
+      - 若根目錄直接有 .py 檔案（不含 references/examples/tests/html 底下的），
         回傳 "."，代表根目錄本身要掛進 sys.path。
       - 若有一級子目錄（例如 scripts/）底下（含巢狀）有 .py 檔案，
         且該子目錄名稱不在 _NON_LIBRARY_TOP_DIRS 內，回傳該子目錄名稱。
@@ -278,16 +322,82 @@ def _scan_references(skill_dir: Path) -> List[ReferenceEntry]:
     return entries
 
 
+def _scan_html_widgets(skill_dir: Path) -> List[HtmlWidgetSpec]:
+    """解析 skill_dir/html/manifest.yaml，回傳 widget 索引清單。
+
+    manifest.yaml 格式（見 html_skill 設計文件）：
+
+        widgets:
+          - id: risk_input
+            file: risk_input.html
+            title: 風險參數輸入
+            description: 讓使用者用滑桿輸入部位大小、槓桿、停損比例
+            compute_functions:
+              - name: preview_var
+                module_path: scripts/risk_calc.py
+                function: preview_var   # 選填，預設同 name
+
+    沒有 html/manifest.yaml、解析失敗、或宣告的 file 實際不存在時，
+    一律回傳空清單（best-effort，不讓整個 skill 因為 widget 設定錯誤
+    而載入失敗——這與 references/code_dirs 的容錯精神一致）。
+    """
+    manifest_path = skill_dir / "html" / "manifest.yaml"
+    if not manifest_path.exists():
+        return []
+
+    try:
+        raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        print(f"[SkillLoader] html/manifest.yaml 解析失敗（{skill_dir}）: {exc}")
+        return []
+
+    widgets: List[HtmlWidgetSpec] = []
+    for w in (raw.get("widgets") or []):
+        try:
+            widget_id = w["id"]
+            file_name = w["file"]
+        except (KeyError, TypeError):
+            print(f"[SkillLoader] html/manifest.yaml 內有 widget 缺少 id/file，已跳過: {w}")
+            continue
+
+        rel_path = f"html/{file_name}"
+        if not (skill_dir / rel_path).exists():
+            print(f"[SkillLoader] widget '{widget_id}' 宣告的檔案不存在: {rel_path}，已跳過")
+            continue
+
+        compute_functions: Dict[str, str] = {}
+        for cf in (w.get("compute_functions") or []):
+            try:
+                name        = cf["name"]
+                module_path = cf["module_path"]
+            except (KeyError, TypeError):
+                print(f"[SkillLoader] widget '{widget_id}' 的 compute_functions "
+                      f"設定缺少 name/module_path，已跳過該項: {cf}")
+                continue
+            func_name = cf.get("function", name)
+            compute_functions[name] = f"{module_path}:{func_name}"
+
+        widgets.append(HtmlWidgetSpec(
+            widget_id=widget_id,
+            rel_path=rel_path,
+            title=w.get("title", widget_id),
+            description=w.get("description", ""),
+            compute_functions=compute_functions,
+        ))
+
+    return widgets
+
 
 def _build_resource_index_text(
-    code_dirs:  List[str],
-    references: List[ReferenceEntry],
+    code_dirs:    List[str],
+    references:   List[ReferenceEntry],
+    html_widgets: List[HtmlWidgetSpec],
 ) -> str:
     """列出此 Skill 附帶的資源（純 inventory：只說「有什麼」，
     不描述存取方式或工具名——是否掛載沙盒、怎麼存取，
     由 MainAgent 依實際 deployment 狀態決定，避免兩邊語意打架。
     """
-    if not code_dirs and not references:
+    if not code_dirs and not references and not html_widgets:
         return ""
 
     lines = ["\n\n## 此 Skill 附帶的資源"]
@@ -300,6 +410,12 @@ def _build_resource_index_text(
     if references:
         file_list = "、".join(f"`{r.name}`" for r in references)
         lines.append(f"- 參考文件（references/）：{file_list}")
+
+    if html_widgets:
+        widget_list = "、".join(
+            f"`{w.widget_id}`（{w.title}）" for w in html_widgets
+        )
+        lines.append(f"- 互動元件（html/）：{widget_list}")
 
     return "\n".join(lines)
 
@@ -330,7 +446,7 @@ def _detect_common_root(infolist: List[zipfile.ZipInfo]) -> Optional[str]:
 
     只看第一層路徑元件是否唯一，不管檔案深度，足以區分這兩種打包方式，
     也不會誤判「無根目錄但恰好只有一個頂層資料夾」的邊界情況——
-    這種情況即使誤判為「有根目錄」而剝除一層，效果與正確判�007也一致
+    這種情況即使誤判為「有根目錄」而剝除一層，效果與正確判斷也一致
     （因為那個頂層資料夾本來就是唯一內容）。
     """
     tops = set()
@@ -482,13 +598,19 @@ class SkillLoader:
         # ── functions：掃描目錄結構，決定是否需要掛載 sandbox ──
         code_dirs = _scan_code_dirs(local_skill_dir)
 
-        prompt_context = body + _build_resource_index_text(code_dirs, reference_entries)
+        # ── html widgets：解析 html/manifest.yaml（新增）──
+        html_widgets = _scan_html_widgets(local_skill_dir)
+
+        prompt_context = body + _build_resource_index_text(
+            code_dirs, reference_entries, html_widgets
+        )
 
         actual_rc_name = frontmatter.get("rc_name", rc_name)
 
         print(f"[SkillLoader] successfully loaded from GCS '{actual_rc_name}': "
               f"code_dirs={code_dirs}, "
               f"{len(reference_entries)} references, "
+              f"{len(html_widgets)} html widgets, "
               f"{len(prompt_context)} chars of context")
 
         return RCSkill(
@@ -496,6 +618,7 @@ class SkillLoader:
             prompt_context=prompt_context,
             reference_paths=reference_entries,
             code_dirs=code_dirs,
+            html_widgets=html_widgets,
             skill_dir=local_skill_dir,
         )
 

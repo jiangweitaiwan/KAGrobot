@@ -57,6 +57,26 @@ References 注入（lazy loading）：
   若 skill.has_references 為真，會額外掛上 read_skill_reference 工具，
   並在 system prompt 固定加上使用提示，讓 LLM 依需要自行呼叫讀取全文。
 
+【新增 — HTML Widget】
+  skill.has_html 為真時，額外掛上 show_interactive_html 工具（見
+  tools/skill_widget.py），讓 LLM 可以顯示互動式表單取代純文字追問參數。
+
+  這個工具的呼叫本身是完全同步、正常的一輪 tool round-trip（不留
+  懸空的 tool_call），差異只在於：_build_graph 新增了 route_after_tools
+  路由——若這輪剛執行完的 tool 裡包含 show_interactive_html，直接讓
+  graph 提早結束（END），不像其他工具一樣自動繞回 agent 節點。這是因為
+  「已經顯示表單、正在等待使用者操作」不需要（也不應該）讓 LLM 在
+  同一輪立刻再說一次話。
+
+  chat() 開頭比照 attachment_state 建立 turn_widget_state = {"item": None}，
+  工具呼叫成功時寫入；chat() 結束後從這裡讀出，放進回傳值的
+  "pending_widget"，由呼叫端（OrchestratorNodes → ChatResponse）透傳給前端。
+
+  使用者在前端提交/取消後，走的是全新一輪 /chat 呼叫（見
+  tools/skill_widget.py 檔頭說明），對 MainAgent 而言與一般使用者輸入
+  完全無異——history 已經包含「顯示過 widget」的 AIMessage + ToolMessage，
+  這裡不需要任何額外的 resume 邏輯。
+
 所有歷史由呼叫端（OrchestratorNodes）管理，MainAgent 本身不持有狀態。
 """
 
@@ -66,7 +86,7 @@ import textwrap
 from typing import List, Optional, Sequence, TypedDict, TYPE_CHECKING
 
 from langchain_core.messages import (
-    AIMessage, BaseMessage, HumanMessage, SystemMessage,
+    AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage,
 )
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.graph import END, StateGraph
@@ -91,6 +111,7 @@ from tools.skill_code import (
     make_run_skill_code_tool,
     make_write_file_tool,
 )
+from tools.skill_widget import make_show_interactive_html_tool
 
 if TYPE_CHECKING:
     from core.skill_loader import RCSkill
@@ -121,6 +142,10 @@ _BASE_SYSTEM_PROMPT = textwrap.dedent("""\
     - **不確定性**：若分析結果存在前提假設或限制，主動向使用者說明
     - **附件標記**：若你呼叫 get_sandbox_file 取得圖表或檔案，請在回覆文字中
       用 [[attachment:{ref}]] 佔位符標記該檔案對應的位置，不要自己貼網址。
+    - **互動表單提交**：若使用者訊息以 [widget_submission: widget_id=...] 開頭，
+      代表這是你先前呼叫 show_interactive_html 顯示的表單，使用者剛提交的結果
+      （後面接著一段 JSON 資料）；若帶有 cancelled=true，代表使用者取消了這次
+      輸入，此時不要假裝已經拿到資料，應詢問使用者接下來想怎麼做。
 """)
 
 
@@ -138,6 +163,15 @@ class MainAgent:
     sandbox_provisioner : e2b sandbox 生命週期管理器（選填，
                           未提供時掛載 skill 的 run_skill_code 工具會直接失敗，
                           僅適用於完全不需要程式碼執行能力的部署情境）
+    skill_outputs_bucket : GCS bucket，供 get_sandbox_file 與
+                          show_interactive_html 共用（各自以不同物件路徑
+                          前綴區隔："{uid}/{sandbox_id}/..." vs
+                          "{uid}/widgets/..."）。
+    widget_token_secret / widget_token_ttl_s : 見 core/widget_token.py，
+                          未設定 secret 時 show_interactive_html 工具
+                          仍會掛載，但實際呼叫會回傳簽發失敗的錯誤訊息
+                          （不在啟動階段就 fail-fast，維持與其餘工具一致
+                          的「掛載永遠成功、失敗留給執行期」設計）。
     """
 
     def __init__(
@@ -147,6 +181,9 @@ class MainAgent:
         api_key:              str = "",
         sandbox_provisioner:  Optional[SkillSandboxProvisioner] = None,
         skill_outputs_bucket: str = "",
+        widget_token_secret:  str = "",
+        widget_token_ttl_s:   int = 3600,
+        frontend_origin:      str = "",
     ) -> None:
         self._model_name = model
         self._base_llm   = create_chat_google_generative_ai(
@@ -156,6 +193,9 @@ class MainAgent:
         )
         self._sandbox_provisioner  = sandbox_provisioner
         self._skill_outputs_bucket = skill_outputs_bucket
+        self._widget_token_secret  = widget_token_secret
+        self._widget_token_ttl_s   = widget_token_ttl_s
+        self._frontend_origin      = frontend_origin
 
     # ------------------------------------------------------------------
     # Public API
@@ -174,17 +214,21 @@ class MainAgent:
 
         Parameters
         ----------
-        user_input     : 使用者當次輸入
+        user_input     : 使用者當次輸入（可能是一般問句，也可能是
+                         widget 提交/取消訊息，見模組檔頭說明——兩者
+                         對 MainAgent 而言沒有特殊分支，都當作一般
+                         HumanMessage 處理）
         socrates_state : 包含 query / tools / parameters 等意圖收斂結果
         history        : 目前為止的對話歷史（由外部傳入）
         skill          : 選取 path 後對應的 RC Skill（可為 None）
         sandbox_id     : 此 session 既有的 e2b sandbox id（可為 None，
                          代表尚未建立，或上一輪重新選路後已捨棄）
         uid            : 已驗證的使用者 id（見 api/routes/chat.py），
-                         供 get_sandbox_file 工具替輸出檔案加上使用者
-                         命名空間；可為 None（理論上不會，因為 /chat
-                         已強制登入，此處保留 None 只是為了向後相容
-                         直接呼叫 MainAgent 的既有測試/腳本）
+                         供 get_sandbox_file / show_interactive_html 工具
+                         替輸出檔案 / widget token 加上使用者命名空間；
+                         可為 None（理論上不會，因為 /chat 已強制登入，
+                         此處保留 None 只是為了向後相容直接呼叫
+                         MainAgent 的既有測試/腳本）
 
         Returns
         -------
@@ -196,10 +240,13 @@ class MainAgent:
             "sandbox_id":      Optional[str],  # 本輪結束後最新的 sandbox id，
                                                 # 呼叫端需寫回 OrchestratorState 保存
             "attachments":     List[dict],     # 本輪 get_sandbox_file 產出的
-                                                # 結構化附件清單（ref/kind/url/
-                                                # filename/created_at/
-                                                # expires_in_hours），呼叫端需
-                                                # 透傳給前端組成 ChatResponse.attachments
+                                                # 結構化附件清單
+            "pending_widget":  Optional[dict], # 本輪 show_interactive_html
+                                                # 產出的待互動 widget（若有）；
+                                                # 呼叫端需透傳給前端組成
+                                                # ChatResponse.pending_widget，
+                                                # 不需要寫回 OrchestratorState
+                                                # （單輪展示用，不用跨輪保存）
         }
         """
         if socrates_state.get("phase") != ConversationPhase.PATH_CONFIRMED.value:
@@ -218,9 +265,14 @@ class MainAgent:
         # 結構化 attachment 紀錄（見 tools/skill_code.py）。
         attachment_state: dict = {"items": []}
 
+        # 可變容器：show_interactive_html 成功呼叫時寫入一筆待互動的
+        # widget 紀錄（單輪展示用，見 tools/skill_widget.py）。
+        turn_widget_state: dict = {"item": None}
+
         system_prompt = self._build_system_prompt(socrates_state, skill)
         tools         = self._build_tools(
-            socrates_state, skill, sandbox_state, attachment_state, uid=uid,
+            socrates_state, skill, sandbox_state, attachment_state,
+            turn_widget_state, uid=uid,
         )
         has_tools     = bool(tools)
 
@@ -231,7 +283,20 @@ class MainAgent:
         result   = graph.invoke({"messages": messages})
 
         updated_messages: List[BaseMessage] = list(result["messages"])
-        content          = SocratesChatBot_extract_raw_content(updated_messages)
+
+        try:
+            content = SocratesChatBot_extract_raw_content(updated_messages)
+        except ValueError:
+            # show_interactive_html 會讓 graph 在 ToolMessage 後直接 END，
+            # 若 LLM 這輪只呼叫工具、完全沒附文字說明（常見於純 function
+            # calling 回應），就不會有任何非空的 AIMessage 可供萃取。
+            # 這種情況給一個保底文字，避免整輪對話因此報錯中斷；
+            # 有 pending_widget 時給出更貼切的說明，其餘情況維持原本的
+            # 通用保底訊息。
+            if turn_widget_state.get("item"):
+                content = "請在下方表單輸入參數。"
+            else:
+                content = "（本輪沒有可顯示的文字回覆。）"
 
         tool_calls_made: List[str] = []
         for msg in updated_messages[len(history):]:
@@ -245,6 +310,7 @@ class MainAgent:
             "skill_used":      skill.rc_name if skill else None,
             "sandbox_id":      sandbox_state["id"],
             "attachments":     attachment_state["items"],
+            "pending_widget":  turn_widget_state["item"],
         }
 
     def describe(
@@ -256,8 +322,10 @@ class MainAgent:
         query         = socrates_state.get("query")
         sandbox_state = {"id": None}
         attachment_state: dict = {"items": []}
+        turn_widget_state: dict = {"item": None}
         tools         = self._build_tools(
-            socrates_state, skill, sandbox_state, attachment_state, uid=None,
+            socrates_state, skill, sandbox_state, attachment_state,
+            turn_widget_state, uid=None,
         )
         tool_names    = [t.name for t in tools]
         skill_info    = f"  RC Skill: {skill.rc_name}" if skill else "  RC Skill: （無）"
@@ -291,11 +359,35 @@ class MainAgent:
             )
             return {"messages": [response]}
 
-        def should_continue(state: _AgentState) -> str:
+        def route_after_agent(state: _AgentState) -> str:
             last = state["messages"][-1]
             if hasattr(last, "tool_calls") and last.tool_calls:
                 return "tools"
             return END
+
+        def route_after_tools(state: _AgentState) -> str:
+            """ToolNode 剛執行完這一輪所有 tool_call 對應的 ToolMessage。
+
+            若其中包含 show_interactive_html，代表已經把互動表單顯示給
+            使用者、正在等待對方操作，這輪對話直接提早結束（END），
+            不像其他工具那樣自動繞回 agent 節點讓 LLM 立刻再說一次話。
+
+            實作方式：從訊息串尾端往回收集「連續的 ToolMessage」——
+            ToolNode 每次執行完，會把這一輪 AIMessage.tool_calls 對應的
+            所有 ToolMessage 依序 append 在訊息串最後面，中間不會夾雜
+            其他型別的訊息，因此遇到第一個非 ToolMessage 就停止即可
+            準確框出「這一輪」的 tool 執行結果，不會誤吃到更早之前
+            某一輪已經處理完的 ToolMessage。
+            """
+            this_round: List[ToolMessage] = []
+            for m in reversed(state["messages"]):
+                if isinstance(m, ToolMessage):
+                    this_round.append(m)
+                else:
+                    break
+            if any(m.name == "show_interactive_html" for m in this_round):
+                return END
+            return "agent"
 
         builder = StateGraph(_AgentState)
         builder.add_node("agent", call_model)
@@ -304,9 +396,11 @@ class MainAgent:
             builder.add_node("tools", ToolNode(tools))
             builder.set_entry_point("agent")
             builder.add_conditional_edges(
-                "agent", should_continue, {"tools": "tools", END: END}
+                "agent", route_after_agent, {"tools": "tools", END: END}
             )
-            builder.add_edge("tools", "agent")
+            builder.add_conditional_edges(
+                "tools", route_after_tools, {"agent": "agent", END: END}
+            )
         else:
             builder.set_entry_point("agent")
             builder.add_edge("agent", END)
@@ -354,8 +448,8 @@ class MainAgent:
 
     def _build_tool_usage_section(self, skill: Optional["RCSkill"]) -> str:
         """組裝『可用工具』區塊，唯一負責解釋通用工具怎麼用、彼此怎麼分工。
-        Skill 帶了哪些資源（code_dirs / references）已由 SkillLoader
-        列在上方「分析方法」區塊，這裡只講存取方式。
+        Skill 帶了哪些資源（code_dirs / references / html widgets）已由
+        SkillLoader 列在上方「分析方法」區塊，這裡只講存取方式。
         """
         header = "══════════════════════════════\n可用工具\n══════════════════════════════"
         parts: List[str] = [header]
@@ -371,6 +465,9 @@ class MainAgent:
             parts.append(self._read_skill_reference_description())
         else:
             parts.append("（此對話目前無額外分析工具。）")
+
+        if skill and skill.has_html:
+            parts.append("\n" + self._html_widget_description())
 
         parts.append(
             "\n你也隨時可呼叫 **trace_rc_logic** 工具查詢 concept 的理論背景。"
@@ -415,6 +512,16 @@ class MainAgent:
         )
 
     @staticmethod
+    def _html_widget_description() -> str:
+        return (
+            "此 Skill 提供互動式表單（見上方「附帶的資源」），可呼叫 "
+            "**show_interactive_html** 工具顯示給使用者，讓對方直接輸入參數，"
+            "比純文字逐一追問更直覺（例如需要多個數值/滑桿式參數時優先考慮）。"
+            "呼叫後這輪對話會結束，不要在同一則回覆裡假裝已經拿到使用者輸入的值；"
+            "使用者提交後你會在下一輪收到結果。"
+        )
+
+    @staticmethod
     def _resolve_params_description() -> str:
         return (
             "\n若此 Skill 有提供 params_manifest.yaml，"
@@ -442,11 +549,12 @@ class MainAgent:
 
     def _build_tools(
         self,
-        socrates_state:   ChatState,
-        skill:            Optional["RCSkill"],
-        sandbox_state:    dict,
-        attachment_state: dict,
-        uid:              Optional[str] = None,
+        socrates_state:     ChatState,
+        skill:              Optional["RCSkill"],
+        sandbox_state:      dict,
+        attachment_state:   dict,
+        turn_widget_state:  dict,
+        uid:                Optional[str] = None,
     ) -> List[StructuredTool]:
         langchain_tools: List[StructuredTool] = []   # ← 修正：搬到最上面，兩個分支都能安全 append
 
@@ -492,6 +600,28 @@ class MainAgent:
                 langchain_tools.append(
                     make_read_skill_reference_tool(skill.skill_dir, allowed_files)
                 )
+
+        # show_interactive_html：獨立於 has_functions/sandbox 之外，
+        # 只要 skill 有宣告 html widgets 就掛載（不需要 e2b sandbox，
+        # 即時試算走獨立的 subprocess，見 core/skill_compute.py）。
+        if skill and skill.has_html and skill.skill_dir is not None:
+            if self._skill_outputs_bucket:
+                langchain_tools.append(
+                    make_show_interactive_html_tool(
+                        skill_dir=skill.skill_dir,
+                        skill_name=skill.rc_name,
+                        widgets=skill.html_widgets,
+                        bucket_name=self._skill_outputs_bucket,
+                        uid=uid or "anon",
+                        widget_token_secret=self._widget_token_secret,
+                        widget_token_ttl_s=self._widget_token_ttl_s,
+                        turn_widget_state=turn_widget_state,
+                        frontend_origin=self._frontend_origin,
+                    )
+                )
+            else:
+                print(f"[MainAgent] skill_outputs_bucket 未設定，"
+                      f"跳過 show_interactive_html 工具（skill='{skill.rc_name}'）。")
 
         # resolve_params：只要有 skill_dir 就掛載
         if skill and skill.skill_dir is not None:

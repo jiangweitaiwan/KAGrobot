@@ -229,6 +229,11 @@ class WalkOrchestratorNodes:
             walk_session=session.to_dict(),
             walk_pending_question=None,
             attachments=[],
+            # 新增 — HTML Widget：回到 socratic phase 時一併清空，
+            # 避免殘留 main_agent 上一輪顯示過的 widget 資訊被誤傳給前端
+            # （比照上面 attachments=[] 的同一種「回到中性 phase 要清狀態」
+            # 考量）。
+            pending_widget=None,
         )
 
     # ------------------------------------------------------------------

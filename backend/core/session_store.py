@@ -25,6 +25,20 @@
   - 還原 messages 時，只保留「純文字的人類/AI 對話」，捨棄任何帶有
     tool_calls 的 AIMessage——避免恢復後缺少對應的 tool response，
     導致下一輪呼叫 LLM API 時因為「懸空的 tool_call」而報錯。
+
+【新增 — HTML Widget】
+  save_session_snapshot 的 turn_messages 參數（由 api/routes/chat.py 與
+  api/routes/routes_walk.py 組裝）現在可能在某則 AI turn message 上多帶
+  一個 "widget" 欄位（{widget_id, title, url, created_at,
+  expires_in_hours}），代表這輪對話顯示過一個互動元件。這裡刻意不特別
+  解析或驗證這個欄位——turn_messages 本來就是「呼叫端已經組好的顯示用
+  資料」，直接原樣併入 display_messages 陣列存檔即可，前端重播時依
+  expires_in_hours + created_at 自行判斷是否過期（比照 AttachmentCard
+  的 isAttachmentExpired 邏輯，見 api/routes/users.py::
+  SessionDisplayMessage 的 widget 欄位定義）。不需要跟 pending_widget
+  一樣「可續答」——重播模式下這個 widget 只是歷史紀錄，iframe 若還沒
+  過期仍可正常互動，但即時試算（dispatch）與正常流程無異，提交後一樣
+  走全新一輪 /chat；只是過期後前端顯示灰階，不呈現 iframe。
 """
 
 from __future__ import annotations
@@ -41,7 +55,7 @@ def _get_db():
     global _db
     if _db is None:
         from google.cloud import firestore
-        _db = firestore.AsyncClient()
+        _db = firestore.AsyncClient(project = "project-33725f55-5932-4674-9bd",database="kagrobot-state")
     return _db
 
 

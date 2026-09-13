@@ -16,6 +16,17 @@ app.state.walk_pending_starts 取代原本的 app.state.walk_sessions，範圍
 小很多：只銜接「/walk/start 準備好初始 state」與「/walk/stream 第一次
 真正呼叫 orchestrator」這兩個 endpoint 之間的空隙，見
 api/routes/routes_walk.py 檔頭說明。
+
+【新增 — HTML Widget】
+  MainAgent 建構時多帶入 widget_token_secret / widget_token_ttl_s，
+  由 settings 讀出（WIDGET_TOKEN_SECRET / WIDGET_TOKEN_TTL_S）。
+  部署環境務必設定 WIDGET_TOKEN_SECRET 為真隨機值，否則
+  show_interactive_html 工具呼叫時會回傳簽發失敗的錯誤（見
+  core/widget_token.py::_require_secret）。
+
+  另外註冊 skill_widget_router（POST /skill/widget/dispatch），這支
+  endpoint 刻意不經過 require_auth（見 api/routes/skill_widget.py 檔頭
+  說明），改用獨立的 widget_token 驗證身分與授權。
 """
 
 from __future__ import annotations
@@ -56,6 +67,7 @@ from api.routes                    import (
     brain_router,
     users_router,
     walk_router as walk_routes_router,
+    skill_widget_router,
 )
 
 from core.skill_sandbox import SkillSandboxProvisioner
@@ -122,10 +134,25 @@ async def lifespan(app: FastAPI):
         api_key=s.e2b_api_key,
         template=s.e2b_skill_template,
     )
+    if not (s.widget_token_secret or "").strip():
+        print(
+            "[app] 警告：WIDGET_TOKEN_SECRET 未設定。show_interactive_html "
+            "工具在被呼叫時會因無法簽發 widget token 而失敗（其餘功能不受影響）。"
+        )
+    if not (s.frontend_origin or "").strip():
+        print(
+            "[app] 警告：FRONTEND_ORIGIN 未設定。HTML Widget 送出結果時的 "
+            "postMessage 會退回 targetOrigin='*'，任何取得該次簽名 URL 的頁面"
+            "都能接收到提交資料，生產環境請務必設定。"
+        )
+
     main_agent = MainAgent(
         model=s.main_agent_model,
         sandbox_provisioner=sandbox_provisioner,
         skill_outputs_bucket=s.skill_outputs_bucket_name,
+        widget_token_secret=s.widget_token_secret,
+        widget_token_ttl_s=s.widget_token_ttl_s,
+        frontend_origin=s.frontend_origin,
     )
 
     skill_loader = SkillLoader(
@@ -231,5 +258,6 @@ def create_app() -> FastAPI:
     app.include_router(brain_router)
     app.include_router(users_router)
     app.include_router(walk_routes_router)
+    app.include_router(skill_widget_router)
 
     return app

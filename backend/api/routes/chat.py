@@ -11,6 +11,17 @@
   - 每輪對話結束後，把可安全序列化的狀態子集備份到 Firestore
     （core/session_store.py），下次遇到 MemorySaver 對該 thread
     已無記錄（冷啟動／重啟）時，從備份還原、接續對話，而不是砍掉重練。
+
+【新增 — HTML Widget】
+  ChatResponse 多一個 pending_widget 欄位，透傳 MainAgent.chat() 回傳的
+  "pending_widget"（見 core/main_agent.py 檔頭說明）。這是單輪展示用的
+  資訊，不需要寫進 OrchestratorState 或 Firestore 的可續答狀態——使用者
+  提交/取消後就是全新一輪 /chat 呼叫，history 本身已經包含「顯示過
+  widget」的 AIMessage + ToolMessage，不需要額外恢復機制。
+
+  但為了「歷史對話」列表能重播出這段 widget 曾經顯示過，仍把它記進
+  session_store 的 display_messages（過期後前端顯示灰階、不可互動，
+  比照 attachments 的 isAttachmentExpired 邏輯）。
 """
 
 from __future__ import annotations
@@ -48,12 +59,21 @@ class Attachment(BaseModel):
     expires_in_hours: int = 24
 
 
+class PendingWidget(BaseModel):
+    widget_id:        str
+    title:            str
+    url:              str
+    created_at:       int
+    expires_in_hours: int = 1
+
+
 class ChatResponse(BaseModel):
     reply:          str
     attachments:    List[Attachment] = []
     phase:          str
     socrates_phase: Optional[str] = None
     skill_used:     Optional[str] = None
+    pending_widget: Optional[PendingWidget] = None
 
 
 # ── Route ─────────────────────────────────────────────────────────────
@@ -123,11 +143,20 @@ async def chat_endpoint(
 
     attachments = [Attachment(**a) for a in (result.get("attachments") or [])]
 
+    pending_widget_raw = result.get("pending_widget")
+    pending_widget = PendingWidget(**pending_widget_raw) if pending_widget_raw else None
+
     now_ms = int(time.time() * 1000)
+    ai_turn_message: Dict[str, Any] = {
+        "role": "ai", "content": reply_text,
+        "attachments": [a.model_dump() for a in attachments], "created_at": now_ms,
+    }
+    if pending_widget is not None:
+        ai_turn_message["widget"] = pending_widget.model_dump()
+
     turn_messages = [
         {"role": "user", "content": body.message, "attachments": [], "created_at": now_ms},
-        {"role": "ai", "content": reply_text,
-         "attachments": [a.model_dump() for a in attachments], "created_at": now_ms},
+        ai_turn_message,
     ]
 
     await save_session_snapshot(uid, body.session_id, result, turn_messages=turn_messages)
@@ -138,4 +167,5 @@ async def chat_endpoint(
         phase          = result.get("phase", initial_phase),
         socrates_phase = socrates_phase,
         skill_used     = result.get("skill_used"),
+        pending_widget = pending_widget,
     )

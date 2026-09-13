@@ -22,6 +22,7 @@ import SemanticPanel from "../components/SemanticPanel";
 import type { SemanticContextData, RecommendedFoundation } from "../components/SemanticPanel";
 
 import { AttachmentCard, AttachmentTray, type Attachment } from "../components/AttachmentCard";
+import { SkillWidgetCard, type PendingWidget } from "../components/SkillWidgetCard";
 
 
 
@@ -46,7 +47,15 @@ const WALK_PATH_COLORS = ["#00d4aa", "#7f77dd", "#e8a030"]; // teal / purple / a
 // ─────────────────────────────────────────────────────────────
 
 type Role = "user" | "ai";
-type ChatMessage = { id: string; role: Role; content: string; attachments?: Attachment[] };
+type ChatMessage = {
+  id: string; role: Role; content: string;
+  attachments?: Attachment[];
+  // 新增 — HTML Widget：這則 AI 訊息若曾顯示過互動元件，帶其資料；
+  // 使用者提交/取消後，這裡會被清空（設回 undefined），改由下一則
+  // user turn 的文字內容（"[widget_submission: ...]"）承載結果，
+  // ChatBubble 會把那段原始文字轉譯成較友善的顯示（見 renderUserWidgetSubmission）。
+  widget?: PendingWidget;
+};
 
 type ChatResponse = {
   reply:          string;
@@ -54,6 +63,8 @@ type ChatResponse = {
   phase:          string;
   socrates_phase?: string | null;
   skill_used?:    string | null;
+  // 新增 — HTML Widget
+  pending_widget?: PendingWidget | null;
 };
 
 type SessionSummary = {
@@ -69,6 +80,8 @@ type SessionDisplayMessage = {
   content:     string;
   attachments: Attachment[];
   created_at:  number;
+  // 新增 — HTML Widget（重播用，見 backend api/routes/users.py::SessionDisplayMessage）
+  widget?:     PendingWidget | null;
 };
 
 type SessionDetail = {
@@ -177,6 +190,36 @@ function revealUpTo(fullText: string, i: number): string {
     if (i <= start) break;
   }
   return fullText.slice(0, i);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Widget submission helpers（新增）
+// ─────────────────────────────────────────────────────────────
+
+/** 組成使用者提交 widget 表單後、送進 /chat 的文字內容。
+ *  格式刻意跟 "(eid: ...)" 標記一樣走「人類可讀明文前綴」路線，
+ *  system prompt（core/main_agent.py::_BASE_SYSTEM_PROMPT）已教會
+ *  LLM 認得這個格式，不需要額外的結構化欄位。 */
+function buildWidgetSubmissionText(widgetId: string, data: unknown): string {
+  return `[widget_submission: widget_id=${widgetId}]\n${JSON.stringify(data)}`;
+}
+
+function buildWidgetCancelText(widgetId: string): string {
+  return `[widget_submission: widget_id=${widgetId}, cancelled=true]`;
+}
+
+const WIDGET_SUBMISSION_RE = /^\[widget_submission: widget_id=([^\],]+)(, cancelled=true)?\]\n?/;
+
+/** 把使用者訊息裡的 "[widget_submission: ...]" 原始標記轉譯成較友善的
+ *  顯示文字，避免使用者在聊天氣泡裡看到一整包 JSON。 */
+function friendlyWidgetSubmissionLabel(content: string): string | null {
+  const m = content.match(WIDGET_SUBMISSION_RE);
+  if (!m) return null;
+  const widgetId    = m[1];
+  const isCancelled = !!m[2];
+  return isCancelled
+    ? `已取消「${widgetId}」表單`
+    : `已提交「${widgetId}」表單`;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -417,10 +460,19 @@ async function fetchWalkStatus(sessionId: string): Promise<WalkStatusResponse | 
 }
 
 // ─────────────────────────────────────────────────────────────
-// ChatBubble — 拆解 [[attachment:N]] 佔位符為附件卡片
+// ChatBubble — 拆解 [[attachment:N]] 佔位符為附件卡片，
+// 並在 AI 訊息帶有 widget 時渲染 SkillWidgetCard；
+// 使用者訊息若是 widget 提交/取消的原始標記，轉譯成友善文字。
 // ─────────────────────────────────────────────────────────────
 
-function ChatBubble({ msg }: { msg: ChatMessage }) {
+function ChatBubble({
+  msg, onWidgetSubmit, onWidgetCancel, widgetActionDisabled,
+}: {
+  msg: ChatMessage;
+  onWidgetSubmit: (messageId: string, widgetId: string, data: unknown) => void;
+  onWidgetCancel: (messageId: string, widgetId: string) => void;
+  widgetActionDisabled: boolean;
+}) {
   const attachments = msg.attachments ?? [];
   const parts        = useMemo(() => splitByPlaceholder(msg.content), [msg.content]);
   const referencedRefs = useMemo(
@@ -431,25 +483,39 @@ function ChatBubble({ msg }: { msg: ChatMessage }) {
   // 仍把所有附件附加在回覆最後面，不讓產出的圖片/檔案憑空消失。
   const unreferenced = attachments.filter((a) => !referencedRefs.has(a.ref));
 
+  const friendlyWidgetLabel = msg.role === "user" ? friendlyWidgetSubmissionLabel(msg.content) : null;
+
   return (
     <div className={`msg ${msg.role}`}>
-      {parts.map((p, i) => {
-        if (p.type === "text") {
-          return p.value ? <span key={i}>{p.value}</span> : null;
-        }
-        const att = attachments.find((a) => a.ref === p.ref);
-        return att ? (
-          <span key={i} style={{ display: "inline-block", verticalAlign: "top" }}>
-            <AttachmentCard attachment={att} />
-          </span>
-        ) : null;
-      })}
+      {friendlyWidgetLabel !== null ? (
+        <span style={{ fontStyle: "italic", opacity: 0.85 }}>{friendlyWidgetLabel}</span>
+      ) : (
+        parts.map((p, i) => {
+          if (p.type === "text") {
+            return p.value ? <span key={i}>{p.value}</span> : null;
+          }
+          const att = attachments.find((a) => a.ref === p.ref);
+          return att ? (
+            <span key={i} style={{ display: "inline-block", verticalAlign: "top" }}>
+              <AttachmentCard attachment={att} />
+            </span>
+          ) : null;
+        })
+      )}
       {unreferenced.length > 0 && (
         <div style={{ display: "flex", flexWrap: "wrap", marginTop: 6 }}>
           {unreferenced.map((a) => (
             <AttachmentCard key={a.ref} attachment={a} />
           ))}
         </div>
+      )}
+      {msg.widget && (
+        <SkillWidgetCard
+          widget={msg.widget}
+          disabled={widgetActionDisabled}
+          onSubmit={(widgetId, data) => onWidgetSubmit(msg.id, widgetId, data)}
+          onCancel={(widgetId) => onWidgetCancel(msg.id, widgetId)}
+        />
       )}
     </div>
   );
@@ -476,6 +542,14 @@ export default function Page() {
   const [historySessions, setHistorySessions] = useState<SessionSummary[]>([]);
   const [showHistory,     setShowHistory]     = useState(false);
   const [loadingHistory,  setLoadingHistory]  = useState(false);
+
+  // ── HTML Widget（新增）──────────────────────────────────────
+  // pendingWidgetKey：目前是否有一個「即時、未解決」的 widget 正在等待
+  // 使用者操作——只有這個狀態才鎖住主輸入框；歷史重播載入的 widget
+  // （SessionDisplayMessage.widget）不影響這個狀態，使用者仍可正常
+  // 繼續打字（見 handleLoadSession 不設定這個 state）。
+  const [pendingWidgetKey, setPendingWidgetKey] = useState<string | null>(null);
+  const [widgetActionSubmitting, setWidgetActionSubmitting] = useState(false);
 
 
   // ── Random Walk（慢想）Mode ───────────────────────────────────
@@ -591,15 +665,6 @@ export default function Page() {
   useEffect(() => {
     if (!hasHighlightableNodes && brainModeOn) setBrainModeOn(false);
   }, [hasHighlightableNodes, brainModeOn]);
-
-  // ── GlobalBrainExplorer 實際要點亮的節點集合：random walk modal 開著
-  //    時，優先顯示 walk 即時走訪的節點（大腦被激活的視覺效果）；
-  //    否則沿用 dialogue mode 既有的語意排名 Top-3。modal 關閉時
-  //    RandomWalkPanel 會被 unmount，SSE 連線隨之中止（後端 walk 狀態
-  //    本身透過 orchestrator checkpointer 安全保存、不受影響，只是
-  //    前端暫時看不到即時進度），因此這裡的判斷同時也隱含「只有
-  //    modal 開著才顯示 walk 高亮」。
-
 
   // ── RC Ranking (derived, 前端即時計算) ────────────────────
   const rcRanking = useMemo(
@@ -1071,6 +1136,145 @@ export default function Page() {
   }, []);
 
   // ──────────────────────────────────────────────────────────
+  // Chat（共用送出邏輯：一般輸入 / widget 提交 / widget 取消
+  // 都走同一條路徑，見與使用者確認過的「不重造 ToolMessage」設計）
+  // ──────────────────────────────────────────────────────────
+
+  const canSend = !!input.trim() && !isLoading && !!sessionId && !!userId
+    && !walkStreaming && phase !== "walk_awaiting_answer" && pendingWidgetKey === null;
+
+  async function typewriterAppend(
+    fullText: string,
+    attachments: Attachment[] = [],
+    widget?: PendingWidget | null,
+  ): Promise<string> {
+    isTypingRef.current = true;
+    const aiId = createId();
+    // attachments / widget 一次性掛上（不隨打字機效果變化），文字則逐字揭露；
+    // revealUpTo 確保揭露切點不會落在 [[attachment:N]] 佔位符中間，
+    // 避免使用者看到一閃而過的原始標記文字。
+    setMessages((prev) => [
+      ...prev,
+      { id: aiId, role: "ai", content: "", attachments, widget: widget ?? undefined },
+    ]);
+
+    let i = TYPEWRITER_CHARS_PER_TICK;
+    for (; i <= fullText.length; i += TYPEWRITER_CHARS_PER_TICK) {
+      const revealed = revealUpTo(fullText, i);
+      setMessages((prev) =>
+        prev.map((msg) => msg.id === aiId ? { ...msg, content: revealed } : msg),
+      );
+      await wait(TYPEWRITER_TICK_MS);
+    }
+    setMessages((prev) =>
+      prev.map((msg) => msg.id === aiId ? { ...msg, content: fullText } : msg),
+    );
+
+    isTypingRef.current = false;
+    saveHistory(messagesRef.current);
+    return aiId;
+  }
+
+  /** 送出一輪對話的共用核心：一般使用者輸入、widget 提交、widget 取消
+   *  都呼叫這裡，差別只在 walkEnabledOverride（widget 互動時一律不觸發
+   *  慢想模式，因為那時已經在 main_agent phase 執行 skill）與
+   *  showAsUserBubble（widget 提交/取消時仍然要把原始文字送給後端，
+   *  但畫面上會被 ChatBubble 轉譯成友善文字，不需要特殊隱藏邏輯）。
+   */
+  const sendChatTurn = useCallback(async (
+    text: string,
+    opts?: { walkEnabledOverride?: boolean },
+  ) => {
+    if (!API_BASE) { setError("尚未設定 NEXT_PUBLIC_API_BASE_URL。"); return; }
+
+    setError("");
+    setIsLoading(true);
+    const userMsg: ChatMessage = { id: createId(), role: "user", content: text };
+    setMessages((prev) => [...prev, userMsg]);
+
+    try {
+      const response = await apiFetch(`${API_BASE.replace(/\/$/, "")}/chat`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({
+          session_id:   sessionId,
+          message:      text,
+          phase:        phase === "main_agent" ? "main_agent" : "socratic",
+          walk_enabled: opts?.walkEnabledOverride ?? walkEnabled,
+        }),
+      });
+      if (!response.ok) throw new Error(`API error ${response.status}`);
+
+      const data      = (await response.json()) as ChatResponse;
+      const nextPhase = data.phase || "socratic";
+      setPhase(nextPhase);
+      localStorage.setItem(PHASE_KEY, nextPhase);
+
+      await typewriterAppend(data.reply || "", data.attachments ?? [], data.pending_widget);
+
+      if (data.pending_widget) {
+        setPendingWidgetKey(data.pending_widget.widget_id);
+      } else {
+        setPendingWidgetKey(null);
+      }
+
+      if (nextPhase === "walk_pending") {
+        // 慢想開始：這輪 /chat 只負責把 phase 轉場，真正的 walk 迴圈
+        // 由這裡立刻接上的 SSE 驅動。
+        runWalkStream();
+      } else {
+        fetchSemanticContextData(sessionId).then(setSemanticContext);
+        fetchSemanticScores(sessionId).then(setRCSemanticScores);
+        fetchFoundationRecommendations(sessionId).then(setRecommendedFoundations);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "請求失敗,請稍後重試");
+      setMessages((prev) => [...prev, { id: createId(), role: "ai", content: "抱歉,連線失敗,請稍後再試。" }]);
+      saveHistory(messagesRef.current);
+    } finally {
+      setIsLoading(false);
+      if (!isTypingRef.current) saveHistory(messagesRef.current);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, phase, walkEnabled]);
+
+  async function submitMessage(e: FormEvent) {
+    e.preventDefault();
+    if (!canSend) return;
+    const text = input.trim();
+    setInput("");
+    await sendChatTurn(text);
+  }
+
+  /** widget 送出：清掉那則訊息上的 iframe（避免重複互動），
+   *  解鎖輸入框，再送出結構化提交文字。 */
+  const handleWidgetSubmit = useCallback(async (
+    messageId: string, widgetId: string, data: unknown,
+  ) => {
+    setWidgetActionSubmitting(true);
+    setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, widget: undefined } : m)));
+    setPendingWidgetKey(null);
+    try {
+      await sendChatTurn(buildWidgetSubmissionText(widgetId, data), { walkEnabledOverride: false });
+    } finally {
+      setWidgetActionSubmitting(false);
+    }
+  }, [sendChatTurn]);
+
+  /** widget 取消：同上，但送出的是 cancelled=true 標記，
+   *  system prompt 已教會 LLM 這代表使用者放棄本次輸入。 */
+  const handleWidgetCancel = useCallback(async (messageId: string, widgetId: string) => {
+    setWidgetActionSubmitting(true);
+    setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, widget: undefined } : m)));
+    setPendingWidgetKey(null);
+    try {
+      await sendChatTurn(buildWidgetCancelText(widgetId), { walkEnabledOverride: false });
+    } finally {
+      setWidgetActionSubmitting(false);
+    }
+  }, [sendChatTurn]);
+
+  // ──────────────────────────────────────────────────────────
   // PersonalBrain: confirm RC → MainAgent
   // ──────────────────────────────────────────────────────────
 
@@ -1121,7 +1325,8 @@ export default function Page() {
 
       setPhase(data.phase || "main_agent");
       localStorage.setItem(PHASE_KEY, data.phase || "main_agent");
-      await typewriterAppend(data.reply || "", data.attachments ?? []);
+      await typewriterAppend(data.reply || "", data.attachments ?? [], data.pending_widget);
+      setPendingWidgetKey(data.pending_widget ? data.pending_widget.widget_id : null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "請求失敗,請稍後重試");
       setMessages((prev) => [...prev, { id: createId(), role: "ai", content: "抱歉,連線失敗。" }]);
@@ -1131,93 +1336,6 @@ export default function Page() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, isLoading, phase, userId, addFoundationsToBrain]);
-
-
-
-  // ──────────────────────────────────────────────────────────
-  // Chat
-  // ──────────────────────────────────────────────────────────
-
-  const canSend = !!input.trim() && !isLoading && !!sessionId && !!userId
-  && !walkStreaming && phase !== "walk_awaiting_answer";
-
-  async function typewriterAppend(fullText: string, attachments: Attachment[] = []): Promise<void> {
-    isTypingRef.current = true;
-    const aiId = createId();
-    // attachments 一次性掛上（不隨打字機效果變化），文字則逐字揭露；
-    // revealUpTo 確保揭露切點不會落在 [[attachment:N]] 佔位符中間，
-    // 避免使用者看到一閃而過的原始標記文字。
-    setMessages((prev) => [...prev, { id: aiId, role: "ai", content: "", attachments }]);
-
-    let i = TYPEWRITER_CHARS_PER_TICK;
-    for (; i <= fullText.length; i += TYPEWRITER_CHARS_PER_TICK) {
-      const revealed = revealUpTo(fullText, i);
-      setMessages((prev) =>
-        prev.map((msg) => msg.id === aiId ? { ...msg, content: revealed } : msg),
-      );
-      await wait(TYPEWRITER_TICK_MS);
-    }
-    setMessages((prev) =>
-      prev.map((msg) => msg.id === aiId ? { ...msg, content: fullText } : msg),
-    );
-
-    isTypingRef.current = false;
-    saveHistory(messagesRef.current);
-  }
-
-  async function submitMessage(e: FormEvent) {
-    e.preventDefault();
-    if (!canSend) return;
-    if (!API_BASE) { setError("尚未設定 NEXT_PUBLIC_API_BASE_URL。"); return; }
-
-    const text = input.trim();
-    setInput("");
-    setError("");
-
-
-
-    setIsLoading(true);
-    const userMsg: ChatMessage = { id: createId(), role: "user", content: text };
-    setMessages((prev) => [...prev, userMsg]);
-
-    try {
-      const response = await apiFetch(`${API_BASE.replace(/\/$/, "")}/chat`, {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({
-          session_id:   sessionId,
-          message:      text,
-          phase:        phase === "main_agent" ? "main_agent" : "socratic",
-          walk_enabled: walkEnabled,
-        }),
-      });
-      if (!response.ok) throw new Error(`API error ${response.status}`);
-
-      const data      = (await response.json()) as ChatResponse;
-      const nextPhase = data.phase || "socratic";
-      setPhase(nextPhase);
-      localStorage.setItem(PHASE_KEY, nextPhase);
-
-      await typewriterAppend(data.reply || "", data.attachments ?? []);
-
-      if (nextPhase === "walk_pending") {
-        // 慢想開始：這輪 /chat 只負責把 phase 轉場，真正的 walk 迴圈
-        // 由這裡立刻接上的 SSE 驅動。
-        runWalkStream();
-      } else {
-        fetchSemanticContextData(sessionId).then(setSemanticContext);
-        fetchSemanticScores(sessionId).then(setRCSemanticScores);
-        fetchFoundationRecommendations(sessionId).then(setRecommendedFoundations);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "請求失敗,請稍後重試");
-      setMessages((prev) => [...prev, { id: createId(), role: "ai", content: "抱歉,連線失敗,請稍後再試。" }]);
-      saveHistory(messagesRef.current);
-    } finally {
-      setIsLoading(false);
-      if (!isTypingRef.current) saveHistory(messagesRef.current);
-    }
-  }
 
   function resetConversation() {
     walkAbortRef.current?.abort();
@@ -1249,6 +1367,7 @@ export default function Page() {
     setBrainModeOn(false); 
     setWalkReadOnly(false);
     setWalkQaLog([]); 
+    setPendingWidgetKey(null);
   }
 
   const openHistory = useCallback(async () => {
@@ -1279,6 +1398,9 @@ export default function Page() {
       role:        m.role === "user" ? "user" : "ai",
       content:     m.content,
       attachments: m.attachments ?? [],
+      // 歷史重播的 widget 不鎖輸入框（見上方 pendingWidgetKey 說明），
+      // 只是靜態呈現；若已過期，SkillWidgetCard 會自行顯示灰階提示。
+      widget:      m.widget ?? undefined,
     }));
 
     walkAbortRef.current?.abort();
@@ -1295,6 +1417,7 @@ export default function Page() {
     setSessionId(sessionDetail.session_id);
     setPhase(sanitizedPhase);
     setMessages(restoredMessages);
+    setPendingWidgetKey(null);
     setWalkPaths({});
     setPendingWalkQuestion(null);
     setWalkStreaming(false);
@@ -1341,8 +1464,9 @@ export default function Page() {
   }, []);
 
   const inputPlaceholder =
-    phase === "walk_awaiting_answer" ? "回答慢想過程中的問題…" :
-    phase === "main_agent"            ? "繼續詢問分析…" :
+    pendingWidgetKey !== null            ? "請先在上方表單完成輸入或按取消…" :
+    phase === "walk_awaiting_answer"     ? "回答慢想過程中的問題…" :
+    phase === "main_agent"               ? "繼續詢問分析…" :
     "輸入你的問題…";
 
   // ──────────────────────────────────────────────────────────
@@ -1432,7 +1556,15 @@ export default function Page() {
                 輸入問題,開始與知識場域對話
               </div>
             ) : (
-              messages.map((msg) => <ChatBubble key={msg.id} msg={msg} />)
+              messages.map((msg) => (
+                <ChatBubble
+                  key={msg.id}
+                  msg={msg}
+                  onWidgetSubmit={handleWidgetSubmit}
+                  onWidgetCancel={handleWidgetCancel}
+                  widgetActionDisabled={widgetActionSubmitting || isLoading}
+                />
+              ))
             )}
             {isLoading && !walkStreaming && (
               <div className="meta"><span style={{ color: "var(--orange)", opacity: 0.7 }}>⬡ 思考中…</span></div>
@@ -1453,7 +1585,7 @@ export default function Page() {
                     if (canSend) submitMessage(e as unknown as FormEvent);
                   }
                 }}
-                disabled={isLoading}
+                disabled={isLoading || pendingWidgetKey !== null}
               />
               <button type="submit" disabled={!canSend} style={{ alignSelf: "flex-end" }}>
                 送出

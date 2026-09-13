@@ -36,6 +36,17 @@ WalkScheduler 存在 app.state.walk_sessions 這個 process 內記憶體 dict）
                             可能問出不同的問題）。拆開後，resume 只會重跑
                             walk_ask 這個幾乎無副作用的小節點。
                             resume 完成後這個欄位會被清空（None）。
+
+【新增 — HTML Widget】
+  pending_widget : main_agent 節點單輪展示用的 widget 資訊，見
+                   core/main_agent.py 檔頭「HTML Widget」段落與
+                   orchestrator/nodes.py::OrchestratorNodes.main_agent()。
+                   刻意不需要跨輪延續：使用者提交/取消是全新一輪 /chat
+                   呼叫，history（main_state）本身已含完整的
+                   AIMessage(tool_calls) + ToolMessage，這個欄位純粹是
+                   單輪透傳給 api/routes/chat.py 組成
+                   ChatResponse.pending_widget，下一輪呼叫時上一輪的值
+                   不會、也不需要被讀取。
 """
 
 from __future__ import annotations
@@ -69,3 +80,6 @@ class OrchestratorState(TypedDict, total=False):
     walk_pointer:            int
     walk_pending_question:  Optional[Dict[str, Any]]
     thinking_process:       str
+
+    # 新增 — HTML Widget（見檔頭說明）
+    pending_widget:         Optional[Dict[str, Any]]

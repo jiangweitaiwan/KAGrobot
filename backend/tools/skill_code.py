@@ -30,6 +30,11 @@ Attachment 結構化回傳（新增）：
   chat() 結束後從 attachment_state 讀出完整清單，交給呼叫端（
   OrchestratorNodes → ChatResponse）組成結構化的 attachments 欄位，
   前端再依 ref 把佔位符換成實際的縮圖/檔案卡片。
+
+【更新】GCS 上傳與簽名邏輯已抽到 tools/gcs_utils.py 共用（
+show_interactive_html 工具 / tools/skill_widget.py 也需要同一套邏輯），
+本檔案的 get_sandbox_file 改成呼叫 gcs_utils.upload_and_sign，行為完全
+不變，純粹避免簽名邏輯在兩個檔案各自維護一份。
 """
 
 from __future__ import annotations
@@ -37,12 +42,12 @@ from __future__ import annotations
 import json
 import os
 import time
-from datetime import timedelta
 from typing import List, Optional
 
 from langchain_core.tools import StructuredTool
 
 from core.skill_sandbox import SandboxComputer, SandboxPathError
+from tools.gcs_utils import upload_and_sign
 
 
 # ══════════════════════════════════════════════════════════════
@@ -212,7 +217,7 @@ def make_get_sandbox_file_tool(
         object_key = f"{uid_segment}/{sandbox_id}/{filename}"
 
         try:
-            url = _upload_and_sign(bucket_name, object_key, data)
+            url = upload_and_sign(bucket_name, object_key, data, expiration_hours=24)
         except Exception as exc:
             return json.dumps(
                 {"ok": False, "error": f"上傳雲端儲存失敗：{exc}"}, ensure_ascii=False
@@ -248,42 +253,4 @@ def make_get_sandbox_file_tool(
             "呼叫成功後會拿到一個 ref 編號，請在回覆文字中用 [[attachment:{ref}]] "
             "佔位符標記此檔案的位置，不要自己貼網址。"
         ),
-    )
-
-
-# ── GCS 上傳 helper（lazy import，避免未使用此工具時仍付初始化成本）──
-
-def _upload_and_sign(bucket_name: str, object_key: str, data: bytes) -> str:
-    from google.cloud import storage as gcs_storage
-
-    client = gcs_storage.Client()
-    bucket = client.bucket(bucket_name)
-    blob   = bucket.blob(object_key)
-    blob.upload_from_string(data)
-
-    return _generate_signed_url(blob, expiration=timedelta(hours=24))
-
-
-def _generate_signed_url(blob, expiration: timedelta) -> str:
-    """產生 v4 簽名 URL。
-
-    重要 GCP 細節：Cloud Run 上的 Application Default Credentials
-    沒有私鑰，無法在本地直接簽名，必須透過 IAM Credentials API 的
-    signBlob 遠端簽名（google-cloud-storage 會自動處理，但需要
-    Cloud Run 的服務帳號被授予對「自己」的
-    roles/iam.serviceAccountTokenCreator，否則會拋出 403）。
-    """
-    import google.auth
-    from google.auth.transport.requests import Request
-
-    credentials, _ = google.auth.default()
-    if not credentials.valid:
-        credentials.refresh(Request())
-
-    return blob.generate_signed_url(
-        version="v4",
-        expiration=expiration,
-        method="GET",
-        service_account_email=credentials.service_account_email,
-        access_token=credentials.token,
     )

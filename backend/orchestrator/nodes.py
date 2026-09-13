@@ -72,6 +72,7 @@ class OrchestratorNodes:
                 phase          = "path_confirmed",
                 socrates_state = new_socrates_state,
                 attachments    = [],
+                pending_widget = None,
             )
 
         new_socrates_state = self._socrates_bot.process_message(old_socrates_state, user_msg)
@@ -86,6 +87,7 @@ class OrchestratorNodes:
             phase          = next_phase,
             socrates_state = new_socrates_state,
             attachments    = [],
+            pending_widget = None,
         )
 
     # ------------------------------------------------------------------
@@ -102,6 +104,7 @@ class OrchestratorNodes:
                 )],
                 phase="socratic",
                 attachments=[],
+                pending_widget=None,
             )
 
         selected_rc_eid   = state.get("selected_rc_eid")
@@ -169,6 +172,9 @@ class OrchestratorNodes:
             ),
             skill_sandbox_id  = result.get("sandbox_id"),
             attachments       = result.get("attachments") or [],
+            # 新增 — HTML Widget：單輪透傳，不需要跨輪保存（見
+            # orchestrator/state.py 的欄位說明）。
+            pending_widget    = result.get("pending_widget"),
         )
 
 
