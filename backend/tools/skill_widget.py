@@ -138,6 +138,7 @@ def make_show_interactive_html_tool(
             f"  window.__SKILL_WIDGET_TOKEN__ = {json.dumps(token)};\n"
             f"  window.__SKILL_WIDGET_PARAMS__ = {json.dumps(prefill, ensure_ascii=False)};\n"
             f"  window.__SKILL_PARENT_ORIGIN__ = {json.dumps(parent_origin)};\n"
+            f"window.__SKILL_DISPATCH_URL__ = https://kagrobot-908107496147.asia-east1.run.app/skill/widget/dispatch;\n"
             "</script>\n"
             + html
         )
