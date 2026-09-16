@@ -72,8 +72,8 @@ class FrontierCandidate:
     eid:        str
     label:      str
     definition: Optional[str] = None
-    mechanism:  Optional[str] = None
-    node_type:  Optional[str] = None   # 是否為 Resulting_Concept，供終止判斷用
+    function:   Optional[str] = None   # ← 取代 mechanism
+    node_type:  Optional[str] = None
 
     @property
     def is_rc(self) -> bool:
@@ -82,7 +82,7 @@ class FrontierCandidate:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "eid": self.eid, "label": self.label,
-            "definition": self.definition, "mechanism": self.mechanism,
+            "definition": self.definition, "function": self.function,
             "node_type": self.node_type,
         }
 
@@ -90,7 +90,7 @@ class FrontierCandidate:
     def from_dict(cls, d: Dict[str, Any]) -> "FrontierCandidate":
         return cls(
             eid=d["eid"], label=d["label"],
-            definition=d.get("definition"), mechanism=d.get("mechanism"),
+            definition=d.get("definition"), function=d.get("function"),
             node_type=d.get("node_type"),
         )
 
@@ -273,7 +273,7 @@ class PathState:
                     "eid":        c.eid,
                     "label":      c.label,
                     "definition": c.definition,
-                    "mechanism":  c.mechanism,
+                    "function":   c.function,
                     "is_rc":      c.is_rc,
                 }
                 for c in self.frontier

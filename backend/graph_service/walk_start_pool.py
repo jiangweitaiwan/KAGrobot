@@ -28,7 +28,7 @@ Two-stage 排序（避免對全池每個候選都跑一次 BFS）：
      BFS，取得各自 foundation set，計算 interScore，與 semantic 加權
      合併後重新排序，取最終 top-k。
 
-Embedding 語料維持 name + (mechanism or definition)，與 walk_frontier.py
+Embedding 語料維持 name + (function or definition)，與 walk_frontier.py
 的候選描述語料一致。
 
 【Embedding self-healing GCS cache】
@@ -65,7 +65,7 @@ if TYPE_CHECKING:
 
 _BATCH_SIZE = 64
 _DEFAULT_N_SEM = 8
-_DEFAULT_GCS_OBJECT = "concept_embeddings.pkl"
+_DEFAULT_GCS_OBJECT = "concept_name_function_embeddings.pkl"
 
 
 class StartConceptPool:
@@ -247,10 +247,10 @@ class StartConceptPool:
                 MATCH (c:Concept)
                 WHERE c.type <> 'Resulting_Concept' OR c.type IS NULL
                 RETURN elementId(c) AS eid,
-                       c.name       AS name,
-                       c.type       AS type,
-                       c.definition AS definition,
-                       c.mechanism  AS mechanism
+                    c.name       AS name,
+                    c.type       AS type,
+                    c.definition AS definition,
+                    c.function   AS function
                 """
             ).data()
         return rows
@@ -261,7 +261,7 @@ class StartConceptPool:
 
     def _encode_rows(self, rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         texts = [
-            f"{r['name']} {r.get('mechanism') or r.get('definition') or ''}".strip()
+            f"{r['name']} {r.get('function') or r.get('definition') or ''}".strip()
             for r in rows
         ]
 

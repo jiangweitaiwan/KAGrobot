@@ -88,7 +88,12 @@ def _format_frontier(frontier: List[FrontierCandidate]) -> str:
     lines = []
     for c in frontier:
         tag = "（RC）" if c.is_rc else ""
-        desc = c.definition or c.mechanism or "（無描述）"
+        parts = []
+        if c.definition:
+            parts.append(f"定義：{c.definition}")
+        if c.function:
+            parts.append(f"功能：{c.function}")
+        desc = "；".join(parts) if parts else "（無描述）"
         lines.append(f"- eid={c.eid} | {c.label}{tag} | {desc}")
     return "\n".join(lines) if lines else "（無候選）"
 

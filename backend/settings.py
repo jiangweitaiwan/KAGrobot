@@ -97,6 +97,17 @@ class Settings(BaseSettings):
         description = "GCS bucket for sandbox output"
 
     )
+    # --- GCS walk embeddings（新增） ---
+    walk_embeddings_bucket_name: str = Field(
+        default="kagrobot-walk-embeddings",
+        alias="WALK_EMBEDDINGS_BUCKET_NAME",
+        description=(
+            "StartConceptPool 的 name+function embedding cache 專用 bucket。"
+            "刻意與 gcs_bucketforresult 分開——後者是 GlobalLayoutBuilder 用的"
+            "name+mechanism/definition 語料，語意不同，共用同一個 bucket/物件"
+            "會讓 self-healing cache 把新公式的資料誤判成『已存在』而不重算。"
+        ),
+    )
 
     def resolved_sbert_paths(self, *, base_dir: Optional[Path] = None) -> tuple[str, str]:
         """Return (model_path, tokenizer_dir) with sane defaults."""

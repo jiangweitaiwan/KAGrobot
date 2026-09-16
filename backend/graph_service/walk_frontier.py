@@ -83,7 +83,7 @@ def make_frontier_fetcher(
                 eid=n["eid"],
                 label=n["name"],
                 definition=details.get(n["eid"], {}).get("definition"),
-                mechanism=details.get(n["eid"], {}).get("mechanism"),
+                function=details.get(n["eid"], {}).get("function"),
                 node_type=n["node_type"],
             )
             for n in neighbor_infos
@@ -128,7 +128,6 @@ def _fetch_concept_details(
     driver: Any,
     eids:   List[str],
 ) -> Dict[str, Dict[str, Optional[str]]]:
-    """一次 Cypher 查詢補齊多個 eid 的 definition/mechanism。"""
     if not eids:
         return {}
 
@@ -139,13 +138,13 @@ def _fetch_concept_details(
             MATCH (c:Concept) WHERE elementId(c) = eid
             RETURN elementId(c) AS eid,
                    c.definition AS definition,
-                   c.mechanism  AS mechanism
+                   c.function   AS function
             """,
             eids=eids,
         ).data()
 
     return {
-        row["eid"]: {"definition": row["definition"], "mechanism": row["mechanism"]}
+        row["eid"]: {"definition": row["definition"], "function": row["function"]}
         for row in rows
     }
 
@@ -165,14 +164,12 @@ def _prefilter_by_semantic(
 
     query_text = (context_query or "").strip()
     if not query_text:
-        # 對話剛開始、尚無語意脈絡可用時，不做排序直接截斷，
-        # 與 _sbert_prefilter 的例外分支一致：優雅降級，不讓整個 walk 卡住。
         return candidates[:top_n]
 
     try:
         query_emb = encoder.encode(query_text)[0]
         texts = [
-            f"{c.label} {c.mechanism or c.definition or ''}".strip()
+            f"{c.label} {c.function or c.definition or ''}".strip()
             for c in candidates
         ]
         cand_embs = encoder.encode(texts)

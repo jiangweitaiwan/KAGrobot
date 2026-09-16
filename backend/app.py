@@ -178,7 +178,7 @@ async def lifespan(app: FastAPI):
 
     start_concept_pool = StartConceptPool(
         driver, encoder, coordinator,
-        gcs_bucket_name=(getattr(s, "gcs_bucketforresult", "") or "").strip(),
+        gcs_bucket_name=(getattr(s, "walk_embeddings_bucket_name", "") or "").strip(),
     )
     # 啟動階段直接載入（比照 candidate_retriever.load_embeddings()），
     # 避免第一次 random walk 請求才觸發全量查詢/encode，拖慢那次回應。
