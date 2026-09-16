@@ -19,9 +19,15 @@
  *   - 過期判斷比照 AttachmentCard.isAttachmentExpired 的邏輯（同一份
  *     created_at + expires_in_hours 結構），過期後顯示灰階提示，
  *     不再渲染 iframe（後端簽名 URL 本身通常也已經失效）。
+ *   - 高度：後端在 show_interactive_html 注入的 <script> 裡統一加了
+ *     ResizeObserver + postMessage（見 tools/skill_widget.py），每個
+ *     widget 不需要作者自己實作就會回報 `{ type: 'skill_widget_resize',
+ *     height }`。這裡監聽同一個 message 事件，動態調整 iframe 高度，
+ *     取代原本寫死的 minHeight。widget 是不受信任內容，回報的高度做
+ *     上下限 clamp，避免異常/惡意值撐爆聊天版面。
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { isAttachmentExpired, type Attachment } from "./AttachmentCard";
 
 export type PendingWidget = {
@@ -39,20 +45,41 @@ type Props = {
   onCancel: (widgetId: string) => void;
 };
 
+const MIN_HEIGHT = 120;
+const MAX_HEIGHT = 1400;
+const DEFAULT_HEIGHT = 320;
+
 export function SkillWidgetCard({ widget, disabled, onSubmit, onCancel }: Props) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const expired   = isAttachmentExpired(widget as unknown as Attachment);
 
+  const [height, setHeight] = useState(DEFAULT_HEIGHT);
+
   useEffect(() => {
     function onMessage(e: MessageEvent) {
       if (e.source !== iframeRef.current?.contentWindow) return;
+
       if (e.data?.type === "skill_widget_submit") {
         onSubmit(widget.widget_id, e.data.data);
+        return;
+      }
+
+      if (e.data?.type === "skill_widget_resize") {
+        const h = Number(e.data.height);
+        if (Number.isFinite(h) && h > 0) {
+          setHeight(Math.min(Math.max(h, MIN_HEIGHT), MAX_HEIGHT));
+        }
       }
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
   }, [widget.widget_id, onSubmit]);
+
+  // 每次換一個新 widget（新的 url）時，高度重置回預設值，
+  // 避免沿用上一個 widget 殘留的高度造成畫面跳動或空白。
+  useEffect(() => {
+    setHeight(DEFAULT_HEIGHT);
+  }, [widget.url]);
 
   if (expired) {
     return (
@@ -85,7 +112,13 @@ export function SkillWidgetCard({ widget, disabled, onSubmit, onCancel }: Props)
         src={widget.url}
         sandbox="allow-scripts"
         title={widget.title}
-        style={{ width: "100%", minHeight: 320, border: "none", display: "block" }}
+        style={{
+          width: "100%",
+          height,
+          border: "none",
+          display: "block",
+          transition: "height 0.15s ease",
+        }}
       />
 
       <div style={{ display: "flex", justifyContent: "flex-end", padding: "6px 10px" }}>

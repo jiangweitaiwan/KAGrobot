@@ -132,13 +132,35 @@ def make_show_interactive_html_tool(
             return json.dumps(
                 {"ok": False, "error": f"簽發 widget token 失敗：{exc}"}, ensure_ascii=False
             )
+        dispatch_url = f"{get_settings().backend_base}/skill/widget/dispatch"
 
         injected_html = (
             "<script>\n"
             f"  window.__SKILL_WIDGET_TOKEN__ = {json.dumps(token)};\n"
             f"  window.__SKILL_WIDGET_PARAMS__ = {json.dumps(prefill, ensure_ascii=False)};\n"
             f"  window.__SKILL_PARENT_ORIGIN__ = {json.dumps(parent_origin)};\n"
-            f"window.__SKILL_DISPATCH_URL__ = https://kagrobot-908107496147.asia-east1.run.app/skill/widget/dispatch;\n"
+            f"  window.__SKILL_DISPATCH_URL__ = {json.dumps(dispatch_url)};\n"
+            "  (function () {\n"
+            "    var __lastH = 0;\n"
+            "    function __postHeight() {\n"
+            "      var h = Math.ceil(document.documentElement.getBoundingClientRect().height);\n"
+            "      if (h === __lastH) return;\n"
+            "      __lastH = h;\n"
+            "      try {\n"
+            "        window.parent.postMessage(\n"
+            "          { type: 'skill_widget_resize', height: h },\n"
+            "          window.__SKILL_PARENT_ORIGIN__\n"
+            "        );\n"
+            "      } catch (e) {}\n"
+            "    }\n"
+            "    if (window.ResizeObserver) {\n"
+            "      new ResizeObserver(__postHeight).observe(document.documentElement);\n"
+            "    } else {\n"
+            "      setInterval(__postHeight, 400);\n"
+            "    }\n"
+            "    window.addEventListener('load', __postHeight);\n"
+            "    setTimeout(__postHeight, 0);\n"
+            "  })();\n"
             "</script>\n"
             + html
         )

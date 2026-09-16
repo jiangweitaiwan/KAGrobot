@@ -153,6 +153,10 @@ class Settings(BaseSettings):
             "都能接收提交資料。"
         ),
     )
+    backend_base: str = Field(
+        default="https://kagrobot-908107496147.asia-east1.run.app", alias="BACKEND_BASE",
+        description="後端基礎 URL，供 show_interactive_html 注入的 widget HTML 呼叫 window.__SKILL_DISPATCH_URL__ 時使用。",
+    )
 
 
 @lru_cache
