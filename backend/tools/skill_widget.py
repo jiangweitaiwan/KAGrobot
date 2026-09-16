@@ -36,6 +36,7 @@ from core.skill_loader import HtmlWidgetSpec
 from core.widget_token import issue_token
 from tools.gcs_utils import upload_and_sign
 
+from settings import get_settings
 
 def make_show_interactive_html_tool(
     *,

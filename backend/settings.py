@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     )
     google_cloud_project: str = Field(default="", alias="GOOGLE_CLOUD_PROJECT")
     google_cloud_location: str = Field(
-        default="us-central1", alias="GOOGLE_CLOUD_LOCATION"
+        default="global", alias="VERTEX_AI_LOCATION"
     )
 
     # --- Neo4j ---
