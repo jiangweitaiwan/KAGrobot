@@ -43,13 +43,14 @@ type Props = {
   disabled: boolean;                                   // 已提交/取消後鎖住，避免重複觸發
   onSubmit: (widgetId: string, data: unknown) => void;
   onCancel: (widgetId: string) => void;
+  maxWidthPx?: number;
 };
 
 const MIN_HEIGHT = 120;
 const MAX_HEIGHT = 1400;
 const DEFAULT_HEIGHT = 320;
 
-export function SkillWidgetCard({ widget, disabled, onSubmit, onCancel }: Props) {
+export function SkillWidgetCard({ widget, disabled, onSubmit, onCancel, maxWidthPx }: Props) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const expired   = isAttachmentExpired(widget as unknown as Attachment);
 
@@ -97,7 +98,7 @@ export function SkillWidgetCard({ widget, disabled, onSubmit, onCancel }: Props)
     <div style={{
       border: "1px solid rgba(83,74,183,0.35)", borderRadius: 12,
       overflow: "hidden", margin: "6px 0", background: "rgba(13,18,32,0.5)",
-      maxWidth: 480,
+      maxWidth: maxWidthPx ?? 480,
     }}>
       <div style={{
         display: "flex", justifyContent: "space-between", alignItems: "center",

@@ -30,10 +30,6 @@
   frontier 選項多的時候，真正相關的候選可能被截在 top_n 之外，永遠不會
   被 LLM 看到。
 
-一般 concept（非 RC）目前沒有 function 欄位（見使用者 note），這裡的
-embedding 語料一律用 name + (mechanism or definition)，不採用
-CandidateRetriever 那套「RC 專屬 name+function」語料，等 function 補齊後
-再視情況調整。
 """
 
 from __future__ import annotations

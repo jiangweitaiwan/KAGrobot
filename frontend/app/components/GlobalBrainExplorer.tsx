@@ -116,6 +116,7 @@ type Props = {
   dimBackground?: boolean;      // ← 新增：腦內模式開關
   width?: number;
   height?: number;
+  externalPause?: boolean; 
 };
 
 type PulseInfo = {
@@ -269,7 +270,7 @@ export default function GlobalBrainExplorer({
   const heightRef              = useRef(height);
   const onNodeClickRef         = useRef(onNodeClick);
   const activeCandidateSetRef  = useRef<Set<string>>(new Set());
-
+  const externalPauseRef = useRef(false);
   const walkGroupRef  = useRef<THREE.Group | null>(null);
   const walkPulsesRef = useRef<PulseInfo[]>([]);
 
@@ -279,7 +280,10 @@ export default function GlobalBrainExplorer({
   useEffect(() => { layoutRef.current = layout; }, [layout]);
   useEffect(() => { widthRef.current = width; heightRef.current = height; }, [width, height]);
   useEffect(() => { onNodeClickRef.current = onNodeClick; }, [onNodeClick]);
-
+  useEffect(() => {
+    externalPauseRef.current = !!externalPause;
+    needsRenderRef.current = true;   // 解除暫停時，補畫一幀反映當下真實狀態
+  }, [externalPause]);
   const [focusedCandidateEid, setFocusedCandidateEid] = useState<string | null>(null);
 
   useEffect(() => {
@@ -459,7 +463,7 @@ export default function GlobalBrainExplorer({
     function animate(now: number) {
       animFrameRef.current = requestAnimationFrame(animate);
 
-      if (!isVisibleRef.current) return;
+      if (!isVisibleRef.current || externalPauseRef.current) return;
       if (now - lastFrameTsRef.current < RENDER_FRAME_MS) return;
       lastFrameTsRef.current = now;
       frameCount++;

@@ -23,7 +23,7 @@ import type { SemanticContextData, RecommendedFoundation } from "../components/S
 
 import { AttachmentCard, AttachmentTray, type Attachment } from "../components/AttachmentCard";
 import { SkillWidgetCard, type PendingWidget } from "../components/SkillWidgetCard";
-
+import WidgetOverlay, { type OverlayRect } from "../components/WidgetOverlay";
 
 
 import { useAuth } from "../components/AuthProvider";
@@ -466,12 +466,13 @@ async function fetchWalkStatus(sessionId: string): Promise<WalkStatusResponse | 
 // ─────────────────────────────────────────────────────────────
 
 function ChatBubble({
-  msg, onWidgetSubmit, onWidgetCancel, widgetActionDisabled,
+  msg, onWidgetSubmit, onWidgetCancel, widgetActionDisabled, isActiveWidget,
 }: {
   msg: ChatMessage;
   onWidgetSubmit: (messageId: string, widgetId: string, data: unknown) => void;
   onWidgetCancel: (messageId: string, widgetId: string) => void;
   widgetActionDisabled: boolean;
+  isActiveWidget: boolean;
 }) {
   const attachments = msg.attachments ?? [];
   const parts        = useMemo(() => splitByPlaceholder(msg.content), [msg.content]);
@@ -510,12 +511,22 @@ function ChatBubble({
         </div>
       )}
       {msg.widget && (
-        <SkillWidgetCard
-          widget={msg.widget}
-          disabled={widgetActionDisabled}
-          onSubmit={(widgetId, data) => onWidgetSubmit(msg.id, widgetId, data)}
-          onCancel={(widgetId) => onWidgetCancel(msg.id, widgetId)}
-        />
+        isActiveWidget ? (
+          <div style={{
+            marginTop: 6, fontSize: "0.72rem", color: "var(--purple)",
+            border: "1px dashed rgba(83,74,183,0.4)", borderRadius: 8,
+            padding: "6px 10px", opacity: 0.85,
+          }}>
+            🧾 {msg.widget.title} · 表單顯示於右側面板
+          </div>
+        ) : (
+          <SkillWidgetCard
+            widget={msg.widget}
+            disabled={widgetActionDisabled}
+            onSubmit={(widgetId, data) => onWidgetSubmit(msg.id, widgetId, data)}
+            onCancel={(widgetId) => onWidgetCancel(msg.id, widgetId)}
+          />
+        )
       )}
     </div>
   );
@@ -548,9 +559,10 @@ export default function Page() {
   // 使用者操作——只有這個狀態才鎖住主輸入框；歷史重播載入的 widget
   // （SessionDisplayMessage.widget）不影響這個狀態，使用者仍可正常
   // 繼續打字（見 handleLoadSession 不設定這個 state）。
-  const [pendingWidgetKey, setPendingWidgetKey] = useState<string | null>(null);
+  const [activeWidget, setActiveWidget] = useState<PendingWidget | null>(null);
+  const [activeWidgetMessageId, setActiveWidgetMessageId] = useState<string | null>(null);
   const [widgetActionSubmitting, setWidgetActionSubmitting] = useState(false);
-
+  const [overlayRect, setOverlayRect] = useState<OverlayRect | null>(null);
 
   // ── Random Walk（慢想）Mode ───────────────────────────────────
  
@@ -638,6 +650,8 @@ export default function Page() {
   const boxRef         = useRef<HTMLDivElement | null>(null);
   const explorerColRef = useRef<HTMLDivElement>(null);
   const personalColRef = useRef<HTMLDivElement>(null);
+  const detailPanelRef  = useRef<HTMLDivElement>(null);
+  const semanticPanelRef = useRef<HTMLDivElement>(null);
   const explorerSize   = usePanelSize(explorerColRef as React.RefObject<HTMLDivElement>);
   const personalSize   = usePanelSize(personalColRef  as React.RefObject<HTMLDivElement>);
 
@@ -795,6 +809,44 @@ export default function Page() {
     });
   }, [activeCandidateEids, rcSemanticScores, rcFoundationMap]);
 
+  // ── 量測 Global + Detail + Semantic 三欄的聯集範圍，供 WidgetOverlay 定位 ──
+  // 視窗 < 1200px 時 chat-column 會被 CSS 隱藏、grid 欄位重排，直接回退
+  // 成全螢幕（WidgetOverlay 收到 rect=null 時自行 fallback 為 inset:0）。
+  useEffect(() => {
+    function computeOverlayRect() {
+      if (typeof window === "undefined" || window.innerWidth < 1200) {
+        setOverlayRect(null);
+        return;
+      }
+      const nodes = [explorerColRef.current, detailPanelRef.current, semanticPanelRef.current];
+      if (nodes.some((el) => !el)) {
+        setOverlayRect(null);
+        return;
+      }
+      const rects  = nodes.map((el) => el!.getBoundingClientRect());
+      const top    = Math.min(...rects.map((r) => r.top));
+      const left   = Math.min(...rects.map((r) => r.left));
+      const right  = Math.max(...rects.map((r) => r.right));
+      const bottom = Math.max(...rects.map((r) => r.bottom));
+      setOverlayRect({ top, left, width: right - left, height: bottom - top });
+    }
+
+    computeOverlayRect();
+    window.addEventListener("resize", computeOverlayRect);
+
+    let ro: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined") {
+      ro = new ResizeObserver(computeOverlayRect);
+      [explorerColRef.current, detailPanelRef.current, semanticPanelRef.current].forEach((el) => {
+        if (el) ro!.observe(el);
+      });
+    }
+
+    return () => {
+      window.removeEventListener("resize", computeOverlayRect);
+      ro?.disconnect();
+    };
+  }, []);
   // ──────────────────────────────────────────────────────────
   // GlobalBrainExplorer node click
   // ──────────────────────────────────────────────────────────
@@ -1141,7 +1193,7 @@ export default function Page() {
   // ──────────────────────────────────────────────────────────
 
   const canSend = !!input.trim() && !isLoading && !!sessionId && !!userId
-    && !walkStreaming && phase !== "walk_awaiting_answer" && pendingWidgetKey === null;
+    && !walkStreaming && phase !== "walk_awaiting_answer" && activeWidget === null;
 
   async function typewriterAppend(
     fullText: string,
@@ -1210,12 +1262,14 @@ export default function Page() {
       setPhase(nextPhase);
       localStorage.setItem(PHASE_KEY, nextPhase);
 
-      await typewriterAppend(data.reply || "", data.attachments ?? [], data.pending_widget);
+      const aiId = await typewriterAppend(data.reply || "", data.attachments ?? [], data.pending_widget);
 
       if (data.pending_widget) {
-        setPendingWidgetKey(data.pending_widget.widget_id);
+        setActiveWidget(data.pending_widget);
+        setActiveWidgetMessageId(aiId);
       } else {
-        setPendingWidgetKey(null);
+        setActiveWidget(null);
+        setActiveWidgetMessageId(null);
       }
 
       if (nextPhase === "walk_pending") {
@@ -1253,26 +1307,32 @@ export default function Page() {
   ) => {
     setWidgetActionSubmitting(true);
     setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, widget: undefined } : m)));
-    setPendingWidgetKey(null);
+    if (messageId === activeWidgetMessageId) {
+        setActiveWidget(null);
+        setActiveWidgetMessageId(null);
+      }
     try {
       await sendChatTurn(buildWidgetSubmissionText(widgetId, data), { walkEnabledOverride: false });
     } finally {
       setWidgetActionSubmitting(false);
     }
-  }, [sendChatTurn]);
+  }, [sendChatTurn, activeWidgetMessageId]);
 
   /** widget 取消：同上，但送出的是 cancelled=true 標記，
    *  system prompt 已教會 LLM 這代表使用者放棄本次輸入。 */
   const handleWidgetCancel = useCallback(async (messageId: string, widgetId: string) => {
     setWidgetActionSubmitting(true);
     setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, widget: undefined } : m)));
-    setPendingWidgetKey(null);
+    if (messageId === activeWidgetMessageId) {
+        setActiveWidget(null);
+        setActiveWidgetMessageId(null);
+      }
     try {
       await sendChatTurn(buildWidgetCancelText(widgetId), { walkEnabledOverride: false });
     } finally {
       setWidgetActionSubmitting(false);
     }
-  }, [sendChatTurn]);
+  }, [sendChatTurn, activeWidgetMessageId]);
 
   // ──────────────────────────────────────────────────────────
   // PersonalBrain: confirm RC → MainAgent
@@ -1325,8 +1385,14 @@ export default function Page() {
 
       setPhase(data.phase || "main_agent");
       localStorage.setItem(PHASE_KEY, data.phase || "main_agent");
-      await typewriterAppend(data.reply || "", data.attachments ?? [], data.pending_widget);
-      setPendingWidgetKey(data.pending_widget ? data.pending_widget.widget_id : null);
+      const aiId = await typewriterAppend(data.reply || "", data.attachments ?? [], data.pending_widget);
+      if (data.pending_widget) {
+        setActiveWidget(data.pending_widget);
+        setActiveWidgetMessageId(aiId);
+      } else {
+        setActiveWidget(null);
+        setActiveWidgetMessageId(null);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "請求失敗,請稍後重試");
       setMessages((prev) => [...prev, { id: createId(), role: "ai", content: "抱歉,連線失敗。" }]);
@@ -1367,7 +1433,8 @@ export default function Page() {
     setBrainModeOn(false); 
     setWalkReadOnly(false);
     setWalkQaLog([]); 
-    setPendingWidgetKey(null);
+    setActiveWidget(null);
+    setActiveWidgetMessageId(null);
   }
 
   const openHistory = useCallback(async () => {
@@ -1417,7 +1484,8 @@ export default function Page() {
     setSessionId(sessionDetail.session_id);
     setPhase(sanitizedPhase);
     setMessages(restoredMessages);
-    setPendingWidgetKey(null);
+    setActiveWidget(null);
+    setActiveWidgetMessageId(null);
     setWalkPaths({});
     setPendingWalkQuestion(null);
     setWalkStreaming(false);
@@ -1464,7 +1532,7 @@ export default function Page() {
   }, []);
 
   const inputPlaceholder =
-    pendingWidgetKey !== null            ? "請先在上方表單完成輸入或按取消…" :
+    activeWidget !== null                ? "請先在右側表單完成輸入或按取消…" :
     phase === "walk_awaiting_answer"     ? "回答慢想過程中的問題…" :
     phase === "main_agent"               ? "繼續詢問分析…" :
     "輸入你的問題…";
@@ -1549,7 +1617,7 @@ export default function Page() {
       <div className="content-area">
 
         {/* ══ Chat ══ */}
-        <div className="chat-column">
+        <div className="chat-column" style={activeWidget ? { pointerEvents: "none" } : undefined}>
           <div className="chat-box" ref={boxRef}>
             {messages.length === 0 ? (
               <div className="meta" style={{ textAlign: "center", marginTop: 24 }}>
@@ -1563,6 +1631,7 @@ export default function Page() {
                   onWidgetSubmit={handleWidgetSubmit}
                   onWidgetCancel={handleWidgetCancel}
                   widgetActionDisabled={widgetActionSubmitting || isLoading}
+                  isActiveWidget={msg.id === activeWidgetMessageId}
                 />
               ))
             )}
@@ -1585,7 +1654,7 @@ export default function Page() {
                     if (canSend) submitMessage(e as unknown as FormEvent);
                   }
                 }}
-                disabled={isLoading || pendingWidgetKey !== null}
+                disabled={isLoading || activeWidget !== null}
               />
               <button type="submit" disabled={!canSend} style={{ alignSelf: "flex-end" }}>
                 送出
@@ -1605,38 +1674,47 @@ export default function Page() {
             rcFoundationMap={rcFoundationMap}
             onNodeClick={handleNodeClick}
             dimBackground={brainModeOn}
+            externalPause={activeWidget !== null}
             width={explorerSize.w}
             height={Math.max(explorerSize.h - 32, 280)}
           />
         </div>
 
         {/* ══ DetailPanel ══ */}
-        <DetailPanel
-          node={selectedNode}
-          detail={detail}
-          foundationTree={foundationTree}
-          loadingTree={loadingTree}
-          personalBrain={personalBrain}
-          rcSemanticScores={rcSemanticScores}
-          rcFoundationMap={rcFoundationMap}
-          alpha={ALPHA}
-          rcCategoryMap={rcCategoryMap}
-          fetchConceptDetail={fetchConceptDetail}
-          onAddFoundations={addFoundationsToBrain}
-          onRemove={removeFromBrain}
-          onUpdateWeight={updateWeight}
-          onAskAboutNode={handleAskAboutNode}
-        />
+        <div className="widget-measure-wrap" ref={detailPanelRef}>
+          <DetailPanel
+            node={selectedNode}
+            detail={detail}
+            foundationTree={foundationTree}
+            loadingTree={loadingTree}
+            personalBrain={personalBrain}
+            rcSemanticScores={rcSemanticScores}
+            rcFoundationMap={rcFoundationMap}
+            alpha={ALPHA}
+            rcCategoryMap={rcCategoryMap}
+            fetchConceptDetail={fetchConceptDetail}
+            onAddFoundations={addFoundationsToBrain}
+            onRemove={removeFromBrain}
+            onUpdateWeight={updateWeight}
+            onAskAboutNode={handleAskAboutNode}
+          />
+        </div>
 
-        <SemanticPanel
-          context={semanticContext}
-          rcScores={rcSemanticScores}
-          recommendedFoundations={recommendedFoundations}
-          onAddFoundation={(eid, label) => addFoundationsToBrain([{ eid, label }])}
-        />
+        <div className="widget-measure-wrap" ref={semanticPanelRef}>
+          <SemanticPanel
+            context={semanticContext}
+            rcScores={rcSemanticScores}
+            recommendedFoundations={recommendedFoundations}
+            onAddFoundation={(eid, label) => addFoundationsToBrain([{ eid, label }])}
+          />
+        </div>
 
         {/* ══ PersonalBrain ══ */}
-        <div className="brain-panel" ref={personalColRef}>
+        <div
+          className="brain-panel"
+          ref={personalColRef}
+          style={activeWidget ? { pointerEvents: "none" } : undefined}
+        >
           <div className="brain-panel-label">Personal Brain</div>
           <PersonalBrain
             layout={globalLayout}
@@ -1677,6 +1755,17 @@ export default function Page() {
             setWalkQaLog([]);
             setBrainModeOn(false);
           }}
+        />
+      )}
+      
+      {/* ── 新增：Widget Overlay ── */}
+      {activeWidget && activeWidgetMessageId && (
+        <WidgetOverlay
+          rect={overlayRect}
+          widget={activeWidget}
+          disabled={widgetActionSubmitting || isLoading}
+          onSubmit={(widgetId, data) => handleWidgetSubmit(activeWidgetMessageId, widgetId, data)}
+          onCancel={(widgetId) => handleWidgetCancel(activeWidgetMessageId, widgetId)}
         />
       )}
 
