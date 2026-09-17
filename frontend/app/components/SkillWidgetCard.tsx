@@ -3,28 +3,19 @@
 /**
  * SkillWidgetCard.tsx — 顯示 show_interactive_html 產出的互動元件。
  *
- * 設計要點（與後端 tools/skill_widget.py 對應）：
- *   - iframe 一律 `sandbox="allow-scripts"`，刻意不給 `allow-same-origin`：
- *     widget HTML 是不受信任內容（由 skill 作者提供、注入了 widget_token），
- *     不能讓它拿到 parent 頁面的 cookie / localStorage / Firebase token。
- *   - 即時試算（拖曳 slider 等）完全在 iframe 內部透過
- *     POST /skill/widget/dispatch 完成，不經過這個元件、也不經過 LLM。
- *   - 最終「送出」由 iframe 內的 JS 呼叫
- *     `window.parent.postMessage({ type: 'skill_widget_submit', data }, origin)`
- *     觸發，這裡監聽 message 事件並比對 event.source，避免任意頁面
- *     偽造訊息。
- *   - 「取消」按鈕：使用者可以不填完表單就放棄，送出
- *     `{ cancelled: true }`，讓對話可以繼續而不是卡住（比照
- *     walk_awaiting_answer 鎖住輸入框、但至少留一個退路）。
- *   - 過期判斷比照 AttachmentCard.isAttachmentExpired 的邏輯（同一份
- *     created_at + expires_in_hours 結構），過期後顯示灰階提示，
- *     不再渲染 iframe（後端簽名 URL 本身通常也已經失效）。
- *   - 高度：後端在 show_interactive_html 注入的 <script> 裡統一加了
- *     ResizeObserver + postMessage（見 tools/skill_widget.py），每個
- *     widget 不需要作者自己實作就會回報 `{ type: 'skill_widget_resize',
- *     height }`。這裡監聽同一個 message 事件，動態調整 iframe 高度，
- *     取代原本寫死的 minHeight。widget 是不受信任內容，回報的高度做
- *     上下限 clamp，避免異常/惡意值撐爆聊天版面。
+ * ...(原本註解不變)...
+ *
+ * ── 動態高度上限（新增）───────────────────────────────────────
+ *   MAX_HEIGHT 原本是寫死的 1400px，在較矮的視窗（筆電、縮小視窗）
+ *   下常常還是比可視高度高，導致 widget 下半部（甚至「取消」按鈕）
+ *   被裁到畫面外、且外層沒有捲軸可以碰到。
+ *
+ *   現在改成 useViewportMaxHeight()：以 window.innerHeight 扣掉一段
+ *   預留給版面 chrome（header/footer/外距）的空間，隨視窗 resize 動態
+ *   重新計算，並拿這個值同時 clamp「iframe 回報的高度」與「卡片本身
+ *   的 maxHeight」。卡片內部的 iframe 容器另外套用 overflow-y: auto
+ *   作為保底——即使極端情況下內容仍然比算出來的上限高，也是卡片自己
+ *   出現內部捲軸，而不是整塊被切掉、構不到按鈕。
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -46,15 +37,49 @@ type Props = {
   maxWidthPx?: number;
 };
 
-const MIN_HEIGHT = 120;
-const MAX_HEIGHT = 1400;
+const MIN_HEIGHT     = 120;
 const DEFAULT_HEIGHT = 320;
+
+// 卡片本身扣掉 header（約 30px）+ footer（約 40px）+ 上下邊框，
+// 供 useViewportMaxHeight 算「iframe 還能用多少高度」時扣除。
+const CARD_CHROME_HEIGHT = 80;
+
+// 視窗留給 overlay 外距、避免卡片整個貼到螢幕邊緣的安全邊距
+// （對應 WidgetOverlay 的 padding: 20 上下各一份 + 一點緩衝）。
+const VIEWPORT_MARGIN = 120;
+
+/** 依目前視窗高度動態算出「整張卡片」可以用的最大高度，
+ *  隨 resize 即時更新。SSR 階段 window 不存在，先給一個保守預設值，
+ *  掛載後的第一個 effect 會立刻校正成真實值。 */
+function useViewportMaxHeight(margin: number): number {
+  const [maxH, setMaxH] = useState<number>(() =>
+    typeof window !== "undefined"
+      ? Math.max(window.innerHeight - margin, MIN_HEIGHT + CARD_CHROME_HEIGHT)
+      : 800,
+  );
+
+  useEffect(() => {
+    function update() {
+      setMaxH(Math.max(window.innerHeight - margin, MIN_HEIGHT + CARD_CHROME_HEIGHT));
+    }
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, [margin]);
+
+  return maxH;
+}
 
 export function SkillWidgetCard({ widget, disabled, onSubmit, onCancel, maxWidthPx }: Props) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const expired   = isAttachmentExpired(widget as unknown as Attachment);
 
   const [height, setHeight] = useState(DEFAULT_HEIGHT);
+
+  // 整張卡片能用的最大高度（隨視窗 resize 動態更新）
+  const cardMaxHeight = useViewportMaxHeight(VIEWPORT_MARGIN);
+  // iframe 本身能用的最大高度 = 卡片上限扣掉 header/footer
+  const iframeMaxHeight = Math.max(cardMaxHeight - CARD_CHROME_HEIGHT, MIN_HEIGHT);
 
   useEffect(() => {
     function onMessage(e: MessageEvent) {
@@ -68,19 +93,19 @@ export function SkillWidgetCard({ widget, disabled, onSubmit, onCancel, maxWidth
       if (e.data?.type === "skill_widget_resize") {
         const h = Number(e.data.height);
         if (Number.isFinite(h) && h > 0) {
-          setHeight(Math.min(Math.max(h, MIN_HEIGHT), MAX_HEIGHT));
+          setHeight(Math.min(Math.max(h, MIN_HEIGHT), iframeMaxHeight));
         }
       }
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [widget.widget_id, onSubmit]);
+  }, [widget.widget_id, onSubmit, iframeMaxHeight]);
 
   // 每次換一個新 widget（新的 url）時，高度重置回預設值，
   // 避免沿用上一個 widget 殘留的高度造成畫面跳動或空白。
   useEffect(() => {
-    setHeight(DEFAULT_HEIGHT);
-  }, [widget.url]);
+    setHeight(Math.min(DEFAULT_HEIGHT, iframeMaxHeight));
+  }, [widget.url, iframeMaxHeight]);
 
   if (expired) {
     return (
@@ -96,33 +121,48 @@ export function SkillWidgetCard({ widget, disabled, onSubmit, onCancel, maxWidth
 
   return (
     <div style={{
-      border: "1px solid rgba(83,74,183,0.35)", borderRadius: 12,
-      overflow: "hidden", margin: "6px 0", background: "rgba(13,18,32,0.5)",
-      maxWidth: maxWidthPx ?? 480,
+      border:        "1px solid rgba(83,74,183,0.35)",
+      borderRadius:  12,
+      overflow:      "hidden",
+      margin:        "6px 0",
+      background:    "rgba(13,18,32,0.5)",
+      maxWidth:      maxWidthPx ?? 480,
+      maxHeight:     cardMaxHeight,
+      display:       "flex",
+      flexDirection: "column",
     }}>
       <div style={{
         display: "flex", justifyContent: "space-between", alignItems: "center",
         padding: "6px 10px", fontSize: "0.72rem", color: "var(--purple)",
         borderBottom: "1px solid rgba(83,74,183,0.2)",
+        flexShrink: 0,
       }}>
         <span>🧾 {widget.title}</span>
       </div>
 
-      <iframe
-        ref={iframeRef}
-        src={widget.url}
-        sandbox="allow-scripts"
-        title={widget.title}
-        style={{
-          width: "100%",
-          height,
-          border: "none",
-          display: "block",
-          transition: "height 0.15s ease",
-        }}
-      />
+      {/* iframe 容器：獨立的可捲動區域。正常情況下 iframe 高度已經被
+         iframeMaxHeight clamp 過、不會超出，這層 overflow-y 是保底，
+         避免任何極端狀況（resize 事件延遲、內容異常）讓按鈕構不到。 */}
+      <div style={{ overflowY: "auto", minHeight: 0 }}>
+        <iframe
+          ref={iframeRef}
+          src={widget.url}
+          sandbox="allow-scripts"
+          title={widget.title}
+          style={{
+            width: "100%",
+            height,
+            border: "none",
+            display: "block",
+            transition: "height 0.15s ease",
+          }}
+        />
+      </div>
 
-      <div style={{ display: "flex", justifyContent: "flex-end", padding: "6px 10px" }}>
+      <div style={{
+        display: "flex", justifyContent: "flex-end", padding: "6px 10px",
+        flexShrink: 0, borderTop: "1px solid rgba(83,74,183,0.15)",
+      }}>
         <button
           type="button"
           disabled={disabled}

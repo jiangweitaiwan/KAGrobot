@@ -8,8 +8,17 @@
  * rect 為 null(尚未量測完成,或視窗寬度 < 1200px、chat-column 已消失
  * 的斷點)時退回全螢幕置中,確保任何螢幕寬度都能操作表單。
  *
- * 這裡只負責「疊層 + 定位 + 置中卡片」，實際互動邏輯（submit/cancel）
- * 委派給既有的 SkillWidgetCard，不重複實作。
+ * ── 可捲動置中（修正）─────────────────────────────────────────
+ *   外層容器原本用 alignItems/justifyContent: center 置中卡片，
+ *   但當卡片（尤其是內容較高的 widget）比容器還高時，flexbox 用
+ *   align-items: center 置中會讓內容「往上下兩側溢出」且使用者
+ *   捲不到超出的部分（經典的 flexbug #9：置中的 flex item 若比
+ *   容器大，捲動軸抵達不了被裁掉的那一側）。
+ *
+ *   改法：外層容器保留 overflow-y: auto，但拿掉 align/justify
+ *   center，改成內層包一個 margin: auto 的 wrapper 來置中——這個
+ *   寫法在內容小於容器時效果等同置中，內容大於容器時則會從最上方
+ *   開始正常往下捲動，兩種情況都不會有構不到的區域。
  */
 
 import { SkillWidgetCard, type PendingWidget } from "./SkillWidgetCard";
@@ -38,21 +47,24 @@ export default function WidgetOverlay({ rect, widget, disabled, onSubmit, onCanc
         ...positionStyle,
         zIndex:          900,
         display:         "flex",
-        alignItems:      "center",
-        justifyContent:  "center",
         padding:         20,
         boxSizing:       "border-box",
         background:      "rgba(3,1,8,0.75)",
         backdropFilter:  "blur(3px)",
+        overflowY:       "auto",   // ← 容器本身可捲動，避免內容被裁掉又構不到
       }}
     >
-      <SkillWidgetCard
-        widget={widget}
-        disabled={disabled}
-        onSubmit={onSubmit}
-        onCancel={onCancel}
-        maxWidthPx={OVERLAY_MAX_WIDTH}
-      />
+      {/* margin: auto 置中寫法：內容小於容器時置中效果與原本相同，
+         內容大於容器時可正常從頂部往下捲動（不會有捲不到的區塊）。 */}
+      <div style={{ margin: "auto", maxWidth: "100%" }}>
+        <SkillWidgetCard
+          widget={widget}
+          disabled={disabled}
+          onSubmit={onSubmit}
+          onCancel={onCancel}
+          maxWidthPx={OVERLAY_MAX_WIDTH}
+        />
+      </div>
     </div>
   );
 }
