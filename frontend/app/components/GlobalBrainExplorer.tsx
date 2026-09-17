@@ -230,7 +230,8 @@ export default function GlobalBrainExplorer({
   walkIllumination,
   rcFoundationMap,
   onNodeClick,
-  dimBackground = false,     // ← 新增
+  dimBackground = false,   
+  externalPause = false,
   width  = 480,
   height = 480,
 }: Props) {
