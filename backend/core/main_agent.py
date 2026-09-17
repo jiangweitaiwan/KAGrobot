@@ -454,9 +454,13 @@ class MainAgent:
         header = "══════════════════════════════\n可用工具\n══════════════════════════════"
         parts: List[str] = [header]
 
-        if skill and skill.has_functions and self._sandbox_provisioner is not None:
+        if (
+            skill and skill.has_functions
+            and self._sandbox_provisioner is not None
+            and not skill.has_html
+        ):
             parts.append(self._sandbox_tools_description())
-        elif skill and skill.has_functions:
+        elif skill and skill.has_functions and not skill.has_html:
             parts.append(
                 "（此 Skill 含程式碼，但目前未設定沙盒環境，無法執行——"
                 "僅能依「分析方法」說明自行推理，不要嘗試呼叫沙盒工具。）"
@@ -558,7 +562,12 @@ class MainAgent:
     ) -> List[StructuredTool]:
         langchain_tools: List[StructuredTool] = []   # ← 修正：搬到最上面，兩個分支都能安全 append
 
-        if skill and skill.has_functions and skill.skill_dir is not None:
+        if (
+            skill
+            and skill.has_functions
+            and skill.skill_dir is not None
+            and not skill.has_html
+        ):
             if self._sandbox_provisioner is not None:
                 remote_root = f"/home/user/skills/{self._skill_slug(skill.rc_name)}"
                 computer = SandboxComputer(
