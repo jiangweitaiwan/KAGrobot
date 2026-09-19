@@ -27,6 +27,10 @@ import type {
 import type { RCRankedItem, RCPathData } from "../components/PersonalBrain";
 import type { BertopicLayoutData } from "../components/BertopicMap";
 
+import {
+  foundationTreeToRCEntry,
+  type RCFoundationMapEntry,
+} from "../lib/rcRanking";
 // ─────────────────────────────────────────────────────────────
 // 敘事線核心文案 / id
 // ─────────────────────────────────────────────────────────────
@@ -162,23 +166,23 @@ export const GUIDE_FOUNDATION_TREE: FoundationTreeData = {
   anchor_eid: GUIDE_IDS.rcInflation,
   anchor_label: "通膨黏性價格假說",
   foundations: [
-    { element_id: GUIDE_IDS.priceStick, label: "價格僵固性" },
-    { element_id: GUIDE_IDS.menuCost,   label: "菜單成本理論" },
-    { element_id: GUIDE_IDS.calvo,      label: "Calvo 定價模型" },
-    { element_id: GUIDE_IDS.feel,       label: "風險趨避" },
+    { element_id: GUIDE_IDS.priceStick, label: "價格僵固性",     depth: 1, dominant_type: "support", support_weight: 1.0, critique_weight: 0 },
+    { element_id: GUIDE_IDS.menuCost,   label: "菜單成本理論",   depth: 1, dominant_type: "support", support_weight: 0.8, critique_weight: 0 },
+    { element_id: GUIDE_IDS.calvo,      label: "Calvo 定價模型", depth: 1, dominant_type: "support", support_weight: 0.9, critique_weight: 0 },
+    { element_id: GUIDE_IDS.feel,       label: "風險趨避",       depth: 1, dominant_type: "support", support_weight: 0.5, critique_weight: 0 },
   ],
   nodes: [
-    { element_id: GUIDE_IDS.rcInflation, label: "通膨黏性價格假說" },
-    { element_id: GUIDE_IDS.priceStick,  label: "價格僵固性" },
-    { element_id: GUIDE_IDS.menuCost,    label: "菜單成本理論" },
-    { element_id: GUIDE_IDS.calvo,       label: "Calvo 定價模型" },
-    { element_id: GUIDE_IDS.feel,        label: "風險趨避" },
+    { element_id: GUIDE_IDS.rcInflation, label: "通膨黏性價格假說", node_type: "support" },
+    { element_id: GUIDE_IDS.priceStick,  label: "價格僵固性",       node_type: "support" },
+    { element_id: GUIDE_IDS.menuCost,    label: "菜單成本理論",     node_type: "support" },
+    { element_id: GUIDE_IDS.calvo,       label: "Calvo 定價模型",   node_type: "support" },
+    { element_id: GUIDE_IDS.feel,        label: "風險趨避",         node_type: "support" },
   ],
   edges: [
-    { source: GUIDE_IDS.priceStick, target: GUIDE_IDS.rcInflation },
-    { source: GUIDE_IDS.menuCost,   target: GUIDE_IDS.rcInflation },
-    { source: GUIDE_IDS.calvo,      target: GUIDE_IDS.rcInflation },
-    { source: GUIDE_IDS.feel,       target: GUIDE_IDS.rcInflation },
+    { source: GUIDE_IDS.priceStick, target: GUIDE_IDS.rcInflation, edge_type: "support" },
+    { source: GUIDE_IDS.menuCost,   target: GUIDE_IDS.rcInflation, edge_type: "support" },
+    { source: GUIDE_IDS.calvo,      target: GUIDE_IDS.rcInflation, edge_type: "support" },
+    { source: GUIDE_IDS.feel,       target: GUIDE_IDS.rcInflation, edge_type: "support" },
   ],
 };
 
@@ -197,16 +201,13 @@ export const GUIDE_PERSONAL_BRAIN: PersonalBrainConcept[] = [
 // RCFoundationMap / RCSemanticScore（DetailPanel 排名預覽需要）
 // ─────────────────────────────────────────────────────────────
 
-export const GUIDE_RC_FOUNDATION_MAP: RCFoundationMap = new Map([
-  [GUIDE_IDS.rcInflation, {
-    label: "通膨黏性價格假說",
-    foundationEids: GUIDE_FOUNDATION_TREE.foundations.map((f) => f.element_id),
-    treeNodes: GUIDE_FOUNDATION_TREE.nodes,
-    treeEdges: GUIDE_FOUNDATION_TREE.edges,
-  }],
+export const GUIDE_RC_FOUNDATION_MAP: RCFoundationMap = new Map<string, RCFoundationMapEntry>([
+  [GUIDE_IDS.rcInflation, foundationTreeToRCEntry(GUIDE_FOUNDATION_TREE)],
   [GUIDE_IDS.rcRateShock, {
     label: "升息衝擊分析",
-    foundationEids: [GUIDE_IDS.rcInflation],
+    foundations: [
+      { eid: GUIDE_IDS.rcInflation, supportWeight: 1.0, critiqueWeight: 0 },
+    ],
   }],
 ]);
 

@@ -241,7 +241,11 @@ function saveHistory(msgs: ChatMessage[]): void {
   catch { localStorage.removeItem(HISTORY_KEY); }
 }
 
-import { computeRCRanking } from "../lib/rcRanking";
+import {
+  computeRCRanking,
+  normalizeFoundationTree,
+  foundationTreeToRCEntry,
+} from "../lib/rcRanking";
 
 function walkSessionDtoToPathStates(dto: WalkSessionDto): Record<number, WalkPathState> {
   const out: Record<number, WalkPathState> = {};
@@ -329,7 +333,12 @@ async function fetchSemanticContextData(sessionId: string): Promise<SemanticCont
     );
     if (!r.ok) throw new Error(`${r.status}`);
     const d = await r.json();
-    return { query: d.query ?? "", intent_types: d.intent_types ?? [], summary: d.summary ?? "" };
+    return {
+      query:            d.query ?? "",
+      intent_types:     d.intent_types ?? [],
+      summary:          d.summary ?? "",
+      thinking_process: d.thinking_process ?? "",
+    };
   } catch (err) {
     console.warn("[semantic-context]", err);
     return null;
@@ -368,13 +377,7 @@ async function fetchFoundationRecommendations(sessionId: string): Promise<Recomm
 
 async function fetchExpandBatch(
   eids: string[],
-): Promise<Record<string, {
-  anchor_eid: string;
-  anchor_label: string;
-  foundations: { element_id: string; label: string; depth: number; dominant_type: string; support_weight: number; critique_weight: number }[];
-  nodes: { element_id: string; label: string; node_type: string }[];
-  edges: { source: string; target: string; edge_type: string }[];
-}>> {
+): Promise<Record<string, FoundationTreeData>> {
   if (!API_BASE || eids.length === 0) return {};
   try {
     const r = await apiFetch(`${API_BASE.replace(/\/$/, "")}/graph/expand/batch`, {
@@ -384,10 +387,27 @@ async function fetchExpandBatch(
     });
     if (!r.ok) throw new Error(`${r.status}`);
     const d = await r.json();
-    return d.results ?? {};
+    const out: Record<string, FoundationTreeData> = {};
+    for (const [eid, raw] of Object.entries(d.results ?? {})) {
+      out[eid] = normalizeFoundationTree(raw);
+    }
+    return out;
   } catch (err) {
     console.warn("[expand/batch]", err);
     return {};
+  }
+}
+
+/** 單筆 /graph/expand/{eid}，與 batch 共用同一套 normalize。 */
+async function fetchExpandOne(eid: string): Promise<FoundationTreeData | null> {
+  if (!API_BASE) return null;
+  try {
+    const r = await apiFetch(`${API_BASE.replace(/\/$/, "")}/graph/expand/${eid}`);
+    if (!r.ok) throw new Error(`${r.status}`);
+    return normalizeFoundationTree(await r.json());
+  } catch (err) {
+    console.warn("[graph/expand]", err);
+    return null;
   }
 }
 
@@ -773,20 +793,12 @@ export default function Page() {
     missing.forEach((eid) => expandFetchedRef.current.add(eid));
 
     fetchExpandBatch(missing).then((results) => {
-      if (Object.keys(results).length === 0) return;
+      const entries = Object.entries(results);
+      if (entries.length === 0) return;
       setRCFoundationMap((prev) => {
         const next = new Map(prev);
-        for (const [eid, r] of Object.entries(results)) {
-          next.set(eid, {
-            label: r.anchor_label || eid,
-            foundations: r.foundations.map((f) => ({
-              eid: f.element_id,
-              supportWeight: f.support_weight,
-              critiqueWeight: f.critique_weight,
-            })),
-            treeNodes: r.nodes,
-            treeEdges: r.edges,
-          });
+        for (const [eid, tree] of entries) {
+          next.set(eid, foundationTreeToRCEntry(tree));
         }
         return next;
       });
@@ -845,10 +857,13 @@ export default function Page() {
     const base = API_BASE.replace(/\/$/, "");
 
     const [detailRes, treeRes] = await Promise.allSettled([
-      apiFetch(`${base}/concept/detail/${node.id}`).then((r) => r.json() as Promise<ConceptDetail>),
-      apiFetch(`${base}/graph/expand/${node.id}`).then((r) => r.json() as Promise<FoundationTreeData>),
+      apiFetch(`${base}/concept/detail/${node.id}`).then((r) => {
+        if (!r.ok) throw new Error(`${r.status}`);
+        return r.json() as Promise<ConceptDetail>;
+      }),
+      fetchExpandOne(node.id),
     ]);
-
+    
     if (detailRes.status === "fulfilled") setDetail(detailRes.value);
     if (treeRes.status === "fulfilled")   setFoundationTree(treeRes.value);
     setLoadingTree(false);
@@ -1159,17 +1174,10 @@ export default function Page() {
   // PersonalBrain: fetch foundation tree(垂直剖面圖用)
   // ──────────────────────────────────────────────────────────
 
-  const fetchFoundationTree = useCallback(async (eid: string): Promise<FoundationTreeData | null> => {
-    if (!API_BASE) return null;
-    try {
-      const r = await apiFetch(`${API_BASE.replace(/\/$/, "")}/graph/expand/${eid}`);
-      if (!r.ok) throw new Error(`${r.status}`);
-      return await r.json();
-    } catch (err) {
-      console.warn("[graph/expand]", err);
-      return null;
-    }
-  }, []);
+  const fetchFoundationTree = useCallback(
+    (eid: string): Promise<FoundationTreeData | null> => fetchExpandOne(eid),
+    [],
+  );
 
   // ──────────────────────────────────────────────────────────
   // Chat（共用送出邏輯：一般輸入 / widget 提交 / widget 取消

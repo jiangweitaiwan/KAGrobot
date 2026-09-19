@@ -28,23 +28,17 @@ export type ConceptDetail = {
   papers: { title: string; premises: string | null; constraints: string | null }[];
 };
 
-import { computeRCRanking, type FoundationPolarity, type RCFoundationMap, type RCFoundationEntry, type RCRanked } from "../lib/rcRanking";
+import {
+  computeRCRanking,
+  type FoundationPolarity,
+  type FoundationTreeData,
+  type RCFoundationMap,
+  type RCFoundationEntry,
+  type RCRanked,
+} from "../lib/rcRanking";
 
-export type { FoundationPolarity, RCFoundationMap, RCFoundationEntry, RCRanked };
-export type FoundationTreeData = {
-  anchor_eid:   string;
-  anchor_label: string;
-  foundations: {
-      element_id:      string;
-      label:           string;
-      depth:           number;
-      dominant_type:   FoundationPolarity;
-      support_weight:  number;
-      critique_weight: number;
-    }[];
-    nodes: { element_id: string; label: string; node_type: FoundationPolarity }[];
-    edges: { source: string; target: string; edge_type: "support" | "critique" }[];
-};
+export type { FoundationPolarity, FoundationTreeData, RCFoundationMap, RCFoundationEntry, RCRanked };
+
 
 
 
@@ -91,6 +85,7 @@ type FNode = {
   isAnchor: boolean;
   isLeaf:   boolean;
   depth:    number;
+  polarity: FoundationPolarity; 
   x?: number;
   y?: number;
 };
@@ -98,6 +93,7 @@ type FNode = {
 type FEdge = {
   source: string;
   target: string;
+  edgeType: "support" | "critique"; 
 };
 
 const T = {
@@ -116,6 +112,11 @@ const T = {
   edge_base:      "#1e3050",
   edge_active:    "#e8a030",
   edge_foundation:"#534AB7",
+  critique:       "#e0665f",
+  critique_light: "#ffb3a3",
+  critique_dim:   "#5a2a2a",
+  critique_dark:  "#3a1512",
+  edge_critique:  "#b3453b",
 };
 
 function assignDepths(
@@ -177,21 +178,22 @@ function FoundationTreeViz({
     const svg = d3.select(svgRef.current);
     svg.selectAll("*").remove();
 
-    const leafEids = new Set(data.foundations.map((f) => f.element_id));
-
+    const leafEids     = new Set(data.foundations.map((f) => f.element_id));
+    const leafPolarity = new Map(data.foundations.map((f) => [f.element_id, f.dominant_type] as const));
+    
     const rawNodes: FNode[] = data.nodes.map((n) => ({
       id:       n.element_id,
       label:    n.label,
       isAnchor: n.element_id === data.anchor_eid,
       isLeaf:   leafEids.has(n.element_id),
+      polarity: leafPolarity.get(n.element_id) ?? n.node_type,
       depth:    0,
       x:        0,
       y:        0,
     }));
-
+    
     const rawEdges: FEdge[] = data.edges.map((e) => ({
-      source: e.source,
-      target: e.target,
+      source: e.source, target: e.target, edgeType: e.edge_type,
     }));
 
     const depthMap = assignDepths(rawNodes, rawEdges);
@@ -267,6 +269,7 @@ function FoundationTreeViz({
     mkMarker("ft-arr-base", "#534AB7");
     mkMarker("ft-arr-sel",  "#e8a030");
     mkMarker("ft-arr-anc",  "#00d4aa");
+    mkMarker("ft-arr-crit", T.critique);
 
     // ── 邊 ──
     const edgeG = zG.append("g").attr("class", "ft-edges");
@@ -284,29 +287,37 @@ function FoundationTreeViz({
       const isSelected = selectedEids.has(e.source) || selectedEids.has(e.target);
       const isToAnchor = t.isAnchor;
 
+      const isCritique = e.edgeType === "critique";
+      const pathD = `M${sx},${sy} C${sx},${cy1} ${tx},${cy2} ${tx},${ty}`;
+      
       edgeG.append("path")
-        .attr("d", `M${sx},${sy} C${sx},${cy1} ${tx},${cy2} ${tx},${ty}`)
-        .attr("fill",         "none")
-        .attr("stroke",       isSelected ? "#e8a030" : (isToAnchor ? "#00d4aa" : "#534AB7"))
+        .attr("d", pathD)
+        .attr("fill", "none")
+        .attr("stroke", isSelected ? "#e8a030"
+                      : isCritique ? T.edge_critique
+                      : (isToAnchor ? "#00d4aa" : "#534AB7"))
         .attr("stroke-width", isSelected ? 6 : 4)
         .attr("stroke-opacity", isSelected ? 0.18 : 0.10)
         .attr("stroke-linecap", "round");
-
+      
       edgeG.append("path")
-        .attr("d", `M${sx},${sy} C${sx},${cy1} ${tx},${cy2} ${tx},${ty}`)
-        .attr("fill",         "none")
-        .attr("stroke",       isSelected ? "url(#ft-edge-grad-sel)" : "url(#ft-edge-grad)")
+        .attr("d", pathD)
+        .attr("fill", "none")
+        .attr("stroke", isSelected ? "url(#ft-edge-grad-sel)"
+                      : isCritique ? T.critique
+                      : "url(#ft-edge-grad)")
+        .attr("stroke-dasharray", isCritique && !isSelected ? "4,3" : null)
         .attr("stroke-width", isSelected ? 2.2 : 1.4)
         .attr("stroke-opacity", isSelected ? 1 : 0.55)
         .attr("stroke-linecap", "round")
-        .attr("marker-end", isSelected
-          ? "url(#ft-arr-sel)"
-          : (isToAnchor ? "url(#ft-arr-anc)" : "url(#ft-arr-base)"));
+        .attr("marker-end", isSelected ? "url(#ft-arr-sel)"
+                          : isCritique ? "url(#ft-arr-crit)"
+                          : (isToAnchor ? "url(#ft-arr-anc)" : "url(#ft-arr-base)"));
     });
 
     // ── 節點群組 ──
     const nodeG = zG.append("g").attr("class", "ft-nodes");
-
+    const isCrit = (d: FNode) => d.polarity === "critique";
     const nodeGroup = nodeG
       .selectAll<SVGGElement, typeof rawNodes[0]>("g.ft-node")
       .data(rawNodes)
@@ -322,7 +333,7 @@ function FoundationTreeViz({
       .attr("fill", (d) => {
         if (d.isAnchor)             return T.anchor_glow;
         if (selectedEids.has(d.id)) return T.selected_glow;
-        return T.foundation_dim;
+        return isCrit(d) ? T.critique_dim : T.foundation_dim;
       })
       .attr("fill-opacity", 0.25)
       .attr("filter", "url(#ft-glow)");
@@ -334,13 +345,13 @@ function FoundationTreeViz({
       .attr("fill", (d) => {
         if (d.isAnchor)             return T.anchor;
         if (selectedEids.has(d.id)) return T.selected;
-        if (d.isLeaf)               return T.foundation;
-        return T.intermediate;
+        if (d.isLeaf)               return isCrit(d) ? T.critique : T.foundation;
+        return isCrit(d) ? T.critique_dim : T.intermediate;
       })
       .attr("stroke", (d) => {
         if (d.isAnchor)             return "#00ffcc";
         if (selectedEids.has(d.id)) return "#e8c070";
-        if (d.isLeaf)               return "#7f77dd";
+        if (d.isLeaf)               return isCrit(d) ? T.critique_light : "#7f77dd";
         return "transparent";
       })
       .attr("stroke-width", (d) => d.isAnchor ? 2 : 1.5)
@@ -351,7 +362,7 @@ function FoundationTreeViz({
       .filter((d) => !d.isAnchor)
       .append("polygon")
       .attr("points", (d) => d.isLeaf ? "0,-5 4,0 0,5 -4,0" : "0,-3.5 3,0 0,3.5 -3,0")
-      .attr("fill", (d) => selectedEids.has(d.id) ? "#e8a030" : "#534AB7")
+      .attr("fill", (d) => selectedEids.has(d.id) ? "#e8a030" : isCrit(d) ? T.critique_dark : "#534AB7")
       .attr("opacity", 0.9);
 
     // 標籤
@@ -363,7 +374,7 @@ function FoundationTreeViz({
       .attr("fill", (d) => {
         if (d.isAnchor)             return T.text_anchor;
         if (selectedEids.has(d.id)) return T.text_selected;
-        if (d.isLeaf)               return T.text_leaf;
+        if (d.isLeaf)               return isCrit(d) ? T.critique_light : T.text_leaf;
         return T.text;
       })
       .attr("font-family", "IBM Plex Mono, monospace")
