@@ -72,7 +72,7 @@ import {
   hashStr,
   mulberry32,
 } from "./three-shared";
-
+import type { FoundationPolarity } from "../lib/rcRanking";
 // ─────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────
@@ -95,10 +95,11 @@ type HNode = {
   kind: HKind;
   depth: number;      // 負 = foundation（下半錐）、0 = waist、正 = downstream（上半錐）
   hasSkill: boolean;  // 是否有對應的 RC Skill（僅 waist / downstream 可能為 true）
+  polarity: FoundationPolarity;
   x: number; y: number; z: number;
 };
 
-type HEdge = { source: string; target: string; kind: "foundation" | "downstream" };
+type HEdge = { source: string; target: string; kind: "foundation" | "downstream"; polarity?: "support" | "critique" };
 
 type HGraph = { nodes: HNode[]; edges: HEdge[] };
 
@@ -131,6 +132,10 @@ const T = {
   foundation_selected:"#c9aaff",
   foundation_other:   "#7f77dd",
   foundation_mid:     "#3a3a5a",
+  foundation_selected_critique: "#ffb3a3",
+  foundation_other_critique:    "#e0665f",
+  edge_critique:                "#b3453b",
+  text_foundation_critique:     "#ffb3a3",
   downstream:         "#4f8ef7",
   downstream_final:   "#a8c8ff",
   edge_foundation:    "#534ab7",
@@ -172,20 +177,21 @@ export function buildHourglassGraph(
   bertopicCentroid: BertopicPos,
   skillEids: Set<string> = new Set(),
 ): HGraph {
-  type Draft = { id: string; label: string; kind: HKind; depth: number };
+  type Draft = { id: string; label: string; kind: HKind; depth: number; polarity: FoundationPolarity };
   const draftMap = new Map<string, Draft>();
   const edges: HEdge[] = [];
 
-  draftMap.set(focusedEid, { id: focusedEid, label: focusedLabel, kind: "waist", depth: 0 });
+  draftMap.set(focusedEid, { id: focusedEid, label: focusedLabel, kind: "waist", depth: 0, polarity: "other" });
 
   // ── foundation：從 waist 往上 BFS 指派深度（負數）──────────
   if (foundationTree) {
     const leafEids = new Set(foundationTree.foundations.map((f) => f.element_id));
+    const leafPolarity = new Map(foundationTree.foundations.map((f) => [f.element_id, f.dominant_type]));
     const childrenOf = new Map<string, string[]>(); // target(下游) → sources(上游)
     for (const e of foundationTree.edges) {
       if (!childrenOf.has(e.target)) childrenOf.set(e.target, []);
       childrenOf.get(e.target)!.push(e.source);
-      edges.push({ source: e.source, target: e.target, kind: "foundation" });
+      edges.push({ source: e.source, target: e.target, kind: "foundation", polarity: e.edge_type });
     }
 
     const depthOf = new Map<string, number>([[focusedEid, 0]]);
@@ -213,6 +219,7 @@ export function buildHourglassGraph(
         id: n.element_id,
         label: n.label,
         kind,
+        polarity: isLeaf ? (leafPolarity.get(n.element_id) ?? "other") : "other",
         depth: depthOf.get(n.element_id) ?? -1,
       });
     }
@@ -229,6 +236,7 @@ export function buildHourglassGraph(
           id: step.eid,
           label: step.label,
           kind: isFinal ? "downstream-final" : "downstream",
+          polarity: "other",
           depth: i,
         });
       } else if (isFinal) {
@@ -325,14 +333,18 @@ function buildConeWireframe(apexY: number, rimY: number, radius: number): THREE.
 // 節點外觀（sprite 選擇）
 // ─────────────────────────────────────────────────────────────
 
-function spriteForKind(kind: HKind): THREE.Sprite {
+function spriteForKind(kind: HKind, polarity: FoundationPolarity): THREE.Sprite {
   switch (kind) {
     case "waist":
       return makeFlatDotSprite(T.waist, "#00ffcc");
     case "foundation-selected":
-      return makeFlatDotSprite(T.foundation_selected, "#e8ddff");
+      return polarity === "critique"
+        ? makeFlatDotSprite(T.foundation_selected_critique, "#ffe0d8")
+        : makeFlatDotSprite(T.foundation_selected, "#e8ddff");
     case "foundation-other":
-      return makeHollowDotSprite(T.foundation_other, 3);
+      return polarity === "critique"
+        ? makeHollowDotSprite(T.foundation_other_critique, 3)
+        : makeHollowDotSprite(T.foundation_other, 3);
     case "foundation-mid":
       return makeFlatDotSprite(T.foundation_mid, "#5a5a8a");
     case "downstream-final":
@@ -347,11 +359,12 @@ function alwaysShowLabel(kind: HKind): boolean {
   return kind === "waist" || kind === "downstream-final" || kind === "foundation-selected";
 }
 
-function labelColor(kind: HKind): string {
+function labelColor(kind: HKind, polarity: FoundationPolarity): string {
   switch (kind) {
     case "waist": return T.text_waist;
     case "downstream": case "downstream-final": return T.text_downstream;
-    case "foundation-selected": return T.text_foundation;
+    case "foundation-selected":
+      return polarity === "critique" ? T.text_foundation_critique : T.text_foundation;
     default: return T.text_dim;
   }
 }
@@ -732,12 +745,15 @@ export default function HourglassViz({
     const edgeColors: number[] = [];
     const fColor = new THREE.Color(T.edge_foundation);
     const dColor = new THREE.Color(T.edge_downstream);
+    const cColor = new THREE.Color(T.edge_critique);
     graph.edges.forEach((e) => {
       const s = nodeById.get(e.source);
       const t = nodeById.get(e.target);
       if (!s || !t) return;
       edgeLinePts.push(s.x, s.y, s.z, t.x, t.y, t.z);
-      const c = e.kind === "foundation" ? fColor : dColor;
+            const c = e.kind === "foundation"
+              ? (e.polarity === "critique" ? cColor : fColor)
+              : dColor;
       edgeColors.push(c.r, c.g, c.b, c.r, c.g, c.b);
     });
     if (edgeLinePts.length > 0) {
@@ -754,8 +770,12 @@ export default function HourglassViz({
     const badgePositions = new Map<string, { x: number; y: number; z: number }>();
 
     graph.nodes.forEach((n) => {
-      const spr = spriteForKind(n.kind);
-      const scale = n.kind === "waist" ? 0.11 : n.kind === "downstream-final" ? 0.08 : 0.06;
+      const spr = spriteForKind(n.kind, n.polarity);
+      const isLeafFoundation = n.kind === "foundation-selected" || n.kind === "foundation-other";
+      const scale = n.kind === "waist" ? 0.11
+        : n.kind === "downstream-final" ? 0.08
+        : isLeafFoundation ? 0.078
+        : 0.06;
       spr.scale.set(scale, scale, 1);
       spr.position.set(n.x, n.y, n.z);
       spr.userData.eid = n.id;
@@ -770,9 +790,9 @@ export default function HourglassViz({
 
       if (alwaysShowLabel(n.kind)) {
         const label = makeLabelSprite(
-          n.label.length > 16 ? n.label.slice(0, 15) + "…" : n.label,
-          labelColor(n.kind),
-        );
+            n.label.length > 16 ? n.label.slice(0, 15) + "…" : n.label,
+            labelColor(n.kind, n.polarity),
+          );
         const lift = n.kind === "waist" ? 0.16 : 0.1;
         label.position.set(n.x, n.y + lift, n.z);
         label.scale.set(0.5, 0.11, 1);

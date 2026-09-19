@@ -354,7 +354,7 @@ export default function GlobalBrainExplorer({
       return { highlightEids: new Set<string>(), edges: [] as { source: string; target: string }[] };
     }
     const highlightEids = new Set<string>([focusedCandidateEid]);
-    entry.foundationEids.forEach((f) => highlightEids.add(f));
+    entry.foundations.forEach((f) => highlightEids.add(f.eid));
     (entry.treeNodes ?? []).forEach((n) => highlightEids.add(n.element_id));
     return { highlightEids, edges: entry.treeEdges ?? [] };
   }, [rcFoundationMap, focusedCandidateEid]);

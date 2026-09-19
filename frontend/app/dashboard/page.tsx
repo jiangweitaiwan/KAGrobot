@@ -241,35 +241,7 @@ function saveHistory(msgs: ChatMessage[]): void {
   catch { localStorage.removeItem(HISTORY_KEY); }
 }
 
-function computeRCRanking(
-  personalBrain:    PersonalBrainConcept[],
-  rcSemanticScores: RCSemanticScore[],
-  rcFoundationMap:  RCFoundationMap,
-  alpha:            number,
-): RCRankedItem[] {
-  const weightMap = new Map(personalBrain.map((c) => [c.eid, c.weight]));
-  const semMap    = new Map(rcSemanticScores.map((s) => [s.eid, s.score]));
-  const results: RCRankedItem[] = [];
-
-  rcFoundationMap.forEach(({ label, foundations }, rcEid) => {
-    const semantic = semMap.get(rcEid) ?? 0;
-
-    let S = 0, C = 0, Z = 0;
-    for (const f of foundations) {
-      const w = weightMap.get(f.eid) ?? 0;
-      S += w * f.supportWeight;
-      C += w * f.critiqueWeight;
-      Z += f.supportWeight + f.critiqueWeight;
-    }
-    // interScore ∈ [-1, 1]，Z=0（沒有任何 support/critique 質量）時記為 0
-    const interScore = Z > 0 ? (S - C) / Z : 0;
-    const totalScore = alpha * semantic + (1 - alpha) * interScore;
-
-    results.push({ eid: rcEid, label, totalScore });
-  });
-
-  return results.sort((a, b) => b.totalScore - a.totalScore).slice(0, 3);
-}
+import { computeRCRanking } from "../lib/rcRanking";
 
 function walkSessionDtoToPathStates(dto: WalkSessionDto): Record<number, WalkPathState> {
   const out: Record<number, WalkPathState> = {};
@@ -686,7 +658,11 @@ export default function Page() {
 
   // ── RC Ranking (derived, 前端即時計算) ────────────────────
   const rcRanking = useMemo(
-    () => computeRCRanking(personalBrain, rcSemanticScores, rcFoundationMap, ALPHA),
+    () => {
+      const weightMap = new Map(personalBrain.map((c) => [c.eid, c.weight]));
+      const semMap    = new Map(rcSemanticScores.map((s) => [s.eid, s.score]));
+      return computeRCRanking(weightMap, semMap, rcFoundationMap, ALPHA).slice(0, 3);
+    },
     [personalBrain, rcSemanticScores, rcFoundationMap],
   );
   // ── RC 分類標籤查表（GlobalBrain hover / DetailPanel / PersonalBrain

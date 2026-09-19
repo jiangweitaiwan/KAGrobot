@@ -28,20 +28,25 @@ export type ConceptDetail = {
   papers: { title: string; premises: string | null; constraints: string | null }[];
 };
 
+import { computeRCRanking, type FoundationPolarity, type RCFoundationMap, type RCFoundationEntry, type RCRanked } from "../lib/rcRanking";
+
+export type { FoundationPolarity, RCFoundationMap, RCFoundationEntry, RCRanked };
 export type FoundationTreeData = {
   anchor_eid:   string;
   anchor_label: string;
-  foundations:  { element_id: string; label: string }[];
-  nodes:        { element_id: string; label: string }[];
-  edges:        { source: string; target: string }[];
+  foundations: {
+      element_id:      string;
+      label:           string;
+      depth:           number;
+      dominant_type:   FoundationPolarity;
+      support_weight:  number;
+      critique_weight: number;
+    }[];
+    nodes: { element_id: string; label: string; node_type: FoundationPolarity }[];
+    edges: { source: string; target: string; edge_type: "support" | "critique" }[];
 };
 
-export type RCFoundationMap = Map<string, {
-  label:          string;
-  foundationEids: string[];
-  treeNodes?:     { element_id: string; label: string }[];
-  treeEdges?:     { source: string; target: string }[];
-}>;
+
 
 export type RCSemanticScore = {
   eid:           string;
@@ -72,51 +77,8 @@ type Props = {
 // Score computation（不變）
 // ─────────────────────────────────────────────────────────────
 
-type RCRanked = {
-  eid:           string;
-  label:         string;
-  semantic:      number;
-  interScore:    number;
-  totalScore:    number;
-  hits:          number;
-  totalFound:    number;
-};
 
-function computeRanking(
-  selectedEids:     Set<string>,
-  personalBrain:    PersonalBrainConcept[],
-  rcSemanticScores: RCSemanticScore[],
-  rcFoundationMap:  RCFoundationMap,
-  alpha:            number,
-): RCRanked[] {
-  const weightMap = new Map<string, number>();
-  for (const c of personalBrain) {
-    if (selectedEids.has(c.eid)) weightMap.set(c.eid, c.weight);
-  }
-  for (const eid of selectedEids) {
-    if (!weightMap.has(eid)) weightMap.set(eid, 0.5);
-  }
-  const semMap = new Map(rcSemanticScores.map((s) => [s.eid, s.score]));
-  const results: RCRanked[] = [];
-  rcFoundationMap.forEach(({ label, foundationEids }, rcEid) => {
-    const semantic  = semMap.get(rcEid) ?? 0;
-    const n         = foundationEids.length;
-    let weightedSum = 0;
-    let hits        = 0;
-    for (const feid of foundationEids) {
-      const w = weightMap.get(feid);
-      if (w !== undefined) { weightedSum += w; hits++; }
-    }
-    const interScore = n > 0 ? weightedSum / n : 0;
-    results.push({
-      eid: rcEid, label,
-      semantic, interScore,
-      totalScore: alpha * semantic + (1 - alpha) * interScore,
-      hits, totalFound: n,
-    });
-  });
-  return results.sort((a, b) => b.totalScore - a.totalScore);
-}
+
 
 // ─────────────────────────────────────────────────────────────
 // FoundationTreeViz — 分層佈局 + 曲線 edge
@@ -781,17 +743,19 @@ export default function DetailPanel({
   }, [selectedEids, personalBrain, foundationTree]);
 
   const rankingBefore = useMemo(
-    () => computeRanking(
-      new Set(personalBrain.map((c) => c.eid)),
-      personalBrain, rcSemanticScores, rcFoundationMap, alpha,
-    ).slice(0, 3),
+    () => {
+        const weightMap = new Map(personalBrain.map((c) => [c.eid, c.weight]));
+        const semMap    = new Map(rcSemanticScores.map((s) => [s.eid, s.score]));
+        return computeRCRanking(weightMap, semMap, rcFoundationMap, alpha).slice(0, 3);
+    },
     [personalBrain, rcSemanticScores, rcFoundationMap, alpha],
   );
   const rankingAfter = useMemo(
-    () => computeRanking(
-      new Set(previewBrain.map((c) => c.eid)),
-      previewBrain, rcSemanticScores, rcFoundationMap, alpha,
-    ).slice(0, 3),
+    () => {
+      const weightMap = new Map(previewBrain.map((c) => [c.eid, c.weight]));
+      const semMap    = new Map(rcSemanticScores.map((s) => [s.eid, s.score]));
+      return computeRCRanking(weightMap, semMap, rcFoundationMap, alpha).slice(0, 3);
+    },
     [previewBrain, rcSemanticScores, rcFoundationMap, alpha],
   );
 
