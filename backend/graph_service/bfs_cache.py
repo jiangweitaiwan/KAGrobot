@@ -58,12 +58,18 @@ class DownstreamNeighbor:
 class UpstreamNeighbor:
     """Upstream BFS 的一條分支結果。
 
-    分兩種：
-      - 直接邊：Concept <-[COMPOSES]- Concept（paper=None）
-      - 跨 Paper：Concept <-[PRODUCES]- Paper <-[INSPIRES/...]- Concept
+    分四種（見 CachedUpstreamBFS 的 sign propagation 設計）：
+      - 直接邊：Concept <-[COMPOSES]- Concept（edge_type="support"，paper=None）
+      - 跨 Paper：Concept <-[PRODUCES]- Paper <-[INSPIRES/INDIRECT_INSPIRES/COMPOSES]- Concept
+        （edge_type="support"）
+      - 直接反駁：Concept <-[CONTRADICTS]- Concept（edge_type="critique"，paper=None）
+      - 跨 Paper 反駁：Concept <-[PRODUCES]- Paper <-[CONTRADICTS]- Concept
+        （edge_type="critique"，對應 importer.py 的 critiqued 輸入概念以
+        CONTRADICTS 取代 INSPIRES 連到 Paper 的設計）
     """
     from_concept: ConceptInfo
     via_paper:    Optional[PaperInfo] = None
+    edge_type:    str = "support"   # "support" | "critique"
 
 
 @dataclass
@@ -344,10 +350,16 @@ class AdjacencyCache:
 
     @staticmethod
     def _query_upstream(tx, eid: str) -> List[UpstreamNeighbor]:
-        """上游鄰接查詢。"""
+        """上游鄰接查詢。
+
+        support 兩段（COMPOSES 直接邊、Paper 中介）維持原樣；
+        新增 critique 兩段，對應方向與 support 完全對稱，只是關係
+        換成 CONTRADICTS——「source -[:CONTRADICTS]-> target」代表
+        source 不認同 target，故 target 的 upstream 多一個「批評來源」。
+        """
         neighbors: List[UpstreamNeighbor] = []
 
-        # 1. 反向 COMPOSES 邊
+        # 1. 反向 COMPOSES 邊（support）
         rows_a = tx.run(
             """
             MATCH (c:Concept) WHERE elementId(c) = $eid
@@ -363,14 +375,14 @@ class AdjacencyCache:
         for row in rows_a:
             neighbors.append(UpstreamNeighbor(
                 from_concept=ConceptInfo(
-                    element_id=row["prev_eid"],
-                    name=row["prev_name"] or "",
+                    element_id=row["prev_eid"], name=row["prev_name"] or "",
                     node_type=row["prev_type"],
                 ),
                 via_paper=None,
+                edge_type="support",
             ))
 
-        # 2. 反向 Paper 追溯
+        # 2. 反向 Paper 追溯（support）
         rows_b = tx.run(
             """
             MATCH (c:Concept) WHERE elementId(c) = $eid
@@ -391,16 +403,76 @@ class AdjacencyCache:
         for row in rows_b:
             neighbors.append(UpstreamNeighbor(
                 from_concept=ConceptInfo(
-                    element_id=row["prev_eid"],
-                    name=row["prev_name"] or "",
+                    element_id=row["prev_eid"], name=row["prev_name"] or "",
                     node_type=row["prev_type"],
                 ),
                 via_paper=PaperInfo(
-                    element_id=row["p_eid"],
-                    title=row["p_title"] or "",
+                    element_id=row["p_eid"], title=row["p_title"] or "",
                     conceptual_premises=row["p_premises"],
                     contextual_model_constraints=row["p_constraints"],
                 ),
+                edge_type="support",
+            ))
+
+        # 3. 反向 CONTRADICTS 邊（critique，直接）—— 新增
+        #    critic -[:CONTRADICTS]-> cur：critic 不認同 cur，
+        #    是 cur 的批評來源，故列入 cur 的 upstream。
+        rows_c = tx.run(
+            """
+            MATCH (c:Concept) WHERE elementId(c) = $eid
+            MATCH (critic:Concept)-[:CONTRADICTS]->(c)
+            WHERE elementId(critic) <> $eid
+            RETURN elementId(critic) AS prev_eid,
+                   critic.name       AS prev_name,
+                   critic.type       AS prev_type
+            """,
+            eid=eid,
+        ).data()
+
+        for row in rows_c:
+            neighbors.append(UpstreamNeighbor(
+                from_concept=ConceptInfo(
+                    element_id=row["prev_eid"], name=row["prev_name"] or "",
+                    node_type=row["prev_type"],
+                ),
+                via_paper=None,
+                edge_type="critique",
+            ))
+
+        # 4. 反向 Paper 追溯（critique）—— 新增
+        #    對應 importer.py::_create_input_concepts 對 critiqued 輸入概念
+        #    改用 CONTRADICTS（而非 INSPIRES）連到 Paper：
+        #        prev -[:CONTRADICTS]-> p -[:PRODUCES]-> cur
+        #    代表 cur 是這篇論文「反駁 prev」而產出的結論。
+        rows_d = tx.run(
+            """
+            MATCH (c:Concept) WHERE elementId(c) = $eid
+            MATCH (p:Paper)-[:PRODUCES]->(c)
+            MATCH (prev:Concept)-[:CONTRADICTS]->(p)
+            WHERE elementId(prev) <> $eid
+            RETURN elementId(prev) AS prev_eid,
+                   prev.name       AS prev_name,
+                   prev.type       AS prev_type,
+                   elementId(p)    AS p_eid,
+                   p.title         AS p_title,
+                   p.conceptual_premises          AS p_premises,
+                   p.contextual_model_constraints AS p_constraints
+            """,
+            eid=eid,
+        ).data()
+
+        for row in rows_d:
+            neighbors.append(UpstreamNeighbor(
+                from_concept=ConceptInfo(
+                    element_id=row["prev_eid"], name=row["prev_name"] or "",
+                    node_type=row["prev_type"],
+                ),
+                via_paper=PaperInfo(
+                    element_id=row["p_eid"], title=row["p_title"] or "",
+                    conceptual_premises=row["p_premises"],
+                    contextual_model_constraints=row["p_constraints"],
+                ),
+                edge_type="critique",
             ))
 
         return neighbors

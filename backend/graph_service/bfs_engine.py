@@ -30,6 +30,31 @@ from retrieval.bfs import (
 from retrieval.path_selector import PathSelector
 
 
+
+# ══════════════════════════════════════════════════════════════
+# Sign propagation（upstream foundation 的 support/critique 判定）
+# ══════════════════════════════════════════════════════════════
+
+_GAMMA = 0.6  # decay 係數：離 RC 越遠（depth 越大），該路徑對 score 的貢獻越小
+
+
+def _decay(depth: int) -> float:
+    return _GAMMA ** depth
+
+
+def _combine(parent_type: str, edge_type: str) -> str:
+    """sign propagation 規則：
+        parent=other                    → other   （吸收態，一旦變 other 就不再回頭）
+        edge=critique, parent=critique   → other   （c×c：批評的批評，不支持也不反對 RC）
+        edge=critique, parent=support    → critique（s×c：支持「被批評者」的論述 → RC 的批評）
+        edge=support                     → parent_type（s×s=s, c×s=c：不改變既有立場）
+    """
+    if parent_type == "other":
+        return "other"
+    if edge_type == "critique":
+        return "other" if parent_type == "critique" else "critique"
+    return parent_type
+
 # ══════════════════════════════════════════════════════════════
 # 內部 helper：把 cache dataclass 轉成 bfs.py 慣用的 dict 格式
 # ══════════════════════════════════════════════════════════════
@@ -208,11 +233,6 @@ class CachedDownstreamBFS:
 # ══════════════════════════════════════════════════════════════
 
 class CachedUpstreamBFS:
-    """從 Resulting Concept 向上游追溯基礎概念。
-
-    輸出格式與 retrieval.bfs.UpstreamBFS 完全相容。
-    """
-
     def __init__(self, cache: AdjacencyCache, path_selector: PathSelector) -> None:
         self._cache    = cache
         self._selector = path_selector
@@ -223,13 +243,34 @@ class CachedUpstreamBFS:
         max_depth:    int = 10,
         max_branches: int = 4,
     ) -> Dict[str, Any]:
-        raw_paths      = self._walk(start_eid, max_depth)
+        raw_paths = self._walk(start_eid, max_depth)
+
+        # ── Score 用：對「全部」raw_paths 彙總（不受下方 diversity selection
+        #    影響，確保同一 leaf 的分數不會因為多樣性演算法選中哪條代表路徑
+        #    而飄動）。依 leaf 分別累加 support / critique 兩軸的 decay 加權。
+        leaf_support:   Dict[str, float] = {}
+        leaf_critique:  Dict[str, float] = {}
+        leaf_min_depth: Dict[str, int]   = {}
+
+        for raw in raw_paths:
+            leaf_eid = raw["final_concept"]["element_id"]
+            decay    = _decay(raw["depth"])
+            if raw["path_type"] == "support":
+                leaf_support[leaf_eid] = leaf_support.get(leaf_eid, 0.0) + decay
+            elif raw["path_type"] == "critique":
+                leaf_critique[leaf_eid] = leaf_critique.get(leaf_eid, 0.0) + decay
+            # "other" 兩軸皆不貢獻
+            leaf_min_depth[leaf_eid] = min(
+                leaf_min_depth.get(leaf_eid, raw["depth"]), raw["depth"]
+            )
+
+        # ── Display 用：既有多樣性選取，只決定畫面上呈現哪幾條路徑
         selected_paths = self._selector.select(raw_paths, max_branches)
 
-        seen_leaf_eids:   set                  = set()
+        seen_leaf_eids:    set                  = set()
         final_foundations: List[Dict[str, Any]] = []
-        tree_nodes:        Dict[str, dict]      = {}
-        tree_edges:        Dict[str, dict]      = {}
+        tree_nodes:        Dict[str, dict]       = {}
+        tree_edges:        Dict[str, dict]       = {}
 
         for path in selected_paths:
             steps = path.get("steps") or []
@@ -240,28 +281,40 @@ class CachedUpstreamBFS:
             leaf_eid = leaf["element_id"]
             if leaf_eid not in seen_leaf_eids:
                 seen_leaf_eids.add(leaf_eid)
+                s_val = leaf_support.get(leaf_eid, 0.0)
+                c_val = leaf_critique.get(leaf_eid, 0.0)
+                dominant_type = (
+                    "support" if s_val > c_val
+                    else "critique" if c_val > s_val
+                    else "other"
+                )
                 final_foundations.append({
-                    "element_id": leaf_eid,
-                    "label":      leaf.get("name") or leaf_eid,
+                    "element_id":      leaf_eid,
+                    "label":           leaf.get("name") or leaf_eid,
+                    "depth":           leaf_min_depth.get(leaf_eid, len(steps)),
+                    "dominant_type":   dominant_type,
+                    "support_weight":  round(s_val, 6),
+                    "critique_weight": round(c_val, 6),
                 })
 
             for step in steps:
-                for role in ("from_concept", "to_concept"):
+                for role, type_key in (("to_concept", "to_type"), ("from_concept", "from_type")):
                     c   = step[role]
                     eid = c["element_id"]
                     if eid not in tree_nodes:
                         tree_nodes[eid] = {
                             "element_id": eid,
                             "label":      c.get("name") or eid,
+                            "node_type":  step[type_key],  # first-seen 為準（純展示）
                         }
 
-                fc       = step["from_concept"]
-                tc       = step["to_concept"]
+                fc, tc   = step["from_concept"], step["to_concept"]
                 edge_key = f"{fc['element_id']}__{tc['element_id']}"
                 if edge_key not in tree_edges:
                     tree_edges[edge_key] = {
-                        "source": fc["element_id"],
-                        "target": tc["element_id"],
+                        "source":    fc["element_id"],
+                        "target":    tc["element_id"],
+                        "edge_type": step.get("edge_type", "support"),
                     }
 
         return {
@@ -279,25 +332,32 @@ class CachedUpstreamBFS:
         start_eid: str,
         max_depth: int = 10,
     ) -> List[Dict[str, Any]]:
-        """向上游追溯，透過 cache 取鄰接關係。"""
+        """向上游追溯，透過 cache 取鄰接關係，沿路徑做 sign propagation。
+
+        queue tuple 多帶 cur_type：RC 自身 base case = "support"。
+        一旦 cur_type == "other"，代表這條路徑之後子孫必為 other
+        （對 score 無貢獻），直接標記為 completed、不再展開，
+        避免白打 Neo4j。
+        """
         start_concept = {"element_id": start_eid, "name": "", "type": None}
-        queue         = deque([(start_concept, [], frozenset([start_eid]))])
+        queue         = deque([(start_concept, [], frozenset([start_eid]), "support")])
         completed:    List[Dict[str, Any]] = []
 
         while queue:
-            cur_c, steps, visited = queue.popleft()
+            cur_c, steps, visited, cur_type = queue.popleft()
             cur_eid = cur_c["element_id"]
             depth   = len(steps)
 
-            if depth >= max_depth:
+            if depth >= max_depth or cur_type == "other":
                 completed.append({
                     "steps":         steps,
                     "final_concept": cur_c,
                     "final_paper":   None,
+                    "path_type":     cur_type,
+                    "depth":         depth,
                 })
                 continue
 
-            # 透過 cache 取上游鄰居（不打 Neo4j）
             neighbors: List[UpstreamNeighbor] = self._cache.get_upstream_neighbors(cur_eid)
             new_neighbors = [n for n in neighbors if n.from_concept.element_id not in visited]
 
@@ -306,20 +366,27 @@ class CachedUpstreamBFS:
                     "steps":         steps,
                     "final_concept": cur_c,
                     "final_paper":   None,
+                    "path_type":     cur_type,
+                    "depth":         depth,
                 })
                 continue
 
             for neighbor in new_neighbors:
-                prev_c   = _concept_to_dict(neighbor.from_concept)
+                prev_c    = _concept_to_dict(neighbor.from_concept)
+                prev_type = _combine(cur_type, neighbor.edge_type)
                 new_step = {
                     "from_concept": prev_c,
                     "via_paper":    _paper_to_dict(neighbor.via_paper),
                     "to_concept":   cur_c,
+                    "edge_type":    neighbor.edge_type,
+                    "to_type":      cur_type,    # to_concept 在此步之前已確定的 type
+                    "from_type":    prev_type,   # 沿此邊推出 from_concept 的 type
                 }
                 queue.append((
                     prev_c,
                     [new_step] + steps,
                     visited | {neighbor.from_concept.element_id},
+                    prev_type,
                 ))
 
         return [r for r in completed if r["steps"]]

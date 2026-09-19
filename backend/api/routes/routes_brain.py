@@ -35,15 +35,25 @@ router = APIRouter()
 class FoundationTreeNode(BaseModel):
     element_id: str
     label:      str
+    node_type:  str = "support"   # ← 新增："support" | "critique" | "other"
 
 class FoundationTreeEdge(BaseModel):
-    source: str
-    target: str
+    source:    str
+    target:    str
+    edge_type: str = "support"    # ← 新增
+
+class FoundationItem(BaseModel):  # ← 新增，取代 foundations 欄位原本沿用 FoundationTreeNode
+    element_id:      str
+    label:           str
+    depth:           int = 0
+    dominant_type:   str = "other"
+    support_weight:  float = 0.0
+    critique_weight: float = 0.0
 
 class ExpandResponse(BaseModel):
     anchor_eid:   str
     anchor_label: str
-    foundations:  List[FoundationTreeNode]
+    foundations:  List[FoundationItem]      # ← 型別換掉
     nodes:        List[FoundationTreeNode]
     edges:        List[FoundationTreeEdge]
 
@@ -236,15 +246,28 @@ async def expand_concept(eid: str, request: Request) -> ExpandResponse:
 
 
     foundations = [
-        FoundationTreeNode(element_id=f["element_id"], label=f["label"])
+        FoundationItem(
+            element_id=f["element_id"],
+            label=f["label"],
+            depth=f.get("depth", 0),
+            dominant_type=f.get("dominant_type", "other"),
+            support_weight=f.get("support_weight", 0.0),
+            critique_weight=f.get("critique_weight", 0.0),
+        )
         for f in result.get("final_foundations", [])
     ]
     tree_nodes = [
-        FoundationTreeNode(element_id=n["element_id"], label=n["label"])
+        FoundationTreeNode(
+            element_id=n["element_id"], label=n["label"],
+            node_type=n.get("node_type", "support"),
+        )
         for n in result.get("foundation_tree", {}).get("nodes", [])
     ]
     tree_edges = [
-        FoundationTreeEdge(source=e["source"], target=e["target"])
+        FoundationTreeEdge(
+            source=e["source"], target=e["target"],
+            edge_type=e.get("edge_type", "support"),
+        )
         for e in result.get("foundation_tree", {}).get("edges", [])
     ]
 
@@ -283,15 +306,28 @@ async def expand_concept_batch(
         )
 
         foundations = [
-            FoundationTreeNode(element_id=f["element_id"], label=f["label"])
+            FoundationItem(
+                element_id=f["element_id"],
+                label=f["label"],
+                depth=f.get("depth", 0),
+                dominant_type=f.get("dominant_type", "other"),
+                support_weight=f.get("support_weight", 0.0),
+                critique_weight=f.get("critique_weight", 0.0),
+            )
             for f in result.get("final_foundations", [])
         ]
         tree_nodes = [
-            FoundationTreeNode(element_id=n["element_id"], label=n["label"])
+            FoundationTreeNode(
+                element_id=n["element_id"], label=n["label"],
+                node_type=n.get("node_type", "support"),
+            )
             for n in result.get("foundation_tree", {}).get("nodes", [])
         ]
         tree_edges = [
-            FoundationTreeEdge(source=e["source"], target=e["target"])
+            FoundationTreeEdge(
+                source=e["source"], target=e["target"],
+                edge_type=e.get("edge_type", "support"),
+            )
             for e in result.get("foundation_tree", {}).get("edges", [])
         ]
         if not any(n.element_id == eid for n in tree_nodes):

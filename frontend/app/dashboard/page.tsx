@@ -247,20 +247,24 @@ function computeRCRanking(
   rcFoundationMap:  RCFoundationMap,
   alpha:            number,
 ): RCRankedItem[] {
-  const weightMap  = new Map(personalBrain.map((c) => [c.eid, c.weight]));
-  const semMap     = new Map(rcSemanticScores.map((s) => [s.eid, s.score]));
+  const weightMap = new Map(personalBrain.map((c) => [c.eid, c.weight]));
+  const semMap    = new Map(rcSemanticScores.map((s) => [s.eid, s.score]));
   const results: RCRankedItem[] = [];
 
-  rcFoundationMap.forEach(({ label, foundationEids }, rcEid) => {
+  rcFoundationMap.forEach(({ label, foundations }, rcEid) => {
     const semantic = semMap.get(rcEid) ?? 0;
-    const n        = foundationEids.length;
-    let   weightedSum = 0;
-    for (const feid of foundationEids) {
-      const w = weightMap.get(feid);
-      if (w !== undefined) weightedSum += w;
+
+    let S = 0, C = 0, Z = 0;
+    for (const f of foundations) {
+      const w = weightMap.get(f.eid) ?? 0;
+      S += w * f.supportWeight;
+      C += w * f.critiqueWeight;
+      Z += f.supportWeight + f.critiqueWeight;
     }
-    const interScore = n > 0 ? weightedSum / n : 0;
+    // interScore ∈ [-1, 1]，Z=0（沒有任何 support/critique 質量）時記為 0
+    const interScore = Z > 0 ? (S - C) / Z : 0;
     const totalScore = alpha * semantic + (1 - alpha) * interScore;
+
     results.push({ eid: rcEid, label, totalScore });
   });
 
@@ -395,9 +399,9 @@ async function fetchExpandBatch(
 ): Promise<Record<string, {
   anchor_eid: string;
   anchor_label: string;
-  foundations: { element_id: string; label: string }[];
-  nodes: { element_id: string; label: string }[];
-  edges: { source: string; target: string }[];
+  foundations: { element_id: string; label: string; depth: number; dominant_type: string; support_weight: number; critique_weight: number }[];
+  nodes: { element_id: string; label: string; node_type: string }[];
+  edges: { source: string; target: string; edge_type: string }[];
 }>> {
   if (!API_BASE || eids.length === 0) return {};
   try {
@@ -798,10 +802,14 @@ export default function Page() {
         const next = new Map(prev);
         for (const [eid, r] of Object.entries(results)) {
           next.set(eid, {
-            label:          r.anchor_label || eid,
-            foundationEids: r.foundations.map((f) => f.element_id),
-            treeNodes:      r.nodes,
-            treeEdges:      r.edges,
+            label: r.anchor_label || eid,
+            foundations: r.foundations.map((f) => ({
+              eid: f.element_id,
+              supportWeight: f.support_weight,
+              critiqueWeight: f.critique_weight,
+            })),
+            treeNodes: r.nodes,
+            treeEdges: r.edges,
           });
         }
         return next;
