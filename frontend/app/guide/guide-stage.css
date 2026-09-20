@@ -1,0 +1,407 @@
+/* guide-stage.css — Section 1「dashboard 運鏡舞台」專屬樣式。
+   命名前綴一律 .gds-（guide dashboard stage），避免和 guide.css /
+   intro.css / globals.css 的既有 class 撞名。
+
+   這裡的 dashboard 骨架刻意手刻而非截圖：作用中的那一格要能無縫
+   換成真元件，截圖做不到；而且 dashboard 改版時骨架只是比例失真，
+   不會變成一張過期的假畫面。 */
+
+/* ── 舞台外框 ─────────────────────────────────────────────── */
+
+.gds-stage {
+  position: relative;
+  width: 100%;
+  height: clamp(380px, 50vh, 540px);
+  border: 1px solid rgba(201, 162, 39, 0.28);
+  border-radius: 16px;
+  overflow: hidden;
+  background:
+    radial-gradient(120% 90% at 50% 0%, #0d1020 0%, #05060d 70%);
+  contain: paint;
+}
+
+.gds-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+  transition: transform 720ms cubic-bezier(0.66, 0, 0.26, 1);
+}
+
+.gds-stage[data-motion="reduced"] .gds-canvas {
+  transition: none;
+}
+
+/* ── 畫布底板（整個 dashboard 的外觀）──────────────────────── */
+
+.gds-board {
+  position: absolute;
+  inset: 0;
+  background: #05060d;
+}
+
+.gds-header {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 18px;
+  border-bottom: 1px solid rgba(232, 238, 248, 0.08);
+  font-family: "IBM Plex Mono", monospace;
+}
+.gds-header-title {
+  font-size: 17px;
+  color: #c8daf0;
+  letter-spacing: 0.04em;
+}
+.gds-header-meta {
+  font-size: 9px;
+  color: rgba(200, 218, 240, 0.35);
+  margin-top: 2px;
+}
+.gds-header-chips { display: flex; gap: 6px; }
+.gds-header-chip {
+  font-size: 9px;
+  padding: 4px 9px;
+  border-radius: 7px;
+  border: 1px solid rgba(232, 238, 248, 0.12);
+  color: rgba(200, 218, 240, 0.4);
+}
+
+/* ── 欄位 ─────────────────────────────────────────────────── */
+
+.gds-slot {
+  position: absolute;
+  border-radius: 14px;
+  border: 1px solid rgba(232, 238, 248, 0.07);
+  background: rgba(13, 18, 32, 0.55);
+  overflow: hidden;
+  transition: border-color 500ms ease, background 500ms ease, box-shadow 500ms ease;
+}
+.gds-slot[data-live="true"] {
+  border-color: rgba(201, 162, 39, 0.45);
+  background: rgba(13, 18, 32, 0.9);
+  box-shadow: 0 0 0 1px rgba(201, 162, 39, 0.12), 0 8px 40px rgba(0, 0, 0, 0.5);
+}
+/* 非作用中的欄位退到背景，讓放大的那一格自己說話 */
+.gds-slot[data-live="false"] {
+  opacity: 0.55;
+  filter: saturate(0.5);
+}
+
+.gds-slot-title {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  color: rgba(127, 119, 221, 0.45);
+  padding: 9px 12px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.gds-slot[data-live="true"] .gds-slot-title { color: rgba(201, 162, 39, 0.75); }
+
+.gds-slot-body {
+  padding: 8px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: calc(100% - 22px);
+  box-sizing: border-box;
+}
+
+/* ── 骨架元素 ─────────────────────────────────────────────── */
+
+.gds-bar {
+  border-radius: 4px;
+  background: rgba(232, 238, 248, 0.07);
+}
+.gds-block {
+  border-radius: 10px;
+  border: 1px solid rgba(232, 238, 248, 0.06);
+  background: rgba(232, 238, 248, 0.025);
+}
+
+/* ── chat 欄 ──────────────────────────────────────────────── */
+
+.gds-chat-log {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  justify-content: flex-end;
+  overflow: hidden;
+}
+.gds-msg {
+  max-width: 88%;
+  padding: 8px 11px;
+  border-radius: 12px;
+  font-size: 11px;
+  line-height: 1.65;
+  font-family: "IBM Plex Mono", monospace;
+}
+.gds-msg-user {
+  align-self: flex-end;
+  background: rgba(83, 74, 183, 0.22);
+  border: 1px solid rgba(127, 119, 221, 0.3);
+  color: #d6d2f5;
+}
+.gds-msg-ai {
+  align-self: flex-start;
+  background: rgba(232, 238, 248, 0.05);
+  border: 1px solid rgba(232, 238, 248, 0.08);
+  color: #9fb4cf;
+}
+
+.gds-composer {
+  border: 1px solid rgba(232, 238, 248, 0.12);
+  border-radius: 12px;
+  padding: 9px 11px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+  background: rgba(3, 1, 8, 0.6);
+}
+.gds-composer-text {
+  font-size: 11px;
+  color: rgba(200, 218, 240, 0.32);
+  font-family: "IBM Plex Mono", monospace;
+}
+.gds-composer-send {
+  font-size: 10px;
+  padding: 4px 11px;
+  border-radius: 8px;
+  border: 1px solid rgba(127, 119, 221, 0.45);
+  color: rgba(175, 169, 236, 0.85);
+  font-family: "IBM Plex Mono", monospace;
+  white-space: nowrap;
+}
+
+/* ── detail 欄 ────────────────────────────────────────────── */
+
+.gds-tabs {
+  display: flex;
+  gap: 4px;
+}
+.gds-tab {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 10px;
+  padding: 4px 11px;
+  border-radius: 9px;
+  border: 1px solid rgba(127, 119, 221, 0.2);
+  color: rgba(127, 119, 221, 0.45);
+  transition: all 320ms ease;
+}
+.gds-tab[data-on="true"] {
+  border-color: var(--purple, #7f77dd);
+  background: rgba(127, 119, 221, 0.16);
+  color: #afa9ec;
+}
+
+.gds-detail-name {
+  font-size: 14px;
+  color: #c8daf0;
+  font-family: "IBM Plex Mono", monospace;
+}
+.gds-field-label {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  color: rgba(127, 119, 221, 0.5);
+}
+.gds-field-text {
+  font-size: 10.5px;
+  line-height: 1.7;
+  color: #8f9fbd;
+  margin: 3px 0 0;
+}
+
+.gds-chiprow { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+.gds-chip {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 10px;
+  padding: 3px 9px;
+  border-radius: 11px;
+  border: 1px solid rgba(0, 212, 170, 0.35);
+  background: rgba(0, 212, 170, 0.08);
+  color: #7fe6cc;
+  white-space: nowrap;
+}
+.gds-chip[data-picked="true"] {
+  border-color: #00d4aa;
+  background: rgba(0, 212, 170, 0.2);
+  box-shadow: 0 0 10px rgba(0, 212, 170, 0.25);
+}
+
+.gds-weight-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 10px;
+  color: #9fb4cf;
+}
+.gds-weight-track {
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(232, 238, 248, 0.1);
+  overflow: hidden;
+}
+.gds-weight-fill {
+  height: 100%;
+  background: linear-gradient(90deg, rgba(0, 212, 170, 0.5), #00d4aa);
+  transition: width 700ms cubic-bezier(0.3, 0, 0.2, 1);
+}
+
+.gds-addbtn {
+  margin-top: auto;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 10.5px;
+  text-align: center;
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(0, 212, 170, 0.45);
+  background: rgba(0, 212, 170, 0.1);
+  color: #7fe6cc;
+}
+
+/* ── personal 欄 ──────────────────────────────────────────── */
+
+.gds-rc-tags {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.gds-rc-tag {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 10px;
+  padding: 3px 10px;
+  border-radius: 14px;
+  border: 1px solid rgba(127, 119, 221, 0.3);
+  background: rgba(3, 1, 8, 0.7);
+  color: rgba(175, 169, 236, 0.65);
+  white-space: nowrap;
+}
+.gds-rc-tag[data-on="true"] {
+  border-color: #c060ff;
+  color: #c060ff;
+  background: rgba(127, 119, 221, 0.15);
+  box-shadow: 0 0 9px rgba(192, 96, 255, 0.28);
+}
+
+.gds-confirm {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  border: 1.5px solid rgba(255, 204, 77, 0.55);
+  border-radius: 24px;
+  background: rgba(3, 1, 8, 0.9);
+  padding: 9px 11px 9px 17px;
+  box-shadow: 0 0 18px rgba(255, 204, 77, 0.18);
+  font-family: "IBM Plex Mono", monospace;
+}
+.gds-confirm-label {
+  font-size: 12px;
+  color: #ffcc4d;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.gds-confirm-ghost {
+  font-size: 10.5px;
+  padding: 5px 12px;
+  border-radius: 15px;
+  border: 1.5px solid rgba(127, 119, 221, 0.4);
+  color: rgba(175, 169, 236, 0.7);
+  white-space: nowrap;
+}
+.gds-confirm-go {
+  font-size: 11px;
+  padding: 6px 15px;
+  border-radius: 15px;
+  border: 1.5px solid #ffcc4d;
+  background: rgba(255, 204, 77, 0.18);
+  color: #ffcc4d;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* ── 聚焦框（放大中的區域，畫在畫布座標系上）───────────────── */
+
+.gds-focus-ring {
+  position: absolute;
+  border: 1px solid rgba(201, 162, 39, 0.55);
+  border-radius: 10px;
+  pointer-events: none;
+  box-shadow: 0 0 0 9999px rgba(5, 6, 13, 0.55);
+  transition: all 720ms cubic-bezier(0.66, 0, 0.26, 1);
+}
+.gds-stage[data-phase="focus"] .gds-focus-ring { opacity: 0; }
+.gds-stage[data-phase="overview"] .gds-focus-ring { opacity: 1; }
+
+/* ── 小地圖 ───────────────────────────────────────────────── */
+
+.gds-minimap {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  width: 148px;
+  padding: 7px 8px 5px;
+  border-radius: 9px;
+  border: 1px solid rgba(201, 162, 39, 0.25);
+  background: rgba(5, 6, 13, 0.82);
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+}
+.gds-minimap svg { display: block; width: 100%; height: auto; }
+.gds-minimap-caption {
+  margin-top: 4px;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 8.5px;
+  letter-spacing: 0.1em;
+  color: rgba(201, 162, 39, 0.65);
+  text-align: center;
+}
+
+/* ── 步驟說明列 ───────────────────────────────────────────── */
+
+.gds-where {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.68rem;
+  color: var(--ic-gold);
+  opacity: 0.85;
+}
+.gds-where-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--ic-gold);
+}
+
+/* ── Responsive ───────────────────────────────────────────── */
+
+@media (max-width: 860px) {
+  .gds-stage { height: clamp(260px, 40vh, 360px); }
+  .gds-minimap { width: 104px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gds-canvas,
+  .gds-focus-ring,
+  .gds-weight-fill { transition: none; }
+}
+
+/* guide.css 的 .guide-pipeline-copy 原本只放一段說明文字；
+   現在多了一行「這一步在哪裡」，補上排版。 */
+.guide-pipeline-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}

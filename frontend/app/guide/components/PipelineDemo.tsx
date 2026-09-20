@@ -3,92 +3,76 @@
 /**
  * PipelineDemo.tsx — Section 1:「完整流程」六步驟示範。
  *
- * 六個步驟對應 dashboard 的六個操作環節:
- *   💬 提問 → 🌌 探索 GlobalBrain → 🔍 閱讀 DetailPanel →
- *   ➕ 收藏進 PersonalBrain → ⏳ 檢視 Hourglass 剖面 → ⚡ 送出 RC Skill
+ * 改版重點：不再是六張各自獨立的仿製卡片，而是一份完整的 dashboard
+ * 骨架 + 一台相機。每切一步，相機退回全景、框出目標欄位、再推進去
+ * 放大該欄位並在裡面演出這一步的操作。使用者因此同時得到兩件事：
+ * 「這一步要做什麼」以及「這一步在 dashboard 的哪裡」。
  *
- * 步驟②⑤直接複用 dashboard 的真實 3D 元件（GlobalBrainExplorer /
- * HourglassViz）,餵一份縮小版假資料;其餘四步驟是輕量仿製卡片
- * （ChatDemoCard / DetailDemoCard / BrainAddDemo / SkillLaunchDemo）,
- * 只需要「看起來像」,不需要真的可互動狀態機。
+ * 六個步驟只落在四個相機位置上，這是刻意的：
+ *   ③讀定義 / ④加重心 都在 Detail Panel，
+ *   ⑤看剖面 / ⑥送出   都在 Personal Brain。
+ * 相機不動、只有面板內部換分頁或冒出確認列，使用者就會自己讀出
+ * 「這兩步是在同一個面板做的」——這件事用六張獨立卡片講不出來。
  *
- * 每一步都刻意標註「對應 dashboard 區塊」——這是這個 demo 存在的
- * 目的:讓使用者在看示範時就能把畫面對應到真正要操作的地方。
+ * 真元件（GlobalBrainExplorer / HourglassViz）只在該欄位作用中、
+ * 且相機停穩後才掛載，見 dashboardSlots.tsx 的說明。
  */
 
-import { useEffect, useRef, useState } from "react";
-import dynamic from "next/dynamic";
-import ChatDemoCard from "./ChatDemoCard";
-import DetailDemoCard from "./DetailDemoCard";
-import BrainAddDemo from "./BrainAddDemo";
-import SkillLaunchDemo from "./SkillLaunchDemo";
+import { useCallback, useEffect, useRef, useState } from "react";
+import DashboardStage from "./DashboardStage";
 import {
-  GUIDE_QUESTION,
-  GUIDE_IDS,
-  GUIDE_LAYOUT_MINI,
-  GUIDE_CONCEPT_DETAIL,
-  GUIDE_FOUNDATION_TREE,
-  GUIDE_PERSONAL_BRAIN,
-} from "../guideData";
-
-const GlobalBrainExplorer = dynamic(() => import("../../components/GlobalBrainExplorer"), { ssr: false });
-const HourglassViz        = dynamic(() => import("../../components/HourglassViz"),        { ssr: false });
+  ChatSlot, GlobalSlot, DetailSlot, SemanticSlot, PersonalSlot,
+} from "./dashboardSlots";
+import { SLOT_RECTS, type SlotKey } from "../dashboardMap";
 
 type Step = {
-  key: string;
-  glyph: string;
-  title: string;
-  dashboardRef: string;
-  instruction: string;
+  key:          string;
+  glyph:        string;
+  title:        string;
+  slot:         SlotKey;
+  /** Detail Panel 兩個步驟共用一格，用這個決定顯示哪個分頁。 */
+  detailTab?:   "detail" | "brain";
+  /** Personal Brain 步驟⑥才冒出送出確認列。 */
+  showConfirm?: boolean;
+  where:        string;
+  instruction:  string;
 };
 
 const STEPS: Step[] = [
   {
-    key: "chat",
-    glyph: "💬",
-    title: "提問",
-    dashboardRef: "左側對話欄",
-    instruction: "在 chat-box 輸入你關心的問題，系統會依語意去 GlobalBrain 裡找相關概念。",
+    key: "chat", glyph: "💬", title: "提問", slot: "chat",
+    where: "最左邊的對話欄",
+    instruction: "輸入你關心的問題。系統會依語意到 GlobalBrain 裡找出相關概念，這是整個迴圈的起點。",
   },
   {
-    key: "explore",
-    glyph: "🌌",
-    title: "探索",
-    dashboardRef: "中央 Global Knowledge Field",
-    instruction: "拖曳旋轉、滾輪縮放，點擊任一節點——這裡點的是「價格僵固性」。",
+    key: "explore", glyph: "🌌", title: "探索", slot: "global",
+    where: "中央的 Global Knowledge Field",
+    instruction: "拖曳旋轉、滾輪縮放，點任一節點。這裡點的是「價格僵固性」——被標示的是目前語意上最相關的候選。",
   },
   {
-    key: "read",
-    glyph: "🔍",
-    title: "閱讀",
-    dashboardRef: "Detail Panel",
-    instruction: "讀這個概念的定義、機制，以及它的 Foundation Tree（支撐它的更基礎概念）。",
+    key: "read", glyph: "🔍", title: "閱讀", slot: "detail", detailTab: "detail",
+    where: "右邊的 Detail Panel",
+    instruction: "讀這個概念的定義與機制，以及支撐它的更基礎概念。相機停在這一格，因為下一步也在這裡。",
   },
   {
-    key: "collect",
-    glyph: "➕",
-    title: "收藏",
-    dashboardRef: "Detail Panel「重心」分頁",
-    instruction: "把覺得有用的 foundation 加入 Personal Brain，之後排名與推薦都會參考這裡的權重。",
+    key: "collect", glyph: "➕", title: "收藏", slot: "detail", detailTab: "brain",
+    where: "同一個 Detail Panel，切到「重心」分頁",
+    instruction: "把有用的概念加進 Personal Brain。每個概念帶一個權重，決定它在後續排名裡的份量。",
   },
   {
-    key: "profile",
-    glyph: "⏳",
-    title: "剖面",
-    dashboardRef: "Personal Brain「沙漏」視圖",
-    instruction: "收藏幾個概念後，系統會收斂出推薦 RC——這裡是「通膨黏性價格假說」，往上看它能延伸到「升息衝擊分析」。",
+    key: "profile", glyph: "⏳", title: "剖面", slot: "personal",
+    where: "最右邊的 Personal Brain",
+    instruction: "收藏累積之後會收斂出推薦 RC。這裡是「通膨黏性價格假說」，往上延伸得到「升息衝擊分析」。",
   },
   {
-    key: "launch",
-    glyph: "⚡",
-    title: "送出",
-    dashboardRef: "Personal Brain 送出確認列",
-    instruction: "選定 RC 後按下閃電送出，交給 MainAgent 執行對應的模型計算。",
+    key: "launch", glyph: "⚡", title: "送出", slot: "personal", showConfirm: true,
+    where: "同一個 Personal Brain，下方的確認列",
+    instruction: "選定 RC 後送出，交給 MainAgent 執行對應的模型計算——不是再開一輪對話。",
   },
 ];
 
-const AUTOPLAY_MS = 6000;
-const RESUME_AFTER_MS = 9000;
+const AUTOPLAY_MS     = 9000;
+const RESUME_AFTER_MS = 12000;
 
 export default function PipelineDemo() {
   const [active, setActive] = useState(0);
@@ -115,65 +99,45 @@ export default function PipelineDemo() {
 
   const step = STEPS[active];
 
+  const renderSlot = useCallback(
+    (key: SlotKey, live: boolean, scale: number, settled: boolean) => {
+      const rect = SLOT_RECTS[key];
+      switch (key) {
+        case "chat":
+          return <ChatSlot live={live} />;
+        case "global":
+          return <GlobalSlot live={live} settled={settled} scale={scale} rect={rect} />;
+        case "detail":
+          return <DetailSlot live={live} tab={step.detailTab ?? "detail"} />;
+        case "semantic":
+          return <SemanticSlot />;
+        case "personal":
+          return (
+            <PersonalSlot
+              live={live}
+              settled={settled}
+              scale={scale}
+              rect={rect}
+              showConfirm={!!step.showConfirm}
+            />
+          );
+      }
+    },
+    [step],
+  );
+
   return (
     <div
       className="guide-pipeline"
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => { if (!resumeTimer.current) setPaused(false); }}
     >
-      <div className="guide-pipeline-stage">
-        {step.key === "chat" && <ChatDemoCard question={GUIDE_QUESTION} />}
-
-        {step.key === "explore" && (
-          <div className="guide-demo-frame">
-            <div className="guide-demo-label">對應 dashboard 區塊：{step.dashboardRef}</div>
-            <div className="guide-3d-frame">
-              <GlobalBrainExplorer
-                layout={GUIDE_LAYOUT_MINI}
-                activeCandidateEids={[GUIDE_IDS.priceStick]}
-                width={520}
-                height={320}
-              />
-            </div>
-          </div>
-        )}
-
-        {step.key === "read" && (
-          <DetailDemoCard detail={GUIDE_CONCEPT_DETAIL} foundationTree={GUIDE_FOUNDATION_TREE} />
-        )}
-
-        {step.key === "collect" && (
-          <BrainAddDemo concepts={GUIDE_PERSONAL_BRAIN.map((c) => ({ eid: c.eid, label: c.label }))} />
-        )}
-
-        {step.key === "profile" && (
-          <div className="guide-demo-frame">
-            <div className="guide-demo-label">對應 dashboard 區塊：{step.dashboardRef}</div>
-            <div className="guide-3d-frame">
-              <HourglassViz
-                focusedEid={GUIDE_IDS.rcInflation}
-                focusedLabel="通膨黏性價格假說"
-                foundationTree={GUIDE_FOUNDATION_TREE}
-                downstreamChains={[[
-                  { eid: GUIDE_IDS.rcInflation, label: "通膨黏性價格假說" },
-                  { eid: GUIDE_IDS.rcRateShock, label: "升息衝擊分析" },
-                ]]}
-                personalBrainEids={new Set(GUIDE_PERSONAL_BRAIN.map((c) => c.eid))}
-                bertopicPosByEid={new Map()}
-                bertopicCentroid={{ x: 0, y: 0 }}
-                skillEids={new Set([GUIDE_IDS.rcRateShock])}
-                selectedSkillEid={null}
-                onSelectSkill={() => {}}
-                onFocusNode={() => {}}
-                width={520}
-                height={320}
-              />
-            </div>
-          </div>
-        )}
-
-        {step.key === "launch" && <SkillLaunchDemo rcLabel="升息衝擊分析" />}
-      </div>
+      <DashboardStage
+        focusSlot={step.slot}
+        focusRect={SLOT_RECTS[step.slot]}
+        stepLabel={`${step.glyph} ${step.title}`}
+        renderSlot={renderSlot}
+      />
 
       <div className="guide-pipeline-tabs" role="tablist" aria-label="操作六步驟">
         {STEPS.map((s, i) => (
@@ -192,6 +156,10 @@ export default function PipelineDemo() {
       </div>
 
       <div className="guide-pipeline-copy">
+        <span className="gds-where">
+          <span className="gds-where-dot" />
+          {step.where}
+        </span>
         <p className="guide-pipeline-instruction">{step.instruction}</p>
       </div>
     </div>
