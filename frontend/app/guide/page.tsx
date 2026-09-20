@@ -60,7 +60,7 @@ export default function GuidePage() {
           <span className="guide-section-kicker">02 · 探索 GlobalBrain</span>
           <h2 className="intro-section-title">混亂但完整的知識場域</h2>
           <p className="intro-section-lede">
-            拖曳、縮放、點擊節點——這裡的資料是示範用的假資料，但操作方式和 dashboard 上一模一樣。
+            左邊挑一個概念，中間讀它，按下加入——右邊會看見它落在語意地圖的哪裡。
           </p>
           <GlobalBrainSection />
         </section>

@@ -1,0 +1,237 @@
+/* guide-flow.css — Section 2「收進來」與 Section 3「兩種切法」的樣式。
+   沿用 guide.css / intro.css 的 --ic-* 變數與暗底語言，不另起爐灶。 */
+
+/* ═══ Section 2：三欄流程 ═══════════════════════════════════ */
+
+.guide-flow { position: relative; }
+
+.guide-flow-grid {
+  display: grid;
+  grid-template-columns: 1.15fr 0.95fr 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+.guide-flow-col {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.guide-flow-step {
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  color: var(--ic-gold);
+  opacity: 0.85;
+}
+
+.guide-map-wrap { position: relative; }
+
+.guide-map-empty {
+  position: absolute;
+  inset: auto 14px 16px;
+  text-align: center;
+  font-size: 0.68rem;
+  line-height: 1.7;
+  color: rgba(127, 119, 221, 0.45);
+  pointer-events: none;
+}
+
+/* 落地漣漪：BertopicMap 每次都整張重畫，沒辦法在點上做進場動畫，
+   所以把「落地」畫在覆蓋層。 */
+.guide-map-ripple {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  border-radius: 50%;
+  border: 1.5px solid;
+  pointer-events: none;
+  animation: guide-ripple 780ms cubic-bezier(0.2, 0.7, 0.3, 1) forwards;
+}
+
+@keyframes guide-ripple {
+  0%   { transform: scale(0.3); opacity: 0.95; }
+  70%  { transform: scale(2.8); opacity: 0.35; }
+  100% { transform: scale(3.6); opacity: 0; }
+}
+
+.guide-flow-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.guide-flow-count {
+  font-size: 0.68rem;
+  color: var(--ic-muted);
+}
+.guide-flow-reset {
+  font-size: 0.66rem;
+  padding: 3px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--ic-gold-dim);
+  background: transparent;
+  color: var(--ic-gold);
+  cursor: pointer;
+}
+.guide-flow-reset:hover { background: rgba(201, 162, 39, 0.1); }
+
+.guide-flow-payoff {
+  margin: 0;
+  font-size: 0.72rem;
+  line-height: 1.7;
+  color: var(--ic-muted);
+}
+
+/* ═══ 飛行層（掛在 body 上）═══════════════════════════════ */
+
+.gfl-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  pointer-events: none;
+}
+
+.gfl-trails {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.gfl-trails path {
+  fill: none;
+  stroke-width: 1.2;
+  stroke-linecap: round;
+  stroke-dasharray: 1000;
+  stroke-dashoffset: 1000;
+  opacity: 0.5;
+  animation: guide-trail 900ms cubic-bezier(0.4, 0, 0.25, 1) forwards;
+}
+
+@keyframes guide-trail {
+  0%   { stroke-dashoffset: 1000; opacity: 0; }
+  20%  { opacity: 0.55; }
+  75%  { stroke-dashoffset: 0;    opacity: 0.4; }
+  100% { stroke-dashoffset: 0;    opacity: 0; }
+}
+
+.gfl-chip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  white-space: nowrap;
+  font-size: 0.68rem;
+  font-family: "IBM Plex Mono", monospace;
+  padding: 4px 11px;
+  border-radius: 13px;
+  border: 1px solid;
+  background: rgba(3, 1, 8, 0.9);
+  box-shadow: 0 0 14px rgba(0, 0, 0, 0.5);
+}
+
+/* ═══ Section 3：取出放大 ═══════════════════════════════════ */
+
+.guide-brain-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  max-width: 620px;
+  margin: 0 auto;
+  gap: 0;
+}
+
+.guide-brain-stack .guide-slice-svg {
+  width: 100%;
+  max-width: 420px;
+  height: auto;
+}
+
+.guide-slice-layer {
+  transform-origin: 200px 125px;
+  transition: transform 520ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.guide-slice-layer[data-on="false"] { opacity: 0.4; }
+.guide-slice-layer[data-on="true"]  { opacity: 1; }
+
+.guide-funnel {
+  width: 100%;
+  height: 46px;
+  display: block;
+  margin-top: -4px;
+}
+
+.guide-viewer {
+  width: 100%;
+  border: 1px solid rgba(0, 212, 170, 0.28);
+  border-radius: 16px;
+  overflow: hidden;
+  background: #06080f;
+}
+
+.guide-viewer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(232, 238, 248, 0.07);
+}
+.guide-viewer-focus {
+  font-size: 0.68rem;
+  color: rgba(0, 212, 170, 0.8);
+  font-family: "IBM Plex Mono", monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.guide-viewer-toggle { display: flex; gap: 4px; flex-shrink: 0; }
+.guide-viewer-toggle button {
+  font-size: 0.64rem;
+  padding: 3px 11px;
+  border-radius: 10px;
+  border: 1px solid rgba(127, 119, 221, 0.25);
+  background: transparent;
+  color: rgba(127, 119, 221, 0.5);
+  font-family: "IBM Plex Mono", monospace;
+  cursor: pointer;
+  transition: all 220ms ease;
+}
+.guide-viewer-toggle button[data-on="true"] {
+  border-color: var(--purple, #7f77dd);
+  background: rgba(127, 119, 221, 0.16);
+  color: #afa9ec;
+}
+
+.guide-viewer-body {
+  display: flex;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.guide-brain-stack .guide-slice-copy {
+  margin-top: 22px;
+  max-width: 100%;
+}
+.guide-brain-stack .guide-note { margin-top: 12px; }
+
+/* ═══ Responsive ═══════════════════════════════════════════ */
+
+@media (max-width: 1100px) {
+  .guide-flow-grid { grid-template-columns: 1fr 1fr; }
+  .guide-flow-grid > .guide-flow-col:nth-child(3) { grid-column: 1 / -1; }
+}
+
+@media (max-width: 760px) {
+  .guide-flow-grid { grid-template-columns: 1fr; }
+  .guide-flow-grid > .guide-flow-col:nth-child(3) { grid-column: auto; }
+  .guide-funnel { height: 30px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gfl-layer { display: none; }
+  .guide-map-ripple,
+  .guide-slice-layer { animation: none; transition: none; }
+}
