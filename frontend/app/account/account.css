@@ -1,0 +1,279 @@
+/* ═══════════════════════════════════════════════════════════
+   會員中心 — 全部樣式都收在 .acct 底下，不影響 dashboard。
+
+   注意 globals.css 的三個既有行為，這裡都刻意處理：
+   1. html/body 是 overflow:hidden → .acct 自己當捲動容器（height:100dvh + overflow-y:auto）。
+   2. 全域 button / h1 / header / form / main 有元素選擇器樣式（h1 會被強制大寫縮小、
+      button:hover:not(:disabled) 的 specificity 是 0,2,1）→ 這裡用 .acct 前綴的 class
+      選擇器，hover 一律寫成 .acct .x:hover:not(:disabled)（0,4,0）確保蓋得過去；
+      標題用 h1.acct-title、避免使用 <header>/<form>/<main>。
+   3. 色彩沿用 :root 的 --orange(金) --teal(苔綠) --purple(酒紅) --muted 等，
+      只額外定義一個更亮的 --a-bad，因為 --purple 在深色底上對比不足以當「超額」警示。
+   ═══════════════════════════════════════════════════════════ */
+
+.acct {
+  --a-line:        rgba(201, 162, 39, 0.16);
+  --a-line-strong: rgba(201, 162, 39, 0.34);
+  --a-ok:          var(--teal);
+  --a-warn:        var(--orange);
+  --a-bad:         #c4574a;
+  --a-bad-soft:    #e08a7e;
+  --a-serif:       var(--font-serif), "Noto Serif TC", "Songti TC", serif;
+
+  height: 100vh;
+  height: 100dvh;
+  overflow-y: auto;
+  color: var(--text);
+  font-family: "IBM Plex Mono", "Noto Sans TC", monospace;
+  font-size: 0.82rem;
+  line-height: 1.6;
+}
+
+.acct :focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; }
+
+.acct-wrap { max-width: 1040px; margin: 0 auto; padding: 20px 24px 72px; }
+
+/* ── 頂列 ─────────────────────────────────────────────────── */
+.acct-top {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap;
+}
+.acct a.acct-back {
+  color: var(--muted); text-decoration: none; font-size: 0.75rem;
+  border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px;
+}
+.acct a.acct-back:hover { color: var(--text); border-color: var(--a-line-strong); }
+
+h1.acct-title {
+  margin: 30px 0 2px;
+  font-family: var(--a-serif);
+  font-weight: 500;
+  font-size: 2.1rem;
+  line-height: 1.15;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--text);
+}
+.acct-sub { margin: 0 0 22px; color: var(--muted); font-size: 0.78rem; max-width: 60ch; }
+
+/* ── 分頁 ─────────────────────────────────────────────────── */
+.acct-tabs {
+  display: flex; gap: 26px; overflow-x: auto;
+  border-bottom: 1px solid var(--a-line);
+  scrollbar-width: none;
+}
+.acct-tabs::-webkit-scrollbar { display: none; }
+.acct .acct-tab {
+  flex-shrink: 0;
+  background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0;
+  margin-bottom: -1px; padding: 10px 2px;
+  color: var(--muted); font-size: 0.82rem; letter-spacing: 0.02em;
+}
+.acct .acct-tab:hover:not(:disabled) { background: none; border-color: transparent; color: var(--text); }
+.acct .acct-tab[aria-selected="true"] { color: var(--orange); border-bottom-color: var(--orange); }
+
+.acct-panel { padding-top: 28px; }
+
+/* ── 按鈕 ─────────────────────────────────────────────────── */
+.acct .acct-btn {
+  background: transparent; color: var(--text);
+  border: 1px solid var(--a-line-strong); border-radius: 8px;
+  padding: 6px 12px; font-size: 0.74rem; white-space: nowrap;
+  text-decoration: none; display: inline-flex; align-items: center; gap: 6px;
+}
+.acct .acct-btn:hover:not(:disabled) { background: rgba(201, 162, 39, 0.1); border-color: var(--orange); }
+.acct .acct-btn.primary { color: var(--orange); border-color: var(--orange); background: rgba(201, 162, 39, 0.08); }
+.acct .acct-btn.primary:hover:not(:disabled) { background: rgba(201, 162, 39, 0.18); }
+.acct .acct-btn.danger { color: var(--a-bad-soft); border-color: rgba(196, 87, 74, 0.5); }
+.acct .acct-btn.danger:hover:not(:disabled) { background: rgba(196, 87, 74, 0.14); border-color: var(--a-bad); }
+.acct .acct-btn.quiet { border-color: transparent; color: var(--muted); padding: 4px 8px; }
+.acct .acct-btn.quiet:hover:not(:disabled) { color: var(--text); background: rgba(201, 162, 39, 0.08); border-color: transparent; }
+
+.acct-input {
+  background: rgba(13, 9, 5, 0.7); color: var(--text);
+  border: 1px solid var(--a-line-strong); border-radius: 8px;
+  padding: 7px 10px; font: inherit; font-size: 0.78rem; min-width: 0;
+}
+.acct-input:focus { outline: none; border-color: var(--orange); }
+
+/* ── 狀態訊息 ─────────────────────────────────────────────── */
+.acct-note { color: var(--muted); font-size: 0.76rem; }
+.acct-error { color: var(--a-bad-soft); font-size: 0.78rem; }
+.acct-empty {
+  border: 1px dashed var(--a-line-strong); border-radius: 12px;
+  padding: 36px 20px; text-align: center; color: var(--muted);
+  display: flex; flex-direction: column; gap: 12px; align-items: center;
+}
+.acct-empty strong { color: var(--text); font-weight: 500; font-size: 0.9rem; }
+.acct-loading { color: var(--muted); padding: 40px 0; text-align: center; }
+
+.acct-callout {
+  border-left: 2px solid var(--orange); background: rgba(201, 162, 39, 0.06);
+  padding: 10px 14px; margin: 0 0 22px; font-size: 0.78rem; border-radius: 0 8px 8px 0;
+}
+.acct-callout.bad { border-left-color: var(--a-bad); background: rgba(196, 87, 74, 0.08); }
+
+/* ═══ 概覽：圓相 + 方案 ═══════════════════════════════════════ */
+.acct-hero {
+  display: grid; grid-template-columns: 240px 1fr; gap: 40px; align-items: center;
+  padding: 8px 0 32px;
+}
+
+.acct-enso { position: relative; width: 240px; height: 240px; }
+.acct-enso svg { width: 100%; height: 100%; display: block; }
+.acct-enso .track { fill: none; stroke: rgba(201, 162, 39, 0.1); stroke-width: 3; }
+.acct-enso .brush, .acct-enso .brush-soft { fill: none; stroke-linecap: round; transition: stroke-dashoffset 1.1s cubic-bezier(0.22, 0.8, 0.28, 1), stroke 0.4s; }
+.acct-enso .brush { stroke-width: 6; }
+.acct-enso .brush-soft { stroke-width: 15; opacity: 0.16; }
+.acct-enso[data-state="ok"]   .brush, .acct-enso[data-state="ok"]   .brush-soft { stroke: var(--a-ok); }
+.acct-enso[data-state="warn"] .brush, .acct-enso[data-state="warn"] .brush-soft { stroke: var(--a-warn); }
+.acct-enso[data-state="bad"]  .brush, .acct-enso[data-state="bad"]  .brush-soft { stroke: var(--a-bad); }
+
+.acct-enso-center {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; text-align: center; gap: 2px;
+}
+.acct-enso-num {
+  font-family: var(--a-serif); font-style: italic; font-weight: 500;
+  font-size: 3.6rem; line-height: 1; letter-spacing: -0.01em;
+}
+.acct-enso-num small { font-size: 1.3rem; font-style: normal; margin-left: 2px; opacity: 0.7; }
+.acct-enso-cap { color: var(--muted); font-size: 0.7rem; }
+
+.acct-plan-name {
+  font-family: var(--a-serif); font-size: 1.9rem; font-weight: 500; line-height: 1.2; margin: 0;
+}
+.acct-plan-meta { color: var(--muted); font-size: 0.78rem; margin: 4px 0 18px; }
+.acct-figures { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 28px; margin: 0; }
+.acct-figures dt { color: var(--muted); font-size: 0.7rem; }
+.acct-figures dd { margin: 2px 0 0; font-size: 1.05rem; }
+.acct-figures dd small { color: var(--muted); font-size: 0.72rem; }
+
+.acct-section { border-top: 1px solid var(--a-line); padding: 26px 0; }
+.acct-section > h2 {
+  margin: 0 0 4px; font-family: var(--a-serif); font-weight: 500; font-size: 1.35rem;
+  color: var(--text); text-transform: none; letter-spacing: 0.01em;
+}
+.acct-section > p.lede { margin: 0 0 16px; color: var(--muted); font-size: 0.76rem; max-width: 62ch; }
+
+.acct-plans { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+.acct-plans th, .acct-plans td { padding: 11px 14px; text-align: left; border-bottom: 1px solid var(--a-line); }
+.acct-plans thead th { font-family: var(--a-serif); font-size: 1.05rem; font-weight: 500; border-bottom-color: var(--a-line-strong); }
+.acct-plans tbody th { color: var(--muted); font-weight: 400; }
+.acct-plans .is-current { background: rgba(201, 162, 39, 0.07); }
+.acct-plans thead .is-current { box-shadow: inset 0 2px 0 var(--orange); color: var(--orange); }
+.acct-plans-wrap { overflow-x: auto; }
+
+.acct-kv { display: grid; grid-template-columns: 110px 1fr; gap: 8px 16px; margin: 0 0 18px; }
+.acct-kv dt { color: var(--muted); }
+.acct-kv dd { margin: 0; word-break: break-all; }
+
+/* ═══ 歷史對話 ═══════════════════════════════════════════════ */
+.acct-toolbar { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; margin-bottom: 14px; }
+.acct-toolbar .acct-input { flex: 1; min-width: 180px; max-width: 320px; }
+
+.acct-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--a-line); }
+.acct-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 20px; align-items: center;
+  padding: 14px 4px; border-bottom: 1px solid var(--a-line);
+}
+.acct-row-main { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.acct-row-title { font-size: 0.88rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acct-row-title.untitled { color: var(--muted); font-style: italic; }
+.acct-row-sub { color: var(--muted); font-size: 0.72rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acct-row-meta { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 0.7rem; margin-top: 2px; }
+.acct-row-actions { display: flex; gap: 6px; align-items: center; }
+.acct-rename { display: flex; gap: 6px; }
+.acct-rename .acct-input { flex: 1; }
+
+.acct-chip {
+  display: inline-block; padding: 0 7px; border-radius: 10px; font-size: 0.66rem;
+  border: 1px solid var(--a-line-strong); color: var(--muted);
+}
+.acct-chip.walk { color: var(--a-ok); border-color: rgba(122, 155, 118, 0.45); }
+.acct-chip.agent { color: var(--orange); border-color: rgba(201, 162, 39, 0.45); }
+
+/* ═══ Personal Brain ═════════════════════════════════════════ */
+.acct-brain { display: grid; grid-template-columns: minmax(300px, 400px) minmax(0, 1fr); gap: 28px; align-items: start; }
+.acct-brain-list { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.acct-meter { height: 4px; background: rgba(201, 162, 39, 0.12); border-radius: 2px; overflow: hidden; }
+.acct-meter > span { display: block; height: 100%; background: var(--a-ok); transition: width 0.4s; }
+.acct-meter.warn > span { background: var(--a-warn); }
+.acct-meter.bad > span { background: var(--a-bad); }
+
+.acct-concepts { list-style: none; margin: 0; padding: 0; max-height: 460px; overflow-y: auto; border-top: 1px solid var(--a-line); }
+.acct-concept { padding: 10px 2px; border-bottom: 1px solid var(--a-line); display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; align-items: center; }
+.acct-concept-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acct-concept-src { color: var(--muted); font-size: 0.66rem; margin-left: 6px; }
+.acct-slider { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; }
+.acct-slider input[type="range"] { flex: 1; accent-color: var(--orange); height: 3px; }
+.acct-slider output { width: 34px; text-align: right; color: var(--orange); font-size: 0.72rem; }
+.acct-map { min-height: 420px; border-radius: 16px; overflow: hidden; border: 1px solid var(--a-line); background: #06080f; }
+
+/* ═══ Token 用量 ═════════════════════════════════════════════ */
+.acct-usage-head { display: flex; flex-wrap: wrap; gap: 20px 44px; align-items: baseline; margin-bottom: 8px; }
+.acct-big { font-family: var(--a-serif); font-size: 2.4rem; font-weight: 500; line-height: 1.1; }
+.acct-big small { font-family: "IBM Plex Mono", monospace; font-size: 0.74rem; color: var(--muted); margin-left: 6px; }
+
+.acct-split { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: rgba(201, 162, 39, 0.1); margin: 10px 0 6px; }
+.acct-split > span:nth-child(1) { background: var(--a-ok); }
+.acct-split > span:nth-child(2) { background: var(--orange); }
+.acct-legend { display: flex; gap: 18px; flex-wrap: wrap; color: var(--muted); font-size: 0.72rem; }
+.acct-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; }
+
+.acct-feature { display: grid; grid-template-columns: 96px minmax(0, 1fr) 92px; gap: 12px; align-items: center; padding: 6px 0; }
+.acct-feature .name { color: var(--text); font-size: 0.78rem; }
+.acct-feature .val { text-align: right; color: var(--muted); font-size: 0.74rem; }
+.acct-feature .acct-meter { height: 8px; border-radius: 4px; }
+.acct-feature .acct-meter > span { background: var(--orange); }
+
+.acct-range { display: inline-flex; border: 1px solid var(--a-line-strong); border-radius: 8px; overflow: hidden; }
+.acct .acct-range button { border: 0; border-radius: 0; background: transparent; color: var(--muted); padding: 5px 12px; font-size: 0.72rem; }
+.acct .acct-range button:hover:not(:disabled) { background: rgba(201, 162, 39, 0.08); border-color: transparent; }
+.acct .acct-range button[aria-pressed="true"] { background: rgba(201, 162, 39, 0.16); color: var(--orange); }
+
+.acct-chart { width: 100%; height: auto; display: block; }
+.acct-chart .grid { stroke: rgba(201, 162, 39, 0.12); stroke-width: 1; }
+.acct-chart text { fill: var(--muted); font-family: "IBM Plex Mono", monospace; font-size: 10px; }
+.acct-chart .bar { fill: var(--a-ok); opacity: 0.75; transition: opacity 0.12s; }
+.acct-chart .bar.today { fill: var(--orange); opacity: 1; }
+.acct-chart .bar:hover { opacity: 1; }
+.acct-chart .bar.zero { fill: rgba(201, 162, 39, 0.14); }
+
+/* ═══ Modal ══════════════════════════════════════════════════ */
+.acct-modal-back {
+  position: fixed; inset: 0; z-index: 1000; padding: 20px;
+  background: rgba(3, 1, 8, 0.78);
+  display: flex; align-items: center; justify-content: center;
+}
+.acct-modal {
+  width: 420px; max-width: 100%; background: var(--panel);
+  border: 1px solid var(--a-line-strong); border-radius: 14px; padding: 22px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.acct-modal h3 { margin: 0; font-family: var(--a-serif); font-weight: 500; font-size: 1.3rem; }
+.acct-modal p { margin: 0; color: var(--muted); font-size: 0.78rem; }
+.acct-modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ═══ 響應式 ═════════════════════════════════════════════════ */
+@media (max-width: 860px) {
+  .acct-brain { grid-template-columns: 1fr; }
+}
+@media (max-width: 720px) {
+  .acct-wrap { padding: 16px 16px 64px; }
+  h1.acct-title { font-size: 1.7rem; }
+  .acct-hero { grid-template-columns: 1fr; gap: 20px; justify-items: center; text-align: center; }
+  .acct-figures { text-align: left; width: 100%; }
+  .acct-row { grid-template-columns: 1fr; }
+  .acct-feature { grid-template-columns: 78px minmax(0, 1fr) 72px; }
+  .acct-kv { grid-template-columns: 90px 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .acct-enso .brush, .acct-enso .brush-soft, .acct-meter > span { transition: none; }
+}
+
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}

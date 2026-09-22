@@ -27,6 +27,19 @@
   也因此，前端「先匿名使用、之後升級為正式帳號」的流程完全不需要
   後端另外處理——升級（linkWithCredential / linkWithPopup）不會改變
   uid，所有既有以 uid 為 key 的資料（brain / sessions）自動延續。
+
+【新增 — 會員等級 / 管理者】
+  本檔案仍然只回答「你是誰」。「你能做什麼、用了多少」在
+  core/membership.py 與 core/quota.py。
+
+  is_anonymous_claims : token 是否為匿名登入（= 訪客等級）。
+  is_admin_claims     : 管理者判斷，兩種來源任一成立即可——
+      (a) Firebase custom claim  admin=true
+          （用 firebase_admin.auth.set_custom_user_claims(uid, {"admin": True}) 設定，
+            使用者需重新取得 token 後生效）
+      (b) 環境變數 ADMIN_UIDS（逗號分隔 uid）——用來 bootstrap 第一位管理者，
+          不需要等 token 刷新。
+  require_admin       : 非管理者一律 403。
 """
 
 from __future__ import annotations
@@ -61,42 +74,8 @@ def _ensure_initialized() -> None:
         _initialized = True
 
 
-async def require_auth(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
-) -> str:
-    """FastAPI dependency：驗證 Firebase ID token，回傳已驗證的 uid。
-
-    前端需在每個受保護請求的 Authorization header 帶入：
-        Authorization: Bearer <firebase_id_token>
-
-    驗證失敗（token 缺失／過期／偽造／簽章不符）一律回傳 401，
-    不透露詳細錯誤原因給用戶端，避免資訊洩漏。
-    """
-    if credentials is None or not credentials.credentials:
-        raise HTTPException(status_code=401, detail="缺少登入憑證（Authorization header）")
-
-    _ensure_initialized()
-
-    try:
-        decoded = fb_auth.verify_id_token(credentials.credentials)
-    except Exception:
-        raise HTTPException(status_code=401, detail="登入憑證無效或已過期")
-
-    uid = decoded.get("uid")
-    if not uid:
-        raise HTTPException(status_code=401, detail="登入憑證缺少 uid")
-
-    return uid
-
-
-async def require_auth_claims(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
-) -> dict:
-    """與 require_auth 相同的驗證，但回傳完整 decoded token dict。
-
-    供需要 email / email_verified / sign_in_provider 等額外資訊的路由
-    使用（目前為 GET/PATCH /me）。
-    """
+def _verify(credentials: Optional[HTTPAuthorizationCredentials]) -> dict:
+    """驗證 Bearer token，回傳 decoded token；失敗一律 401（不透露原因）。"""
     if credentials is None or not credentials.credentials:
         raise HTTPException(status_code=401, detail="缺少登入憑證（Authorization header）")
 
@@ -111,3 +90,53 @@ async def require_auth_claims(
         raise HTTPException(status_code=401, detail="登入憑證缺少 uid")
 
     return decoded
+
+
+async def require_auth(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+) -> str:
+    """FastAPI dependency：驗證 Firebase ID token，回傳已驗證的 uid。
+
+    前端需在每個受保護請求的 Authorization header 帶入：
+        Authorization: Bearer <firebase_id_token>
+
+    驗證失敗（token 缺失／過期／偽造／簽章不符）一律回傳 401，
+    不透露詳細錯誤原因給用戶端，避免資訊洩漏。
+    """
+    return _verify(credentials)["uid"]
+
+
+async def require_auth_claims(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+) -> dict:
+    """與 require_auth 相同的驗證，但回傳完整 decoded token dict。
+
+    供需要 email / email_verified / sign_in_provider 等額外資訊的路由
+    使用（GET/PATCH /me、額度檢查、Personal Brain 上限檢查等）。
+    """
+    return _verify(credentials)
+
+
+# ── 身分屬性判斷（純函式，不做 I/O）────────────────────────────
+
+def is_anonymous_claims(claims: dict) -> bool:
+    return ((claims.get("firebase") or {}).get("sign_in_provider")) == "anonymous"
+
+
+def _admin_uids() -> set:
+    from settings import get_settings
+
+    raw = get_settings().admin_uids or ""
+    return {u.strip() for u in raw.split(",") if u.strip()}
+
+
+def is_admin_claims(claims: dict) -> bool:
+    if claims.get("admin") is True:
+        return True
+    return claims.get("uid") in _admin_uids()
+
+
+async def require_admin(claims: dict = Depends(require_auth_claims)) -> dict:
+    if not is_admin_claims(claims):
+        raise HTTPException(status_code=403, detail="需要管理者權限")
+    return claims

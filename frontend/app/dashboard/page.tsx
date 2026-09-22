@@ -30,6 +30,11 @@ import { useAuth } from "../components/AuthProvider";
 import AuthPanel from "../components/AuthPanel";
 import { apiFetch } from "../../lib/apiFetch";
 import { streamSSE } from "../../lib/sseFetch"; 
+// ── 會員額度 ──
+import { useMyUsage } from "../../lib/useMyUsage";
+import { apiErrorFromResponse, asBrainLimitError, asQuotaError, type QuotaDetail } from "../../lib/quotaError";
+import QuotaBadge from "../components/QuotaBadge";
+import QuotaBanner from "../components/QuotaBanner";
 import  {
   type WalkPathState,
   type FrontierPreviewItem,
@@ -69,6 +74,7 @@ type ChatResponse = {
 
 type SessionSummary = {
   session_id: string;
+  title?:     string;          // 會員中心可自訂的對話名稱
   phase?:     string | null;
   summary:    string;
   updated_at?: number | null;
@@ -536,6 +542,11 @@ export default function Page() {
   // ── Identity（uid 來自 Firebase Auth，見 AuthProvider）──────
   const { user, loading: authLoading } = useAuth();
   const userId = user?.uid ?? "";
+
+  // ── 會員額度：等級 / 用量（每輪對話結束後 refreshUsage 更新）──
+  const { usage, refresh: refreshUsage } = useMyUsage(!!userId);
+  const [quotaBlock, setQuotaBlock] = useState<QuotaDetail | null>(null);
+  const walkBlocked = usage ? !usage.limits.walk_allowed : false;   // 訪客不能用慢想
 
   const [sessionId, setSessionId] = useState("");
   const [phase,     setPhase]     = useState("socratic");
@@ -1017,13 +1028,18 @@ export default function Page() {
       );
     } catch (err) {
       if (!controller.signal.aborted) {
-        console.warn("[walk/stream]", err);
-        setError(err instanceof Error ? err.message : "慢想連線失敗");
+        const q = asQuotaError(err);
+        if (q) setQuotaBlock(q);
+        else {
+          console.warn("[walk/stream]", err);
+          setError(err instanceof Error ? err.message : "慢想連線失敗");
+        }
       }
     } finally {
       if (walkAbortRef.current === controller) setWalkStreaming(false);
+      refreshUsage();
     }
-  }, [sessionId, handleWalkEvent]);
+  }, [sessionId, handleWalkEvent, refreshUsage]);
 
   /** 回答 walk 提出的問題：POST /walk/answer，回應本身就是新一段
    *  SSE stream，沿用同一套事件處理。*/
@@ -1060,13 +1076,18 @@ export default function Page() {
       setPhase((cur) => (cur === "walk_awaiting_answer" ? "walk_pending" : cur));
     } catch (err) {
       if (!controller.signal.aborted) {
-        console.warn("[walk/answer]", err);
-        setError(err instanceof Error ? err.message : "回答提交失敗");
+        const q = asQuotaError(err);
+        if (q) setQuotaBlock(q);
+        else {
+          console.warn("[walk/answer]", err);
+          setError(err instanceof Error ? err.message : "回答提交失敗");
+        }
       }
     } finally {
       if (walkAbortRef.current === controller) setWalkStreaming(false);
+      refreshUsage();
     }
-  }, [sessionId, pendingWalkPathId, pendingWalkQuestion, handleWalkEvent]);
+  }, [sessionId, pendingWalkPathId, pendingWalkQuestion, handleWalkEvent, refreshUsage]);
 
   /** 頁面重新整理後（非冷啟動）的恢復：若本機記得上次 phase 是
    *  walk_pending，先問後端目前真實狀態，再決定：
@@ -1107,7 +1128,20 @@ export default function Page() {
     apiFetch(`${API_BASE.replace(/\/$/, "")}/user/${userId}/brain/concepts`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(entry),
-    }).catch((err) => console.warn("[brain/add]", err));
+    })
+      .then(async (r) => {
+        if (r.ok) return;
+        const err   = await apiErrorFromResponse(r);
+        const limit = asBrainLimitError(err);
+        if (limit) {
+          // 伺服器拒絕新增（Personal Brain 已達等級上限）：把樂觀更新的那筆拿掉，並告知原因。
+          setPersonalBrain((prev) => prev.filter((c) => c.eid !== entry.eid));
+          setError(limit.message);
+        } else {
+          console.warn("[brain/add]", err);
+        }
+      })
+      .catch((err) => console.warn("[brain/add]", err));
   }, [userId]);
 
   const addFoundationsToBrain = useCallback((items: { eid: string; label: string }[]) => {
@@ -1232,6 +1266,7 @@ export default function Page() {
     if (!API_BASE) { setError("尚未設定 NEXT_PUBLIC_API_BASE_URL。"); return; }
 
     setError("");
+    setQuotaBlock(null);
     setIsLoading(true);
     const userMsg: ChatMessage = { id: createId(), role: "user", content: text };
     setMessages((prev) => [...prev, userMsg]);
@@ -1247,7 +1282,7 @@ export default function Page() {
           walk_enabled: opts?.walkEnabledOverride ?? walkEnabled,
         }),
       });
-      if (!response.ok) throw new Error(`API error ${response.status}`);
+      if (!response.ok) throw await apiErrorFromResponse(response);
 
       const data      = (await response.json()) as ChatResponse;
       const nextPhase = data.phase || "socratic";
@@ -1274,12 +1309,26 @@ export default function Page() {
         fetchFoundationRecommendations(sessionId).then(setRecommendedFoundations);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "請求失敗,請稍後重試");
-      setMessages((prev) => [...prev, { id: createId(), role: "ai", content: "抱歉,連線失敗,請稍後再試。" }]);
-      saveHistory(messagesRef.current);
+      const q = asQuotaError(err);
+      if (q) {
+        // 被額度擋下不是「連線失敗」：撤回這則使用者訊息、把文字還給輸入框，內容不會丟。
+        // messagesRef 平常是靠 effect 在下次 render 後才同步；這裡必須「立刻」同步更新它，
+        // 否則緊接著 finally 裡的 saveHistory(messagesRef.current) 會拿到還含這則訊息的舊值，
+        // 把已撤回的歷史又寫回本機暫存，重新整理後那句話會憑空冒出來。
+        setQuotaBlock(q);
+        messagesRef.current = messagesRef.current.filter((m) => m.id !== userMsg.id);
+        setMessages(messagesRef.current);
+        if (!text.startsWith("[widget_submission")) setInput(text);
+        saveHistory(messagesRef.current);
+      } else {
+        setError(err instanceof Error ? err.message : "請求失敗,請稍後重試");
+        setMessages((prev) => [...prev, { id: createId(), role: "ai", content: "抱歉,連線失敗,請稍後再試。" }]);
+        saveHistory(messagesRef.current);
+      }
     } finally {
       setIsLoading(false);
       if (!isTypingRef.current) saveHistory(messagesRef.current);
+      refreshUsage();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, phase, walkEnabled]);
@@ -1349,6 +1398,7 @@ export default function Page() {
     setMessages((prev) => [...prev, launchMsg]);
     setIsLoading(true);
     setError("");
+    setQuotaBlock(null);
 
     try {
       const resp = await apiFetch(`${API_BASE.replace(/\/$/, "")}/chat`, {
@@ -1362,7 +1412,7 @@ export default function Page() {
           selected_rc_label: rcLabel,
         }),
       });
-      if (!resp.ok) throw new Error(`API error ${resp.status}`);
+      if (!resp.ok) throw await apiErrorFromResponse(resp);
       const data = (await resp.json()) as ChatResponse;
 
       // 從 random walk 交接過來時，walk_id 從此變成這段對話往後的
@@ -1386,11 +1436,19 @@ export default function Page() {
         setActiveWidgetMessageId(null);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "請求失敗,請稍後重試");
-      setMessages((prev) => [...prev, { id: createId(), role: "ai", content: "抱歉,連線失敗。" }]);
+      const q = asQuotaError(err);
+      if (q) {
+        setQuotaBlock(q);
+        messagesRef.current = messagesRef.current.filter((m) => m.id !== launchMsg.id);   // 同 sendChatTurn：需立即同步 ref
+        setMessages(messagesRef.current);
+      } else {
+        setError(err instanceof Error ? err.message : "請求失敗,請稍後重試");
+        setMessages((prev) => [...prev, { id: createId(), role: "ai", content: "抱歉,連線失敗。" }]);
+      }
     } finally {
       setIsLoading(false);
       if (!isTypingRef.current) saveHistory(messagesRef.current);
+      refreshUsage();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, isLoading, phase, userId, addFoundationsToBrain]);
@@ -1403,6 +1461,7 @@ export default function Page() {
     setPhase("socratic");
     setMessages([]);
     setError("");
+    setQuotaBlock(null);
     setRCFoundationMap(new Map());
     setRCSemanticScores([]);
     expandFetchedRef.current = new Set();
@@ -1523,6 +1582,18 @@ export default function Page() {
     fetchFoundationRecommendations(sessionDetail.session_id).then(setRecommendedFoundations);
   }, []);
 
+  // 會員中心「開啟」對話 → /dashboard?session=<id>。等登入 uid 就緒後載入一次，並清掉網址參數。
+  // 必須放在 handleLoadSession 之後：effect 的依賴陣列在 render 時就會讀取它，放前面會踩到 TDZ。
+  const sessionParamHandledRef = useRef(false);
+  useEffect(() => {
+    if (!userId || sessionParamHandledRef.current) return;
+    sessionParamHandledRef.current = true;
+    const sid = new URLSearchParams(window.location.search).get("session");
+    if (!sid) return;
+    window.history.replaceState(null, "", window.location.pathname);
+    handleLoadSession(sid);
+  }, [userId, handleLoadSession]);
+
   const inputPlaceholder =
     activeWidget !== null                ? "請先在右側表單完成輸入或按取消…" :
     phase === "walk_awaiting_answer"     ? "回答慢想過程中的問題…" :
@@ -1560,6 +1631,7 @@ export default function Page() {
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <QuotaBadge usage={usage} />
           {!authLoading && <AuthPanel />}
           <Link
             href="/"
@@ -1587,12 +1659,28 @@ export default function Page() {
           >
             📖 操作心法
           </Link>          
-          <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: "0.7rem", color: "var(--muted)" }}>
+          <Link
+            href="/account"
+            style={{
+              fontSize: "0.75rem",
+              color: "var(--muted)",
+              textDecoration: "none",
+              border: "1px solid var(--border)",
+              borderRadius: 8,
+              padding: "6px 12px",
+            }}
+          >
+            👤 會員中心
+          </Link>
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 4, fontSize: "0.7rem", color: "var(--muted)" }}
+            title={walkBlocked ? "註冊帳號後即可使用慢想模式" : undefined}
+          >
             <input
               type="checkbox"
-              checked={walkEnabled}
+              checked={walkEnabled && !walkBlocked}
               onChange={(e) => setWalkEnabled(e.target.checked)}
-              disabled={isLoading || walkStreaming || phase !== "socratic"}
+              disabled={isLoading || walkStreaming || phase !== "socratic" || walkBlocked}
             />
             🧠 慢想模式
           </label>
@@ -1653,6 +1741,7 @@ export default function Page() {
               </button>
             </form>
             {error && <div className="status">錯誤:{error}</div>}
+            {quotaBlock && <QuotaBanner detail={quotaBlock} onDismiss={() => setQuotaBlock(null)} />}
           </div>
         </div>
 
@@ -1811,9 +1900,11 @@ export default function Page() {
                     fontSize: "0.7rem", color: "var(--text)",
                     overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                   }}>
-                    {s.summary
-                      ? (s.summary.length > 40 ? s.summary.slice(0, 40) + "…" : s.summary)
-                      : `session ${s.session_id.slice(0, 8)}…`}
+                    {s.title
+                      ? s.title
+                      : s.summary
+                        ? (s.summary.length > 40 ? s.summary.slice(0, 40) + "…" : s.summary)
+                        : `session ${s.session_id.slice(0, 8)}…`}
                   </span>
                   <span style={{ fontSize: "0.6rem", color: "var(--muted)" }}>
                     {s.phase ?? ""}

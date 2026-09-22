@@ -1,0 +1,79 @@
+/* 管理後台：沿用 account.css 的 .acct 系統（分頁、按鈕、長條、列表），
+   這裡只補後台才需要的：統計列、資料表、抽屜、標籤、管理者模式標記。 */
+
+.acct .adm-mode {
+  font-size: 0.68rem; color: var(--a-bad-soft); border: 1px solid rgba(196, 87, 74, 0.45);
+  border-radius: 10px; padding: 1px 9px;
+}
+
+.adm-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px 28px; margin: 4px 0 26px; }
+.adm-stats dt { color: var(--muted); font-size: 0.72rem; }
+.adm-stats dd { margin: 2px 0 0; font-family: var(--a-serif); font-size: 2rem; font-weight: 500; line-height: 1.15; }
+.adm-two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 44px; }
+
+.adm-table-wrap { overflow-x: auto; }
+.adm-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+.adm-table th, .adm-table td { padding: 11px 12px; text-align: left; border-bottom: 1px solid var(--a-line); vertical-align: middle; }
+.adm-table thead th { color: var(--muted); font-weight: 400; font-size: 0.72rem; border-bottom-color: var(--a-line-strong); white-space: nowrap; }
+.adm-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.adm-table .muted { color: var(--muted); white-space: nowrap; }
+.adm-table tr.clickable { cursor: pointer; }
+.adm-table tr.clickable:hover { background: rgba(201, 162, 39, 0.05); }
+.adm-table tr.selected { background: rgba(201, 162, 39, 0.1); }
+.adm-actions { text-align: right; white-space: nowrap; }
+.adm-actions > * + * { margin-left: 6px; }
+
+.acct .adm-link {
+  background: none; border: 0; padding: 0; color: var(--text); font: inherit; text-align: left;
+  border-radius: 0; text-decoration: underline; text-decoration-color: var(--a-line-strong); text-underline-offset: 3px;
+}
+.acct .adm-link:hover:not(:disabled) { background: none; color: var(--orange); text-decoration-color: var(--orange); border-color: transparent; }
+.adm-sub { margin-left: 8px; color: var(--muted); font-size: 0.7rem; }
+
+.adm-chip {
+  display: inline-block; padding: 0 8px; border-radius: 10px; font-size: 0.68rem; margin-left: 6px;
+  border: 1px solid var(--a-line-strong); color: var(--muted); white-space: nowrap;
+}
+.adm-table td > .adm-chip:first-child, .acct-kv dd > .adm-chip:first-child { margin-left: 0; }
+.adm-chip.vip     { color: var(--orange); border-color: rgba(201, 162, 39, 0.55); }
+.adm-chip.soon    { color: #e0a03a; border-color: rgba(224, 160, 58, 0.6); background: rgba(224, 160, 58, 0.08); }
+.adm-chip.expired { color: var(--a-bad-soft); border-color: rgba(196, 87, 74, 0.55); }
+.adm-chip.guest   { color: var(--muted); border-style: dashed; }
+.adm-chip.admin   { color: var(--a-ok); border-color: rgba(122, 155, 118, 0.5); }
+
+.adm-search { display: flex; gap: 8px; flex: 1; min-width: 220px; max-width: 460px; }
+.adm-search .acct-input { flex: 1; }
+.adm-check { display: inline-flex; align-items: center; gap: 6px; font-size: 0.76rem; color: var(--muted); cursor: pointer; }
+.adm-check input { accent-color: var(--orange); }
+
+/* ── 使用者詳情抽屜 ── */
+.adm-drawer-back { position: fixed; inset: 0; z-index: 900; background: rgba(3, 1, 8, 0.6); display: flex; justify-content: flex-end; }
+.adm-drawer {
+  width: 520px; max-width: 100%; height: 100%; overflow-y: auto;
+  background: var(--panel); border-left: 1px solid var(--a-line-strong); padding: 20px 22px 40px;
+}
+.adm-drawer-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 16px; }
+.adm-drawer-title { font-family: var(--a-serif); font-size: 1.5rem; line-height: 1.2; word-break: break-all; }
+.adm-block { border-top: 1px solid var(--a-line); padding: 18px 0 4px; margin-top: 8px; }
+.adm-block h3 { margin: 0 0 10px; font-family: var(--a-serif); font-weight: 500; font-size: 1.15rem; color: var(--text); text-transform: none; letter-spacing: 0.01em; }
+
+.adm-radio { display: inline-flex; border: 1px solid var(--a-line-strong); border-radius: 8px; overflow: hidden; margin-bottom: 12px; }
+.adm-radio label { padding: 6px 16px; cursor: pointer; font-size: 0.78rem; color: var(--muted); display: flex; align-items: center; }
+.adm-radio label.on { background: rgba(201, 162, 39, 0.16); color: var(--orange); }
+.adm-radio input { position: absolute; opacity: 0; pointer-events: none; }
+.adm-radio label:focus-within { outline: 2px solid var(--orange); outline-offset: -2px; }
+.adm-expiry { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-bottom: 4px; }
+.adm-expiry input[type="date"] { color-scheme: dark; }
+.adm-quick { display: flex; gap: 6px; }
+
+.adm-audit { list-style: none; margin: 0; padding: 0; }
+.adm-audit li { display: flex; flex-direction: column; padding: 8px 0; border-bottom: 1px solid var(--a-line); font-size: 0.76rem; }
+.adm-audit .adm-sub { margin-left: 0; }
+
+@media (max-width: 860px) {
+  .adm-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .adm-two { grid-template-columns: 1fr; }
+}
+@media (max-width: 560px) {
+  .adm-drawer { padding: 16px 16px 40px; }
+}

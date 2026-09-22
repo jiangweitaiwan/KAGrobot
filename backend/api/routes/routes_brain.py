@@ -9,6 +9,12 @@
   - 新增 GET /admin/cache/stats → 回傳各層 cache 統計資訊
 
 其餘邏輯（anchor label 查詢、Schema、semantic scores）維持不變。
+
+【會員板塊】
+  - /graph/expand、/graph/expand/batch、/graph/rc-paths、/graph/bertopic-layout
+    補上 require_auth（原本沒有驗證，前端 apiFetch 雖然一律帶 token，
+    但後端沒有檢查，等於任何人都能打）。
+  - /admin/cache/stats 改為 require_admin。
 """
 
 from __future__ import annotations
@@ -25,7 +31,7 @@ from pathlib import Path
 
 from core.semantic_context import SemanticContext
 from graph_service.semantic_scorer import combine_score, type_overlap
-from core.firebase_auth import require_auth
+from core.firebase_auth import require_auth, require_admin
 from core.session_store import load_session_snapshot
 router = APIRouter()
 
@@ -238,7 +244,11 @@ async def _get_semantic_context(request: Request, uid: str, session_id: str) -> 
 # ── Routes ────────────────────────────────────────────────────────────
 
 @router.get("/graph/expand/{eid}", response_model=ExpandResponse)
-async def expand_concept(eid: str, request: Request) -> ExpandResponse:
+async def expand_concept(
+    eid: str,
+    request: Request,
+    _uid: str = Depends(require_auth),
+) -> ExpandResponse:
     coordinator  = request.app.state.coordinator
     anchor_label = _get_anchor_label(request, eid)
 
@@ -287,6 +297,7 @@ async def expand_concept(eid: str, request: Request) -> ExpandResponse:
 async def expand_concept_batch(
     body:    BatchExpandRequest,
     request: Request,
+    _uid:    str = Depends(require_auth),
 ) -> BatchExpandResponse:
     """批次版 /graph/expand/{eid}，供前端一次補齊 ranking pool 缺少的 RC。
 
@@ -346,7 +357,11 @@ async def expand_concept_batch(
 
 
 @router.get("/graph/rc-paths/{eid}", response_model=RCPathsResponse)
-async def rc_paths(eid: str, request: Request) -> RCPathsResponse:
+async def rc_paths(
+    eid: str,
+    request: Request,
+    _uid: str = Depends(require_auth),
+) -> RCPathsResponse:
     """取得指定 RC 的 downstream paths（DownstreamBFS）。
 
     結果快取由 BFSCoordinator 統一管理（取代 app.state.rcpath_cache）。
@@ -447,10 +462,13 @@ async def semantic_context(
 
 
 @router.get("/admin/cache/stats", response_model=CacheStatsResponse)
-async def cache_stats(request: Request) -> CacheStatsResponse:
+async def cache_stats(
+    request: Request,
+    _admin:  dict = Depends(require_admin),
+) -> CacheStatsResponse:
     """回傳各層 cache 的統計資訊（命中率、大小等）。
 
-    用於監控與調校 LRU maxsize。
+    用於監控與調校 LRU maxsize。僅限管理者。
     """
     coordinator = request.app.state.coordinator
     stats       = coordinator.stats
@@ -465,7 +483,10 @@ async def cache_stats(request: Request) -> CacheStatsResponse:
 
 
 @router.get("/graph/bertopic-layout", response_model=BertopicLayoutResponse)
-async def bertopic_layout(request: Request) -> BertopicLayoutResponse:
+async def bertopic_layout(
+    request: Request,
+    _uid: str = Depends(require_auth),
+) -> BertopicLayoutResponse:
     """回傳 BERTopic 2D layout 資料，供 PersonalBrain 前端繪製。
 
     首次呼叫從 GCS 下載，快取在 app.state.bertopic_layout。

@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 import asyncio, os
 from pathlib import Path
+
+from core.firebase_auth import require_auth
 
 router = APIRouter()
 
@@ -31,7 +33,10 @@ def _enrich_nodes_with_category(nodes: list[dict], category_map: dict) -> None:
 
 
 @router.get("/graph/global-layout", response_model=GlobalLayoutResponse)
-async def global_layout_endpoint(request: Request) -> GlobalLayoutResponse:
+async def global_layout_endpoint(
+    request: Request,
+    _uid: str = Depends(require_auth),
+) -> GlobalLayoutResponse:
     if request.app.state.layout_cache is not None:
         layout = request.app.state.layout_cache
     else:

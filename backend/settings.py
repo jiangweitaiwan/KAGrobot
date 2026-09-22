@@ -169,6 +169,50 @@ class Settings(BaseSettings):
         description="後端基礎 URL，供 show_interactive_html 注入的 widget HTML 呼叫 window.__SKILL_DISPATCH_URL__ 時使用。",
     )
 
+    # ══════════════════════════════════════════════════════════════
+    # 以下為「會員板塊」新增（Phase 0–3）
+    # ══════════════════════════════════════════════════════════════
+
+    # --- Firestore（Phase 0：client 統一由 core/firestore_db.py 建立）---
+    firestore_project: str = Field(
+        default="", alias="FIRESTORE_PROJECT",
+        description="預設資料庫所屬專案；空字串 = 使用 ADC 的預設專案（與舊行為相同）。",
+    )
+    firestore_state_project: str = Field(
+        default="project-33725f55-5932-4674-9bd", alias="FIRESTORE_STATE_PROJECT",
+        description="對話狀態備份（sessions）所在專案。預設值沿用 session_store.py 原本寫死的值。",
+    )
+    firestore_state_database: str = Field(
+        default="kagrobot-state", alias="FIRESTORE_STATE_DATABASE",
+        description="對話狀態備份（sessions）所在資料庫名稱。",
+    )
+
+    # --- 會員 / 額度（Phase 1）---
+    quota_enforce: bool = Field(
+        default=False, alias="QUOTA_ENFORCE",
+        description=(
+            "False（預設）= 只計量、不擋（Phase 0）：不回 429，且慢想 / Personal Brain "
+            "上限也一併放寬。跑一週看過真實用量、決定額度數字後再改成 true。"
+        ),
+    )
+    admin_uids: str = Field(
+        default="", alias="ADMIN_UIDS",
+        description="管理者 uid（逗號分隔），用來 bootstrap 第一位管理者；之後可改用 custom claim admin=true。",
+    )
+    usage_timezone: str = Field(default="Asia/Taipei", alias="USAGE_TIMEZONE")
+    plan_cache_ttl_s: int = Field(default=60, alias="PLAN_CACHE_TTL_S")
+    quota_warn_ratio: float = Field(default=0.8, alias="QUOTA_WARN_RATIO")
+
+    # 下列數字是「起始猜測值」，不是依據。請以 Phase 0 的真實用量校正。
+    quota_guest_tokens: int = Field(default=200_000, alias="QUOTA_GUEST_TOKENS")           # 終身一次性
+    quota_normal_monthly_tokens: int = Field(default=1_500_000, alias="QUOTA_NORMAL_MONTHLY_TOKENS")
+    quota_vip_monthly_tokens: int = Field(default=10_000_000, alias="QUOTA_VIP_MONTHLY_TOKENS")
+    walk_max_depth_normal: int = Field(default=4, alias="WALK_MAX_DEPTH_NORMAL")
+    walk_max_depth_vip: int = Field(default=8, alias="WALK_MAX_DEPTH_VIP")
+    brain_max_guest: int = Field(default=20, alias="BRAIN_MAX_GUEST")
+    brain_max_normal: int = Field(default=100, alias="BRAIN_MAX_NORMAL")
+    brain_max_vip: int = Field(default=500, alias="BRAIN_MAX_VIP")
+
 
 @lru_cache
 def get_settings() -> Settings:

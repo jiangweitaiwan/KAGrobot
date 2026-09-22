@@ -3,7 +3,7 @@
 
 GET    /me            → 目前登入者的 profile（首次登入自動建立文件）
 PATCH  /me             → 更新 profile（目前僅 display_name）
-GET    /me/sessions    → 目前登入者的對話 session 列表
+GET    /me/sessions    → 目前登入者的對話 session 列表（含每個對話的 token 用量）
 DELETE /me              → 刪除帳號（Firebase Auth + Firestore 資料）
 
 uid 一律來自 Depends(require_auth / require_auth_claims) 驗證過的
@@ -20,6 +20,16 @@ is_anonymous / provider 狀態。
   core/session_store.py 存進 display_messages 裡、某則 AI turn message
   可能帶的 "widget" 資料（見 api/routes/chat.py 的 ai_turn_message 組裝）。
   純粹透傳給前端重播用，這裡不做任何額外處理或驗證。
+
+【新增 — 會員等級 / 用量】
+  - ProfileResponse.plan 一律由 core/membership.resolve_membership 解析
+    （匿名 → guest、VIP 過期 → normal、舊值 "free" → normal），
+    與額度檢查實際套用的規則是同一份。
+  - GET /me/sessions 附上每個對話的 title 與 total_tokens。
+  - DELETE /me 的資料清理改為兩個資料庫都清：sessions 實際存放在
+    kagrobot-state（見 core/firestore_db.py），原本只刪預設資料庫、
+    刪不到那邊的 sessions；並一併清除 usage_* 集合。
+    （usage_global_* 全站彙總不屬於任何使用者，不會也不應該被動到。）
 """
 
 from __future__ import annotations
@@ -27,38 +37,40 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Optional  # ← 加入 Any, Dict
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from firebase_admin import auth as fb_auth
 from pydantic import BaseModel
 
 from core.firebase_auth import require_auth, require_auth_claims
-from core.session_store import list_sessions, load_session_display  # ← 新增 import
+from core.firestore_db import get_default_db
+from core.membership import resolve_membership
+from core.session_store import (  # ← 新增 import
+    delete_all_sessions,
+    list_sessions,
+    load_session_display,
+)
+from core.usage import delete_user_usage, get_sessions_usage
 
 router = APIRouter()
 
-_db = None
-
 
 def _get_db():
-    global _db
-    if _db is None:
-        from google.cloud import firestore
-        _db = firestore.AsyncClient()
-    return _db
+    return get_default_db()
 
 
 # ── Schema ────────────────────────────────────────────────────────────
 
 class ProfileResponse(BaseModel):
-    uid:            str
-    email:          Optional[str] = None
-    email_verified: bool = False
-    display_name:   Optional[str] = None
-    is_anonymous:   bool = False
-    provider:       str = "anonymous"
-    plan:           str = "free"
-    created_at:     int
-    last_login_at:  int
+    uid:             str
+    email:           Optional[str] = None
+    email_verified:  bool = False
+    display_name:    Optional[str] = None
+    is_anonymous:    bool = False
+    provider:        str = "anonymous"
+    plan:            str = "normal"
+    plan_expires_at: Optional[int] = None
+    created_at:      int
+    last_login_at:   int
 
 
 class UpdateProfileRequest(BaseModel):
@@ -66,11 +78,13 @@ class UpdateProfileRequest(BaseModel):
 
 
 class SessionSummary(BaseModel):
-    session_id: str
-    phase:      Optional[str] = None
-    summary:    str = ""
-    updated_at: Optional[int] = None
-    created_at: Optional[int] = None
+    session_id:   str
+    title:        str = ""
+    phase:        Optional[str] = None
+    summary:      str = ""
+    updated_at:   Optional[int] = None
+    created_at:   Optional[int] = None
+    total_tokens: int = 0
 
 
 class SessionListResponse(BaseModel):
@@ -133,19 +147,22 @@ async def _load_profile(claims: dict) -> ProfileResponse:
         data = {
             "email":         claims.get("email"),
             "display_name":  claims.get("name"),
-            "plan":          "free",
+            "plan":          "normal",
             "created_at":    now,
             "last_login_at": now,
         }
         await ref.set(data)
     else:
         data = doc.to_dict() or {}
+        # admin 授予等級等流程可能比 GET /me 更早建立這份文件，此時沒有 created_at。
+        missing_created = "created_at" not in data
         data.setdefault("email", claims.get("email"))
         data.setdefault("display_name", claims.get("name"))
-        data.setdefault("plan", "free")
         data.setdefault("created_at", now)
 
         updates: dict = {"last_login_at": now}
+        if missing_created:
+            updates["created_at"] = now
         # 升級為正式帳號後 token 上會多出 / 換掉 email，順手補寫回 Firestore，
         # 讓其他不會帶 token 的內部工具（例如未來的管理後台）也能讀到。
         if claims.get("email") and data.get("email") != claims.get("email"):
@@ -155,6 +172,9 @@ async def _load_profile(claims: dict) -> ProfileResponse:
         await ref.set(updates, merge=True)
         data["last_login_at"] = now
 
+    # 等級一律由 membership 解析（匿名 → guest、VIP 過期 → normal、舊值 "free" → normal）
+    membership = await resolve_membership(claims)
+
     return ProfileResponse(
         uid=uid,
         email=data.get("email"),
@@ -162,7 +182,8 @@ async def _load_profile(claims: dict) -> ProfileResponse:
         display_name=data.get("display_name"),
         is_anonymous=(provider == "anonymous"),
         provider=provider,
-        plan=data.get("plan", "free"),
+        plan=membership.plan,
+        plan_expires_at=membership.plan_expires_at,
         created_at=data.get("created_at", now),
         last_login_at=data.get("last_login_at", now),
     )
@@ -208,14 +229,24 @@ async def update_my_profile(
 
 
 @router.get("/me/sessions", response_model=SessionListResponse)
-async def get_my_sessions(uid: str = Depends(require_auth)) -> SessionListResponse:
-    """回傳目前登入者的對話 session 列表（依最後更新時間新到舊）。
+async def get_my_sessions(
+    limit: int = Query(50, ge=1, le=100),
+    uid:   str = Depends(require_auth),
+) -> SessionListResponse:
+    """回傳目前登入者的對話 session 列表（依最後更新時間新到舊），附上每個對話的 token 用量。
 
     資料來源為 core/session_store.py 在每輪 /chat 結束後寫入的備份，
-    見 api/routes/chat.py。
+    見 api/routes/chat.py。用量來自 core/usage.py 的 usage_sessions 集合。
     """
-    sessions = await list_sessions(uid)
-    return SessionListResponse(sessions=[SessionSummary(**s) for s in sessions])
+    sessions  = await list_sessions(uid, limit=limit)
+    usage_map = await get_sessions_usage(uid, [s["session_id"] for s in sessions])
+    return SessionListResponse(sessions=[
+        SessionSummary(
+            **s,
+            total_tokens=(usage_map.get(s["session_id"]) or {}).get("total_tokens", 0),
+        )
+        for s in sessions
+    ])
 
 
 
@@ -255,7 +286,9 @@ async def delete_my_account(uid: str = Depends(require_auth)) -> DeleteAccountRe
     db = _get_db()
 
     try:
-        await _delete_collection(
+        await delete_all_sessions(uid)        # kagrobot-state 資料庫（sessions 實際存放位置）
+        await delete_user_usage(uid)          # usage_monthly / daily / sessions / meta
+        await _delete_collection(             # 舊版本可能留在預設 DB 的 sessions；空集合刪除是 no-op
             db.collection("users").document(uid).collection("sessions")
         )
         await (

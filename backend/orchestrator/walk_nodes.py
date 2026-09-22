@@ -89,7 +89,9 @@ class WalkOrchestratorNodes:
         session = WalkSession.start(
             session_id=f"{uid}:{state.get('session_id') or 'unknown'}",
             start_concepts=start_concepts,
-            max_depth=self._max_depth,
+            # 單次慢想的成本上限依會員等級而定（/chat 每輪寫入 walk_max_depth，
+            # 見 core/membership.py）；沒有帶值時退回建構時的預設深度。
+            max_depth=int(state.get("walk_max_depth") or self._max_depth),
         )
 
         return {

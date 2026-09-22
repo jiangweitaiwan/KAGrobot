@@ -1,0 +1,13 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "usage_monthly",
+      "queryScope": "COLLECTION_GROUP",
+      "fields": [
+        { "fieldPath": "period",       "order": "ASCENDING"  },
+        { "fieldPath": "total_tokens", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

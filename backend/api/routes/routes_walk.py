@@ -1,5 +1,16 @@
 # -*- coding: utf-8 -*-
-"""api/routes/routes_walk.py — Random Walk（慢想）SSE endpoints（重構版）"""
+"""api/routes/routes_walk.py — Random Walk（慢想）SSE endpoints（重構版）
+
+【新增 — 會員額度 / 用量計量】
+  - /walk/stream、/walk/answer 掛 require_quota：每一段 SSE 開頭檢查額度，
+    超額回 429（前端 sseFetch 會拋出帶有結構化 detail 的 ApiError）。
+    不在走到一半時強制中止——中途斷掉會留下半截 checkpoint；單次慢想的
+    成本上限改由 walk_max_depth（依等級，見 core/membership.py）控制。
+  - _persisted_sse 用 usage_scope 包住整段串流：串流內所有 LLM 呼叫都計入
+    該 session。用戶端中途斷線時 generator 會被 aclose，scope 的 finally
+    仍會寫入用量（見 core/usage.py 的 shield）。
+  - /walk/status 只查狀態、不呼叫 LLM，維持 require_auth。
+"""
 
 from __future__ import annotations
 
@@ -12,7 +23,9 @@ from langgraph.types import Command
 from pydantic import BaseModel
 
 from core.firebase_auth import require_auth
+from core.quota import QuotaContext, require_quota
 from core.session_store import save_session_snapshot
+from core.usage import usage_scope
 from core.walk_stream import stream_walk_via_orchestrator
 
 router = APIRouter()
@@ -42,6 +55,7 @@ async def _persisted_sse(
     uid:          str,
     session_id:   str,
     extra_turn_messages: Optional[List[Dict[str, Any]]] = None,
+    plan:         Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """包住 stream_walk_via_orchestrator：把 user_question / walk_complete /
     walk_aborted 的文字內容累積起來，stream 自然結束後（不論是停在
@@ -51,42 +65,46 @@ async def _persisted_sse(
       2. display_messages 收錄這段對話裡使用者看到的問題/完成訊息，
          「歷史對話」列表能正確顯示這段慢想過程的文字內容
          （不含可執行狀態，見 session_store.py 的取捨說明）。
+
+    usage_scope 必須在 generator 內部建立（而不是在路由函式裡），因為
+    StreamingResponse 是在路由函式返回「之後」才開始消費這個 generator。
     """
     import json as _json
 
     collected_ai_text: List[str] = []
 
-    async for sse_line in stream_walk_via_orchestrator(orchestrator, config, invoke_input):
-        yield sse_line
-        try:
-            payload = _json.loads(sse_line[len("data: "):].strip())
-        except Exception:
-            continue
+    async with usage_scope(uid, session_id, plan=plan):
+        async for sse_line in stream_walk_via_orchestrator(orchestrator, config, invoke_input):
+            yield sse_line
+            try:
+                payload = _json.loads(sse_line[len("data: "):].strip())
+            except Exception:
+                continue
 
-        if payload.get("type") == "user_question":
-            collected_ai_text.append(f"🤔 {payload.get('question', '')}")
-        elif payload.get("type") in ("walk_complete", "walk_aborted"):
-            text = payload.get("summary") or payload.get("message") or ""
-            if text:
-                collected_ai_text.append(text)
+            if payload.get("type") == "user_question":
+                collected_ai_text.append(f"🤔 {payload.get('question', '')}")
+            elif payload.get("type") in ("walk_complete", "walk_aborted"):
+                text = payload.get("summary") or payload.get("message") or ""
+                if text:
+                    collected_ai_text.append(text)
 
-    snapshot = await orchestrator.aget_state(config)
-    values   = snapshot.values or {}
+        snapshot = await orchestrator.aget_state(config)
+        values   = snapshot.values or {}
 
-    now_ms = int(time.time() * 1000)
-    turn_messages = list(extra_turn_messages or [])
-    if collected_ai_text:
-        turn_messages.append({
-            "role":        "ai",
-            "content":     "\n".join(collected_ai_text),
-            "attachments": [],
-            "created_at":  now_ms,
-        })
+        now_ms = int(time.time() * 1000)
+        turn_messages = list(extra_turn_messages or [])
+        if collected_ai_text:
+            turn_messages.append({
+                "role":        "ai",
+                "content":     "\n".join(collected_ai_text),
+                "attachments": [],
+                "created_at":  now_ms,
+            })
 
-    await save_session_snapshot(
-        uid, session_id, values,
-        turn_messages=turn_messages or None,
-    )
+        await save_session_snapshot(
+            uid, session_id, values,
+            turn_messages=turn_messages or None,
+        )
 
 
 def _sse_response(gen: AsyncGenerator[str, None]) -> StreamingResponse:
@@ -136,8 +154,9 @@ async def walk_status(
 async def stream_walk(
     session_id: str,
     request:    Request,
-    uid:        str = Depends(require_auth),
+    ctx:        QuotaContext = Depends(require_quota),
 ) -> StreamingResponse:
+    uid = ctx.uid
     orchestrator = request.app.state.orchestrator
     config = _walk_config(uid, session_id)
 
@@ -150,7 +169,7 @@ async def stream_walk(
         )
 
     return _sse_response(
-        _persisted_sse(orchestrator, config, {"messages": []}, uid, session_id)
+        _persisted_sse(orchestrator, config, {"messages": []}, uid, session_id, plan=ctx.membership.plan)
     )
 
 
@@ -159,8 +178,9 @@ async def answer_walk(
     session_id: str,
     body:       WalkAnswerRequest,
     request:    Request,
-    uid:        str = Depends(require_auth),
+    ctx:        QuotaContext = Depends(require_quota),
 ) -> StreamingResponse:
+    uid = ctx.uid
     orchestrator = request.app.state.orchestrator
     config = _walk_config(uid, session_id)
 
@@ -177,6 +197,6 @@ async def answer_walk(
     return _sse_response(
         _persisted_sse(
             orchestrator, config, Command(resume=body.answer),
-            uid, session_id, extra_turn_messages=user_turn,
+            uid, session_id, extra_turn_messages=user_turn, plan=ctx.membership.plan,
         )
     )

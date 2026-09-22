@@ -14,17 +14,26 @@ Neo4j Concept 欄位：
             mechanism 與 function 是並存欄位，不是替代關係。
   舊版 description / 舊版 function（取代前） / analysis_types 欄位已移除。
   Paper 節點上的 conceptual_premises / contextual_model_constraints 不變。
+
+【會員板塊】
+  - /concept/detail 加上 require_auth（原本沒有任何驗證）。
+  - /concept/suggest 會呼叫 Gemini，因此掛 require_quota（額度超限回 429），
+    並用 usage_scope 計量、feature="suggest"。
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
+from core.firebase_auth import require_auth
 from core.google_llm import create_chat_google_generative_ai
+from core.quota import QuotaContext, require_quota
+from core.usage import usage_scope
 
 router = APIRouter()
 
@@ -65,7 +74,11 @@ class SuggestResponse(BaseModel):
 # ── Routes ────────────────────────────────────────────────────────────
 
 @router.get("/concept/detail/{eid}", response_model=ConceptDetailResponse)
-async def concept_detail(eid: str, request: Request) -> ConceptDetailResponse:
+async def concept_detail(
+    eid: str,
+    request: Request,
+    _uid: str = Depends(require_auth),
+) -> ConceptDetailResponse:
     """根據 elementId 查詢 concept 詳情。
 
     結果快取在 app.state.detail_cache（eid → ConceptDetailResponse dict）。
@@ -146,6 +159,7 @@ async def concept_detail(eid: str, request: Request) -> ConceptDetailResponse:
 async def concept_suggest(
     body:    SuggestRequest,
     request: Request,
+    ctx:     QuotaContext = Depends(require_quota),
 ) -> SuggestResponse:
     """LLM 推薦與對話相關的 concept，獨立於 chat API，非同步回傳。
 
@@ -208,8 +222,12 @@ async def concept_suggest(
             model="gemini-2.0-flash",
             temperature=0.1,
             settings=settings,
+            feature="suggest",
         )
-        resp = llm.invoke(prompt)
+        # llm.invoke 是同步呼叫：放進 thread 以免卡住 event loop；
+        # asyncio.to_thread 會複製 context，usage_scope 內的 ContextVar 仍讀得到。
+        async with usage_scope(ctx.uid, None, plan=ctx.membership.plan):
+            resp = await asyncio.to_thread(llm.invoke, prompt)
         raw  = resp.content if hasattr(resp, "content") else str(resp)
 
         raw = raw.strip()

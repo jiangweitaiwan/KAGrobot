@@ -47,6 +47,12 @@ WalkScheduler 存在 app.state.walk_sessions 這個 process 內記憶體 dict）
                    單輪透傳給 api/routes/chat.py 組成
                    ChatResponse.pending_widget，下一輪呼叫時上一輪的值
                    不會、也不需要被讀取。
+
+【新增 — 會員等級】
+  walk_max_depth : 單條慢想路徑最多走幾步，由會員等級決定（見
+                   core/membership.py 的 PlanLimits.walk_max_depth），
+                   /chat 每輪寫入；walk_seed 建立 WalkSession 時讀取。
+                   這是單次慢想的成本上限，取代「走到一半強制中止」。
 """
 
 from __future__ import annotations
@@ -76,6 +82,7 @@ class OrchestratorState(TypedDict, total=False):
     session_id:        Optional[str]
 
     walk_enabled:           bool
+    walk_max_depth:         int          # 依會員等級，見檔頭說明
     walk_session:           Optional[Dict[str, Any]]
     walk_pointer:            int
     walk_pending_question:  Optional[Dict[str, Any]]

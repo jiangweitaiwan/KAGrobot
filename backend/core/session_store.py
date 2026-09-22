@@ -16,7 +16,7 @@
   冷啟動或重啟），就從這裡讀回最後一次的狀態，重新塞進 LangGraph 的
   invoke_input 當作起點，讓對話可以延續，而不是被迫從頭開始。
 
-刻意不做的事（設計取捨，見上一輪討論）：
+刻意不做的事（設計取捨）：
   - 不試圖完整還原 LangGraph 內部 checkpoint（含工具呼叫中途狀態）。
     那需要實作完整的 BaseCheckpointSaver + serde，複雜度與風險都高，
     「分析對話中途因重啟而遺失一次工具呼叫的中間過程」屬於可接受的
@@ -26,19 +26,19 @@
     tool_calls 的 AIMessage——避免恢復後缺少對應的 tool response，
     導致下一輪呼叫 LLM API 時因為「懸空的 tool_call」而報錯。
 
-【新增 — HTML Widget】
-  save_session_snapshot 的 turn_messages 參數（由 api/routes/chat.py 與
-  api/routes/routes_walk.py 組裝）現在可能在某則 AI turn message 上多帶
-  一個 "widget" 欄位（{widget_id, title, url, created_at,
-  expires_in_hours}），代表這輪對話顯示過一個互動元件。這裡刻意不特別
-  解析或驗證這個欄位——turn_messages 本來就是「呼叫端已經組好的顯示用
-  資料」，直接原樣併入 display_messages 陣列存檔即可，前端重播時依
-  expires_in_hours + created_at 自行判斷是否過期（比照 AttachmentCard
-  的 isAttachmentExpired 邏輯，見 api/routes/users.py::
-  SessionDisplayMessage 的 widget 欄位定義）。不需要跟 pending_widget
-  一樣「可續答」——重播模式下這個 widget 只是歷史紀錄，iframe 若還沒
-  過期仍可正常互動，但即時試算（dispatch）與正常流程無異，提交後一樣
-  走全新一輪 /chat；只是過期後前端顯示灰階，不呈現 iframe。
+【HTML Widget】
+  save_session_snapshot 的 turn_messages 參數可能在某則 AI turn message 上
+  多帶一個 "widget" 欄位，這裡不解析、原樣併入 display_messages，
+  前端重播時依 expires_in_hours + created_at 自行判斷是否過期。
+
+【Phase 0 — Firestore client 統一】
+  sessions 仍存放在 kagrobot-state 資料庫（既有資料不搬），但 client 改由
+  core/firestore_db.get_state_db() 提供，不再自己建。
+
+【Phase 2 — 會員中心】
+  - title：使用者自訂的對話名稱（rename_session）。沒有 title 時前端退回
+    顯示需求摘要。save_session_snapshot 用 merge=True，不會覆蓋 title。
+  - delete_session / delete_all_sessions：刪除對話（後者供刪帳號使用）。
 """
 
 from __future__ import annotations
@@ -48,15 +48,9 @@ from typing import Any, Dict, List, Optional
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
-_db = None
-_MAX_DISPLAY_MESSAGES = 120  # 前端渲染用的訊息上限，避免單一 session 文件無限膨脹
+from core.firestore_db import get_state_db as _get_db
 
-def _get_db():
-    global _db
-    if _db is None:
-        from google.cloud import firestore
-        _db = firestore.AsyncClient(project = "project-33725f55-5932-4674-9bd",database="kagrobot-state")
-    return _db
+_MAX_DISPLAY_MESSAGES = 120  # 前端渲染用的訊息上限，避免單一 session 文件無限膨脹
 
 
 # ── Message (de)serialization（保守版：只保留純文字對話）───────────
@@ -87,6 +81,13 @@ def _deserialize_messages(raw: List[Dict[str, str]]) -> List[BaseMessage]:
     return out
 
 
+def _session_ref(uid: str, session_id: str):
+    return (
+        _get_db().collection("users").document(uid)
+                 .collection("sessions").document(session_id)
+    )
+
+
 # ── Public API ───────────────────────────────────────────────────
 
 async def save_session_snapshot(
@@ -111,17 +112,13 @@ async def save_session_snapshot(
             "socrates_intent_types":     socrates_state.get("intent_types") or [],
             "socrates_context_summary":  socrates_state.get("context_summary") or "",
             "main_state_messages":       _serialize_messages(state.get("main_state") or []),
-            # ← 新增：walk 的展示用狀態（唯讀重播，不代表可續答）
+            # walk 的展示用狀態（唯讀重播，不代表可續答）
             "walk_session":              state.get("walk_session"),
             "walk_pending_question":     state.get("walk_pending_question"),
             "updated_at":                now,
         }
 
-        db  = _get_db()
-        ref = (
-            db.collection("users").document(uid)
-              .collection("sessions").document(session_id)
-        )
+        ref = _session_ref(uid, session_id)
         doc = await ref.get()
 
         if not doc.exists:
@@ -146,12 +143,7 @@ async def load_session_snapshot(
     回傳 None 代表沒有備份，或讀取失敗——呼叫端應視同全新 session 處理。
     """
     try:
-        db  = _get_db()
-        ref = (
-            db.collection("users").document(uid)
-              .collection("sessions").document(session_id)
-        )
-        doc = await ref.get()
+        doc = await _session_ref(uid, session_id).get()
         if not doc.exists:
             return None
 
@@ -162,7 +154,7 @@ async def load_session_snapshot(
             "selected_rc_label": data.get("selected_rc_label"),
             "confirmed_rc_eid":  data.get("confirmed_rc_eid"),
             "skill_sandbox_id":  data.get("skill_sandbox_id"),
-            "thinking_process":  data.get("thinking_process") or "", 
+            "thinking_process":  data.get("thinking_process") or "",
             "socrates_state": {
                 "messages":        [],
                 "agent_messages":  [],
@@ -177,14 +169,10 @@ async def load_session_snapshot(
               f"(uid={uid}, session={session_id}): {exc}")
         return None
 
+
 async def load_session_display(uid: str, session_id: str) -> Optional[Dict[str, Any]]:
     try:
-        db  = _get_db()
-        ref = (
-            db.collection("users").document(uid)
-              .collection("sessions").document(session_id)
-        )
-        doc = await ref.get()
+        doc = await _session_ref(uid, session_id).get()
         if not doc.exists:
             return None
 
@@ -211,9 +199,8 @@ async def list_sessions(uid: str, limit: int = 30) -> List[Dict[str, Any]]:
     try:
         from google.cloud import firestore
 
-        db    = _get_db()
         query = (
-            db.collection("users").document(uid).collection("sessions")
+            _get_db().collection("users").document(uid).collection("sessions")
               .order_by("updated_at", direction=firestore.Query.DESCENDING)
               .limit(limit)
         )
@@ -223,6 +210,7 @@ async def list_sessions(uid: str, limit: int = 30) -> List[Dict[str, Any]]:
             d = doc.to_dict() or {}
             results.append({
                 "session_id": doc.id,
+                "title":      d.get("title", ""),
                 "phase":      d.get("phase"),
                 "summary":    d.get("socrates_context_summary", ""),
                 "updated_at": d.get("updated_at"),
@@ -232,3 +220,31 @@ async def list_sessions(uid: str, limit: int = 30) -> List[Dict[str, Any]]:
     except Exception as exc:
         print(f"[session_store] list_sessions failed (uid={uid}): {exc}")
         return []
+
+
+# ── 會員中心：改名 / 刪除 ──────────────────────────────────────────
+
+async def rename_session(uid: str, session_id: str, title: str) -> bool:
+    """回傳 False 代表找不到該對話。title 為空字串 = 清除自訂名稱。"""
+    ref = _session_ref(uid, session_id)
+    doc = await ref.get()
+    if not doc.exists:
+        return False
+    await ref.set({"title": title}, merge=True)
+    return True
+
+
+async def delete_session(uid: str, session_id: str) -> None:
+    await _session_ref(uid, session_id).delete()
+
+
+async def delete_all_sessions(uid: str) -> None:
+    """刪帳號用：分批刪除該使用者所有 sessions（Firestore 沒有原生的刪除整個 collection）。"""
+    col = _get_db().collection("users").document(uid).collection("sessions")
+    while True:
+        count = 0
+        async for doc in col.limit(100).stream():
+            await doc.reference.delete()
+            count += 1
+        if count < 100:
+            break

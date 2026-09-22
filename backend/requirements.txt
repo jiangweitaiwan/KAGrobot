@@ -24,3 +24,4 @@ google-cloud-firestore>=2.16.0
 e2b-code-interpreter>=1.0
 PyYAML>=6.0
 firebase-admin>=6.5
+tzdata>=2024.1

@@ -6,35 +6,36 @@
     "{uid}:{session_id}"，確保不同使用者即使湊巧選到同一個
     session_id 字串，也不會共用同一份對話記憶體狀態。
   - uid 一律來自 Authorization header 的 Firebase ID token，
-    不再接受 request body 帶 uid（原本 ChatRequest 就沒有這個欄位，
-    現在明確靠 Depends(require_auth) 取得，杜絕未來被誤加回去）。
+    不再接受 request body 帶 uid。
   - 每輪對話結束後，把可安全序列化的狀態子集備份到 Firestore
     （core/session_store.py），下次遇到 MemorySaver 對該 thread
-    已無記錄（冷啟動／重啟）時，從備份還原、接續對話，而不是砍掉重練。
+    已無記錄（冷啟動／重啟）時，從備份還原、接續對話。
 
 【新增 — HTML Widget】
   ChatResponse 多一個 pending_widget 欄位，透傳 MainAgent.chat() 回傳的
-  "pending_widget"（見 core/main_agent.py 檔頭說明）。這是單輪展示用的
-  資訊，不需要寫進 OrchestratorState 或 Firestore 的可續答狀態——使用者
-  提交/取消後就是全新一輪 /chat 呼叫，history 本身已經包含「顯示過
-  widget」的 AIMessage + ToolMessage，不需要額外恢復機制。
+  "pending_widget"（見 core/main_agent.py 檔頭說明）。
 
-  但為了「歷史對話」列表能重播出這段 widget 曾經顯示過，仍把它記進
-  session_store 的 display_messages（過期後前端顯示灰階、不可互動，
-  比照 attachments 的 isAttachmentExpired 邏輯）。
+【新增 — 會員額度 / 用量計量】
+  - Depends(require_quota)：用量已達上限時直接回 429（見 core/quota.py）。
+    uid 改由 QuotaContext 取得（底層仍是同一個 verify_id_token 驗證）。
+  - walk_enabled 不再信任前端：依會員等級覆蓋。訪客一律 False。
+    walk_max_depth 由等級決定，寫進 state 讓 walk_seed 使用（單次慢想成本上限）。
+  - usage_scope 包住 ainvoke：整輪所有 LLM 呼叫（socratic / main_agent 及其 tool
+    loop）都會被計入，離開 scope 時一次寫入 Firestore。
 """
 
 from __future__ import annotations
 
-import time  
+import time
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, Request
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel
 
-from core.firebase_auth import require_auth
+from core.quota import QuotaContext, require_quota
 from core.session_store import load_session_snapshot, save_session_snapshot
+from core.usage import usage_scope
 
 router = APIRouter()
 
@@ -47,7 +48,7 @@ class ChatRequest(BaseModel):
     phase:             Optional[str] = None
     selected_rc_eid:   Optional[str] = None
     selected_rc_label: Optional[str] = None
-    walk_enabled:      bool = False   
+    walk_enabled:      bool = False
 
 
 class Attachment(BaseModel):
@@ -82,19 +83,22 @@ class ChatResponse(BaseModel):
 async def chat_endpoint(
     request: Request,
     body:    ChatRequest,
-    uid:     str = Depends(require_auth),
+    ctx:     QuotaContext = Depends(require_quota),
 ) -> ChatResponse:
+    uid           = ctx.uid
     orchestrator  = request.app.state.orchestrator
     thread_id     = f"{uid}:{body.session_id}"
     config        = {"configurable": {"thread_id": thread_id}}
     initial_phase = body.phase or "socratic"
 
     invoke_input: dict = {
-        "messages":     [HumanMessage(content=body.message)],
-        "phase":        initial_phase,
-        "uid":          uid,
-        "session_id":   body.session_id,      # ← 新增
-        "walk_enabled": body.walk_enabled,    # ← 新增
+        "messages":       [HumanMessage(content=body.message)],
+        "phase":          initial_phase,
+        "uid":            uid,
+        "session_id":     body.session_id,
+        # 前端只是「請求」開啟慢想，實際能不能開由會員等級決定。
+        "walk_enabled":   bool(body.walk_enabled and ctx.limits.walk_allowed),
+        "walk_max_depth": ctx.limits.walk_max_depth,
     }
     if body.selected_rc_eid is not None:
         invoke_input["selected_rc_eid"] = body.selected_rc_eid
@@ -112,23 +116,19 @@ async def chat_endpoint(
             invoke_input["skill_sandbox_id"] = restored["skill_sandbox_id"]
             invoke_input["thinking_process"] = restored["thinking_process"]
 
-            # ── walk 的執行狀態（walk_session/pointer/pending_question）
-            #    綁定的是 LangGraph 內部 interrupt() 的 checkpoint task，
-            #    不是我們能序列化還原的資料——這裡冷啟動代表那個暫停點
-            #    已經永久遺失，唯一誠實的作法是降級回 socratic，讓使用者
-            #    知道上次的慢想被中斷了，而不是假裝可以無縫恢復一個
-            #    實際上已經不存在的 interrupt（同 main_state 對含
-            #    tool_calls 訊息的降級哲學，見 core/session_store.py）。
+            # walk 的執行狀態綁定 LangGraph 內部 interrupt() 的 checkpoint task，
+            # 不是我們能序列化還原的資料——冷啟動代表那個暫停點已經永久遺失，
+            # 唯一誠實的作法是降級回 socratic（同 main_state 對含 tool_calls
+            # 訊息的降級哲學，見 core/session_store.py）。
             if restored["phase"] in ("walk_pending",):
                 invoke_input["phase"] = "socratic"
 
             if body.selected_rc_eid is None and restored["selected_rc_eid"]:
                 invoke_input["selected_rc_eid"]   = restored["selected_rc_eid"]
                 invoke_input["selected_rc_label"] = restored["selected_rc_label"]
-            if body.phase is None:
-                invoke_input["phase"] = invoke_input["phase"]  # 已在上面決定，不再被 restored 覆蓋
 
-    result = await orchestrator.ainvoke(invoke_input, config=config)
+    async with usage_scope(uid, body.session_id, plan=ctx.membership.plan):
+        result = await orchestrator.ainvoke(invoke_input, config=config)
 
     messages   = result.get("messages") or []
     last_msg   = messages[-1] if messages else AIMessage(content="")

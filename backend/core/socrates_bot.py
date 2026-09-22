@@ -133,6 +133,7 @@ class SocratesChatBot:
             model=model,
             temperature=0.1,
             api_key=api_key,
+            feature="socratic",
         )
 
         self._concept_detail_tool = self._make_concept_detail_tool()

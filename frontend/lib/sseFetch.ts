@@ -15,9 +15,14 @@
  *   （提交使用者回答後，直接把回應當成新的一段 SSE stream 繼續讀，
  *   對應後端 core/walk_stream.py 的「resume = 開一個新 stream_walk_turns()
  *   generator」設計，不需要另外一個「resume token」機制）。
+ *
+ * 【會員額度】連線失敗時拋出 ApiError（見 lib/quotaError.ts），
+ * 帶有 HTTP status 與後端的結構化 detail，呼叫端可用 asQuotaError() 判斷
+ * 是不是 429 額度超限，而不是只能看到一段 "HTTP 429" 字串。
  */
 
 import { apiFetch } from "./apiFetch";
+import { apiErrorFromResponse } from "./quotaError";
 
 export type SSEEvent = Record<string, any>;
 
@@ -35,9 +40,8 @@ export async function streamSSE(
   init: RequestInit = {},
 ): Promise<void> {
   const res = await apiFetch(url, init);
-  if (!res.ok || !res.body) {
-    throw new Error(`SSE 連線失敗：HTTP ${res.status}`);
-  }
+  if (!res.ok) throw await apiErrorFromResponse(res);
+  if (!res.body) throw new Error("SSE 連線失敗：回應沒有 body");
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();

@@ -77,6 +77,10 @@ References 注入（lazy loading）：
   完全無異——history 已經包含「顯示過 widget」的 AIMessage + ToolMessage，
   這裡不需要任何額外的 resume 邏輯。
 
+【新增 — Token 計量】
+  底層 LLM 由 core/google_llm.py 建立時標記 feature="main_agent"，
+  用量會在 api/routes/chat.py 的 usage_scope 內被計入該輪。
+
 所有歷史由呼叫端（OrchestratorNodes）管理，MainAgent 本身不持有狀態。
 """
 
@@ -190,6 +194,7 @@ class MainAgent:
             model=model,
             temperature=0,
             api_key=api_key,
+            feature="main_agent",
         )
         self._sandbox_provisioner  = sandbox_provisioner
         self._skill_outputs_bucket = skill_outputs_bucket

@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """api/routes/user_brain.py — Personal Brain 持久化 endpoints。
 
-GET  /user/{uid}/brain              → 讀取 Personal Brain snapshot
-POST /user/{uid}/brain/concepts     → 加入或更新一個 concept
-DEL  /user/{uid}/brain/concepts/{eid} → 移除一個 concept
+GET    /user/{uid}/brain                → 讀取 Personal Brain snapshot
+POST   /user/{uid}/brain/concepts       → 加入或更新一個 concept
+PATCH  /user/{uid}/brain/concepts/{eid} → 只更新 weight
+DELETE /user/{uid}/brain/concepts/{eid} → 移除一個 concept
 
 儲存後端：Google Cloud Firestore。
 Collection 結構：
@@ -12,36 +13,33 @@ Collection 結構：
       updatedAt: int (unix ms)
   }
 
-【更新】uid 擁有權驗證：
-  舊版設計是「uid 由瀏覽器自行產生的 UUID，不需要 auth」——
-  這代表任何人只要知道別人的 UUID，就能讀寫別人的 Personal Brain。
-  現在改為：uid 必須與 Authorization header 帶的 Firebase ID token
-  解出的 uid 一致，否則回傳 403（見 _verify_owner）。
-  路徑仍保留 {uid}，是因為前端既有的匿名 UUID 使用者可以透過
-  Firebase「匿名登入」升級成正式帳號、uid 不變，資料不需要遷移。
+uid 擁有權驗證：
+  uid 必須與 Authorization header 帶的 Firebase ID token 解出的 uid 一致，
+  否則回傳 403（見 _verify_owner）。路徑仍保留 {uid}，是因為匿名使用者
+  升級成正式帳號時 uid 不變，資料不需要遷移。
+
+【新增 — 會員等級】
+  Personal Brain 的「概念數上限」依等級而定（PlanLimits.brain_max_concepts）。
+  只限制「新增一個全新的 eid」；更新既有 concept 的權重不受影響，
+  也不會因為降級而刪除超出上限的既有資料（只是不能再新增）。
+  超過上限回 409，detail.code = "brain_limit"。
+
+【Phase 0】Firestore client 改由 core/firestore_db.py 統一提供。
 """
 
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from core.firebase_auth import require_auth
+from core.firebase_auth import require_auth_claims
+from core.firestore_db import get_default_db as _get_db
+from core.membership import resolve_membership
 
 router = APIRouter()
-
-# Lazy Firestore client（避免 import 時就初始化影響啟動時間）
-_db = None
-
-def _get_db():
-    global _db
-    if _db is None:
-        from google.cloud import firestore
-        _db = firestore.AsyncClient()
-    return _db
 
 
 # ── Schema ────────────────────────────────────────────────────────────
@@ -65,22 +63,22 @@ class UpdateWeightRequest(BaseModel):
 
 # ── Auth dependency ───────────────────────────────────────────────────
 
-async def _verify_owner(uid: str, caller_uid: str = Depends(require_auth)) -> str:
+async def _verify_owner(uid: str, claims: dict = Depends(require_auth_claims)) -> dict:
     """確保呼叫者已驗證的 uid 與路徑上的 uid 一致，否則 403。
 
-    caller_uid 由 Firebase ID token 解出，無法偽造；
-    uid 仍做基本格式檢查，防止 path traversal 之類的異常輸入。
+    回傳完整 claims（供需要判斷等級的路由使用）。uid 仍做基本格式檢查，
+    防止 path traversal 之類的異常輸入。
     """
     _validate_uid(uid)
-    if caller_uid != uid:
+    if claims.get("uid") != uid:
         raise HTTPException(status_code=403, detail="無權存取此使用者的資料")
-    return uid
+    return claims
 
 
 # ── Routes ────────────────────────────────────────────────────────────
 
 @router.get("/user/{uid}/brain", response_model=BrainSnapshot)
-async def get_brain(uid: str, _owner: str = Depends(_verify_owner)) -> BrainSnapshot:
+async def get_brain(uid: str, _owner: dict = Depends(_verify_owner)) -> BrainSnapshot:
     """讀取 Personal Brain 完整 snapshot。"""
     db  = _get_db()
     doc = await db.collection("users").document(uid).collection("brain").document("snapshot").get()
@@ -97,7 +95,7 @@ async def get_brain(uid: str, _owner: str = Depends(_verify_owner)) -> BrainSnap
 async def add_concept(
     uid:    str,
     body:   BrainConcept,
-    _owner: str = Depends(_verify_owner),
+    claims: dict = Depends(_verify_owner),
 ) -> BrainSnapshot:
     """加入或更新一個 concept（eid 已存在則更新 weight / source）。"""
     db      = _get_db()
@@ -116,7 +114,21 @@ async def add_concept(
             c["addedAt"] = body.addedAt
             exists = True
             break
+
     if not exists:
+        membership = await resolve_membership(claims)
+        limit = membership.limits.brain_max_concepts
+        if len(concepts) >= limit and not membership.is_admin:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code":    "brain_limit",
+                    "message": f"Personal Brain 已達上限（{limit} 個概念），請先移除部分概念"
+                               + ("，或註冊帳號取得更高上限。" if membership.is_anonymous else "。"),
+                    "plan":    membership.plan,
+                    "limit":   limit,
+                },
+            )
         concepts.append(body.model_dump())
 
     now = int(time.time() * 1000)
@@ -133,7 +145,7 @@ async def update_weight(
     uid:    str,
     eid:    str,
     body:   UpdateWeightRequest,
-    _owner: str = Depends(_verify_owner),
+    _owner: dict = Depends(_verify_owner),
 ) -> BrainSnapshot:
     """只更新 weight，不異動其他欄位。"""
     db  = _get_db()
@@ -164,7 +176,7 @@ async def update_weight(
 async def remove_concept(
     uid:    str,
     eid:    str,
-    _owner: str = Depends(_verify_owner),
+    _owner: dict = Depends(_verify_owner),
 ) -> BrainSnapshot:
     """從 Personal Brain 移除一個 concept。"""
     db  = _get_db()

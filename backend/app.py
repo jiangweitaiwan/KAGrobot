@@ -27,6 +27,12 @@ api/routes/routes_walk.py 檔頭說明。
   另外註冊 skill_widget_router（POST /skill/widget/dispatch），這支
   endpoint 刻意不經過 require_auth（見 api/routes/skill_widget.py 檔頭
   說明），改用獨立的 widget_token 驗證身分與授權。
+
+【新增 — 會員板塊】
+  - 註冊 account_router（/me/usage 等）與 admin_router（/admin/*）。
+  - _load_brain_weights 改用 core/firestore_db 的共用 client，不再每次呼叫
+    都新建一個 AsyncClient。
+  - walk_llm 標記 feature="walk"，讓 token 用量能依功能分解。
 """
 
 from __future__ import annotations
@@ -68,6 +74,8 @@ from api.routes                    import (
     users_router,
     walk_router as walk_routes_router,
     skill_widget_router,
+    account_router,
+    admin_router,
 )
 
 from core.skill_sandbox import SkillSandboxProvisioner
@@ -82,8 +90,8 @@ async def _load_brain_weights(uid: Optional[str]) -> Dict[str, float]:
     if not uid:
         return {}
     try:
-        from google.cloud import firestore
-        db  = firestore.AsyncClient()
+        from core.firestore_db import get_default_db
+        db  = get_default_db()
         doc = await db.collection("users").document(uid).collection("brain").document("snapshot").get()
         if not doc.exists:
             return {}
@@ -185,7 +193,7 @@ async def lifespan(app: FastAPI):
     start_concept_pool.load()
     walk_frontier_fetcher = make_frontier_fetcher(adjacency_cache, driver, encoder)
 
-    walk_llm = create_chat_google_generative_ai(model=s.socrates_model, temperature=0.2)
+    walk_llm = create_chat_google_generative_ai(model=s.socrates_model, temperature=0.2, feature="walk")
 
     def _walk_llm_caller(system_prompt: str, tool_schema):
         return call_with_retry(
@@ -259,5 +267,7 @@ def create_app() -> FastAPI:
     app.include_router(users_router)
     app.include_router(walk_routes_router)
     app.include_router(skill_widget_router)
+    app.include_router(account_router)
+    app.include_router(admin_router)
 
     return app
