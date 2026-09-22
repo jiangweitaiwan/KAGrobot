@@ -196,7 +196,7 @@ class Settings(BaseSettings):
         ),
     )
     admin_uids: str = Field(
-        default="", alias="ADMIN_UIDS",
+        default="65D5gFhciiQ0j8aRQImM0xqbf2I2", alias="ADMIN_UIDS",
         description="管理者 uid（逗號分隔），用來 bootstrap 第一位管理者；之後可改用 custom claim admin=true。",
     )
     usage_timezone: str = Field(default="Asia/Taipei", alias="USAGE_TIMEZONE")

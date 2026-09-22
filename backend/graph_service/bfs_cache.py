@@ -11,14 +11,19 @@
   - 本層只負責「節點鄰接關係」，不負責完整路徑組裝
   - 所有 BFS 過程的 Neo4j query 都必須經過此層
   - 重啟即清空（不需要 invalidate endpoint）
+
+【重構】LRU + TTL 快取的實作（原本私有的 _LRUCache）已抽成共用模組
+core/lru_cache.py::LRUCache，讓 graph_service/bfs_coordinator.py 的
+結果層 cache（rcpath_cache / expand_cache）也能共用同一套機制與統一
+TTL（DEFAULT_TTL_S，7 天），不再各自手刻一套快取邏輯。
 """
 
 from __future__ import annotations
 
-import time
-from dataclasses import dataclass, field
-from threading import Lock
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
+from core.lru_cache import DEFAULT_TTL_S, LRUCache
 
 
 # ══════════════════════════════════════════════════════════════
@@ -72,95 +77,6 @@ class UpstreamNeighbor:
     edge_type:    str = "support"   # "support" | "critique"
 
 
-@dataclass
-class _CacheEntry:
-    """LRU cache 的內部 entry，含 TTL 與 LRU 排序用的 access_time。"""
-    value:       Any
-    created_at:  float
-    access_time: float
-
-
-# ══════════════════════════════════════════════════════════════
-# LRU Cache with TTL（不依賴 functools.lru_cache，以支援 TTL）
-# ══════════════════════════════════════════════════════════════
-
-class _LRUCache:
-    """Thread-safe LRU cache with TTL.
-
-    Parameters
-    ----------
-    maxsize : int   最多保留幾個 entry（LRU 淘汰）
-    ttl_s   : float TTL 秒數（過期後視同 miss）
-    """
-
-    def __init__(self, maxsize: int = 500, ttl_s: float = 7 * 24 * 3600) -> None:
-        self._maxsize = maxsize
-        self._ttl     = ttl_s
-        self._store:  Dict[str, _CacheEntry] = {}
-        self._lock    = Lock()
-
-        # 統計
-        self._hits   = 0
-        self._misses = 0
-
-    # ── Public API ────────────────────────────────────────────
-
-    def get(self, key: str) -> Tuple[bool, Any]:
-        """回傳 (hit, value)。過期 entry 視同 miss 並刪除。"""
-        with self._lock:
-            entry = self._store.get(key)
-            if entry is None:
-                self._misses += 1
-                return False, None
-
-            now = time.monotonic()
-            if now - entry.created_at > self._ttl:
-                del self._store[key]
-                self._misses += 1
-                return False, None
-
-            entry.access_time = now
-            self._hits += 1
-            return True, entry.value
-
-    def set(self, key: str, value: Any) -> None:
-        """寫入 cache，必要時淘汰最舊的 entry。"""
-        with self._lock:
-            now = time.monotonic()
-            if key in self._store:
-                self._store[key].value       = value
-                self._store[key].access_time = now
-                return
-
-            if len(self._store) >= self._maxsize:
-                # 淘汰 access_time 最小（最久未使用）的 entry
-                lru_key = min(self._store, key=lambda k: self._store[k].access_time)
-                del self._store[lru_key]
-
-            self._store[key] = _CacheEntry(
-                value=value,
-                created_at=now,
-                access_time=now,
-            )
-
-    def clear(self) -> None:
-        with self._lock:
-            self._store.clear()
-            self._hits = self._misses = 0
-
-    @property
-    def stats(self) -> Dict[str, Any]:
-        with self._lock:
-            total = self._hits + self._misses
-            return {
-                "size":     len(self._store),
-                "maxsize":  self._maxsize,
-                "hits":     self._hits,
-                "misses":   self._misses,
-                "hit_rate": round(self._hits / total, 4) if total else 0.0,
-            }
-
-
 # ══════════════════════════════════════════════════════════════
 # AdjacencyCache — 核心快取層
 # ══════════════════════════════════════════════════════════════
@@ -175,17 +91,17 @@ class AdjacencyCache:
     ----------
     driver  : Neo4j driver
     maxsize : LRU 最大條目數（預設 500）
-    ttl_s   : TTL 秒數（預設 7 天）
+    ttl_s   : TTL 秒數（預設 DEFAULT_TTL_S，7 天，與結果層 cache 統一）
     """
 
     def __init__(
         self,
         driver,
         maxsize: int   = 500,
-        ttl_s:   float = 7 * 24 * 3600,
+        ttl_s:   float = DEFAULT_TTL_S,
     ) -> None:
         self._driver = driver
-        self._cache  = _LRUCache(maxsize=maxsize, ttl_s=ttl_s)
+        self._cache  = LRUCache(maxsize=maxsize, ttl_s=ttl_s)
 
     # ── Public API ────────────────────────────────────────────
 

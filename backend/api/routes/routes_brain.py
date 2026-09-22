@@ -123,7 +123,6 @@ class FoundationRecommendationsResponse(BaseModel):
 
 class CacheStatsResponse(BaseModel):
     adjacency_cache: Dict[str, Any]
-    result_cache:    Dict[str, Any]
     rcpath_cache:    Dict[str, Any]
     expand_cache:    Dict[str, Any]
 
@@ -475,7 +474,6 @@ async def cache_stats(
 
     return CacheStatsResponse(
         adjacency_cache=stats["adjacency_cache"],
-        result_cache=stats["result_cache"],
         rcpath_cache=stats["rcpath_cache"],
         expand_cache=stats["expand_cache"],
     )

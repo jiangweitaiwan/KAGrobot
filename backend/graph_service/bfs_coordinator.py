@@ -5,8 +5,9 @@
   - 對外唯一介面，取代原本直接使用 DownstreamBFS / UpstreamBFS 的呼叫
   - 管理兩層 cache：
       1. 鄰接層（AdjacencyCache）：node_id → 鄰接關係，跨 request 共享
-      2. 結果層（expand_cache）  ：eid → 完整展開結果，避免重複 BFS
-  - expand_cache 統一在此層管理（取代 app.state.expand_cache / rcpath_cache）
+      2. 結果層（rcpath_cache / expand_cache）：eid(+參數) → 完整展開結果，
+         避免重複 BFS
+  - 結果層統一在此層管理（取代 app.state.expand_cache / rcpath_cache）
   - 提供 cache stats endpoint 用的統計資訊
 
 呼叫端替換方式：
@@ -16,18 +17,37 @@
   改為：
     coordinator.downstream(eid, rc_name)
     coordinator.upstream(eid)
-    coordinator.expand_one(eid, rc_name)   ← downstream + upstream 合併
+
+【重構 — cache 機制統一】
+  結果層原本是各自手刻的「裸 dict + threading.Lock」，沒有 maxsize、
+  沒有 TTL，長時間運行會無界成長。現在改用與 AdjacencyCache 相同的
+  core/lru_cache.LRUCache（LRU + TTL + 統一格式的 stats），TTL 統一走
+  DEFAULT_TTL_S（7 天），避免「鄰接層已因 TTL 過期重抓最新資料，
+  但結果層聚合快取還停在舊資料」這種兩層不同步的情況。maxsize 依
+  聚合結果體積另外調小（單一 entry 比 AdjacencyCache 的鄰接清單重
+  很多），預設各 200。
+
+  同時，cache key 明確把會影響結果的參數（max_depth / max_branches）
+  編進去（例如 f"{eid}:{max_depth}"），不再依賴「所有呼叫端剛好都用
+  同一組預設深度參數」這個沒有型別保證的隱性假設——之後若有新呼叫點
+  傳入不同深度，也不會誤命中錯誤深度的快取結果。
+
+  原本的 _result_cache / expand_one_cached / expand_one_async 已移除：
+  確認沒有任何路由呼叫（純死碼），而且它內部直接呼叫
+  self._down_bfs.run() / self._up_bfs.run()，完全繞過
+  get_rcpath_cached / get_expand_cached，等於跟其餘兩層結果快取各自
+  為政、無法互相命中，本身就是需要一併清掉的重工來源。
 """
 
 from __future__ import annotations
 
 import asyncio
-from threading import Lock
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
-from graph_service.bfs_cache  import AdjacencyCache
-from graph_service.bfs_engine import CachedDownstreamBFS, CachedUpstreamBFS
-from retrieval.path_selector  import PathSelector
+from core.lru_cache            import DEFAULT_TTL_S, LRUCache
+from graph_service.bfs_cache   import AdjacencyCache
+from graph_service.bfs_engine  import CachedDownstreamBFS, CachedUpstreamBFS
+from retrieval.path_selector   import PathSelector
 
 
 class BFSCoordinator:
@@ -37,30 +57,30 @@ class BFSCoordinator:
     ----------
     adjacency_cache : AdjacencyCache  鄰接關係 cache（注入）
     path_selector   : PathSelector    upstream path 選取策略（注入）
+    rcpath_cache_maxsize : rcpath_cache 的 LRU 上限（預設 200）
+    expand_cache_maxsize : expand_cache 的 LRU 上限（預設 200）
     """
 
     def __init__(
         self,
         adjacency_cache: AdjacencyCache,
         path_selector:   PathSelector,
+        *,
+        rcpath_cache_maxsize: int = 200,
+        expand_cache_maxsize: int = 200,
     ) -> None:
         self._adj_cache = adjacency_cache
         self._down_bfs  = CachedDownstreamBFS(adjacency_cache)
         self._up_bfs    = CachedUpstreamBFS(adjacency_cache, path_selector)
 
-        # 結果層 cache（process 生命週期，重啟即清空）
-        # key: eid → (downstream_result, upstream_result)
-        self._result_cache: Dict[str, Tuple[Dict, Dict]] = {}
-        self._result_lock   = Lock()
-
-        # 獨立的 rcpath cache（只有 downstream，供 routes_brain 使用）
-        # 保持與原 app.state.rcpath_cache 相同語意
-        self._rcpath_cache: Dict[str, Dict[str, Any]] = {}
-        self._rcpath_lock   = Lock()
-
-        # expand cache（downstream + upstream 合併結果，供 routes_brain /graph/expand 使用）
-        self._expand_cache: Dict[str, Dict[str, Any]] = {}
-        self._expand_lock   = Lock()
+        # 結果層 cache（LRU + TTL，統一 DEFAULT_TTL_S=7天，見檔頭說明）。
+        # key 明確編入會影響結果的參數，見 get_rcpath_cached / get_expand_cached。
+        self._rcpath_cache: LRUCache = LRUCache(
+            maxsize=rcpath_cache_maxsize, ttl_s=DEFAULT_TTL_S,
+        )
+        self._expand_cache: LRUCache = LRUCache(
+            maxsize=expand_cache_maxsize, ttl_s=DEFAULT_TTL_S,
+        )
 
     # ──────────────────────────────────────────────────────────
     # Public API — 基本 BFS
@@ -88,52 +108,24 @@ class BFSCoordinator:
     # Public API — 結果層 cache（取代 app.state 的各種 cache）
     # ──────────────────────────────────────────────────────────
 
-    def expand_one_cached(
-        self,
-        eid:     str,
-        rc_name: str = "",
-    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Downstream + Upstream 合併展開，結果快取。
-
-        對應原 GraphExpander._expand_one 的單一 eid 展開邏輯。
-        第一次呼叫打 Neo4j（透過鄰接層 cache），後續直接回傳結果。
-
-        Returns
-        -------
-        (downstream_result, upstream_result)
-        """
-        with self._result_lock:
-            if eid in self._result_cache:
-                return self._result_cache[eid]
-
-        # cache miss：同步執行（已在 asyncio.to_thread 中被呼叫）
-        down_result = self._down_bfs.run(eid, rc_name)
-        up_result   = self._up_bfs.run(eid)
-
-        with self._result_lock:
-            self._result_cache[eid] = (down_result, up_result)
-
-        return down_result, up_result
-
     def get_rcpath_cached(
         self,
-        eid:     str,
-        rc_name: str = "",
+        eid:       str,
+        rc_name:   str = "",
         max_depth: int = 6,
     ) -> Dict[str, Any]:
         """Downstream BFS 結果快取，對應 /graph/rc-paths/{eid}。
 
-        取代 app.state.rcpath_cache。
+        取代 app.state.rcpath_cache。key 含 max_depth，避免不同深度的
+        呼叫誤命中彼此的快取結果。
         """
-        with self._rcpath_lock:
-            if eid in self._rcpath_cache:
-                return self._rcpath_cache[eid]
+        key = f"{eid}:{max_depth}"
+        hit, value = self._rcpath_cache.get(key)
+        if hit:
+            return value
 
         result = self._down_bfs.run(eid, rc_name, max_depth)
-
-        with self._rcpath_lock:
-            self._rcpath_cache[eid] = result
-
+        self._rcpath_cache.set(key, result)
         return result
 
     def get_expand_cached(
@@ -144,32 +136,21 @@ class BFSCoordinator:
     ) -> Dict[str, Any]:
         """Upstream BFS 結果快取，對應 /graph/expand/{eid}。
 
-        取代 app.state.expand_cache。
+        取代 app.state.expand_cache。key 含 max_depth + max_branches，
+        理由同 get_rcpath_cached。
         """
-        with self._expand_lock:
-            if eid in self._expand_cache:
-                return self._expand_cache[eid]
+        key = f"{eid}:{max_depth}:{max_branches}"
+        hit, value = self._expand_cache.get(key)
+        if hit:
+            return value
 
         result = self._up_bfs.run(eid, max_depth, max_branches)
-
-        with self._expand_lock:
-            self._expand_cache[eid] = result
-
+        self._expand_cache.set(key, result)
         return result
 
     # ──────────────────────────────────────────────────────────
     # Public API — 非同步包裝（供 GraphExpander 使用）
     # ──────────────────────────────────────────────────────────
-
-    async def expand_one_async(
-        self,
-        eid:     str,
-        rc_name: str = "",
-    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """expand_one_cached 的非同步版本，避免阻塞 event loop。"""
-        return await asyncio.to_thread(
-            self.expand_one_cached, eid, rc_name
-        )
 
     async def downstream_async(
         self,
@@ -209,7 +190,6 @@ class BFSCoordinator:
         """get_expand_cached 的非同步版本，供 /graph/expand/batch 使用。"""
         return await asyncio.to_thread(self.get_expand_cached, eid, max_depth, max_branches)
 
-
     # ──────────────────────────────────────────────────────────
     # Stats & debug
     # ──────────────────────────────────────────────────────────
@@ -217,16 +197,8 @@ class BFSCoordinator:
     @property
     def stats(self) -> Dict[str, Any]:
         """回傳各層 cache 的統計資訊，供 /admin/cache/stats 使用。"""
-        with self._result_lock:
-            result_size = len(self._result_cache)
-        with self._rcpath_lock:
-            rcpath_size = len(self._rcpath_cache)
-        with self._expand_lock:
-            expand_size = len(self._expand_cache)
-
         return {
             "adjacency_cache": self._adj_cache.stats,
-            "result_cache":    {"size": result_size},
-            "rcpath_cache":    {"size": rcpath_size},
-            "expand_cache":    {"size": expand_size},
+            "rcpath_cache":    self._rcpath_cache.stats,
+            "expand_cache":    self._expand_cache.stats,
         }
