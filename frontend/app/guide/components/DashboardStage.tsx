@@ -16,7 +16,10 @@
  *     只有面板內部換分頁。這是這個 demo 最想教會的一件事。
  *
  * 退回全景那一拍會畫出聚焦框（.gds-focus-ring），把「等下要放大的
- * 是這一塊」先講清楚，再放大。
+ * 是這一塊」先講清楚，再放大。聚焦框本身也是全景/聚焦兩個 phase
+ * 共用的「聚光燈」——全景時只是個淺淺的預告框，讓五欄都維持清楚
+ * 可讀；推進到聚焦後，陰影加深，把其他欄位壓進黑暗，只留目標欄位
+ * 亮著。實際的深淺曲線在 guide-stage.css 的 .gds-focus-ring 規則。
  */
 
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
@@ -28,7 +31,7 @@ import {
 } from "../dashboardMap";
 import { BoardHeader } from "./dashboardSlots";
 
-const PULLBACK_MS = 420;   // 停在全景的時間
+const PULLBACK_MS = 1800;  // 停在全景的時間：拉長到 1.8s，讓使用者看清楚五欄全景再推進
 const ZOOM_MS     = 720;   // 與 guide-stage.css 的 transition 時間一致
 
 type Props = {
@@ -142,7 +145,8 @@ export default function DashboardStage({ focusSlot, focusRect, stepLabel, render
           );
         })}
 
-        {/* 全景那一拍：先框出等下要放大的區域 */}
+        {/* 聚光燈：全景時只是淺淺的預告框，讓五欄維持清楚；
+            推進到聚焦後陰影加深，把其他欄位壓入黑暗。 */}
         <div
           className="gds-focus-ring"
           style={{

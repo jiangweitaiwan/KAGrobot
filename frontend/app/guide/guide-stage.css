@@ -84,11 +84,11 @@
   background: rgba(13, 18, 32, 0.9);
   box-shadow: 0 0 0 1px rgba(201, 162, 39, 0.12), 0 8px 40px rgba(0, 0, 0, 0.5);
 }
-/* 非作用中的欄位退到背景，讓放大的那一格自己說話 */
-.gds-slot[data-live="false"] {
-  opacity: 0.55;
-  filter: saturate(0.5);
-}
+/* 非作用中欄位不再靠 opacity / filter 壓暗——改由下方 .gds-focus-ring
+   的聚光燈陰影統一處理「凸顯聚焦欄位」這件事：
+     - 全景階段：陰影很淺，五欄都維持清楚可讀
+     - 聚焦階段：陰影加深，把非作用欄位連同背景一起壓進黑暗
+   這樣暗化只在推進鏡頭時才發生，不會在全景一開始就已經是暗的。 */
 
 .gds-slot-title {
   font-family: "IBM Plex Mono", monospace;
@@ -332,16 +332,33 @@
 
 /* ── 聚焦框（放大中的區域，畫在畫布座標系上）───────────────── */
 
+/* 這是整個「凸顯聚焦欄位」效果的核心：用一個超大的 box-shadow
+   把畫布外圍全部塗黑，只在 focusRect 範圍內留一個洞。
+   陰影深淺依 phase 而變（見下方兩條規則），box-shadow 本身的
+   transition 加了 260ms 延遲，讓「變暗」稍微晚於「開始推進鏡頭」，
+   感覺像是鏡頭快到位時才把四周壓暗，而不是一開始就整片變黑。 */
 .gds-focus-ring {
   position: absolute;
   border: 1px solid rgba(201, 162, 39, 0.55);
   border-radius: 10px;
   pointer-events: none;
-  box-shadow: 0 0 0 9999px rgba(5, 6, 13, 0.55);
-  transition: all 720ms cubic-bezier(0.66, 0, 0.26, 1);
+  transition:
+    left 720ms cubic-bezier(0.66, 0, 0.26, 1),
+    top 720ms cubic-bezier(0.66, 0, 0.26, 1),
+    width 720ms cubic-bezier(0.66, 0, 0.26, 1),
+    height 720ms cubic-bezier(0.66, 0, 0.26, 1),
+    box-shadow 720ms cubic-bezier(0.66, 0, 0.26, 1) 260ms;
 }
-.gds-stage[data-phase="focus"] .gds-focus-ring { opacity: 0; }
-.gds-stage[data-phase="overview"] .gds-focus-ring { opacity: 1; }
+.gds-stage[data-phase="overview"] .gds-focus-ring {
+  opacity: 1;
+  /* 全景時：只是個淺淺的預告框，五欄都維持清楚可讀 */
+  box-shadow: 0 0 0 9999px rgba(5, 6, 13, 0.1);
+}
+.gds-stage[data-phase="focus"] .gds-focus-ring {
+  opacity: 1;
+  /* 聚焦定格：四周幾乎全黑，只剩目標欄位亮著 */
+  box-shadow: 0 0 0 9999px rgba(5, 6, 13, 0.85);
+}
 
 /* ── 小地圖 ───────────────────────────────────────────────── */
 
@@ -394,7 +411,9 @@
 @media (prefers-reduced-motion: reduce) {
   .gds-canvas,
   .gds-focus-ring,
-  .gds-weight-fill { transition: none; }
+  .gds-weight-fill {
+    transition: none;
+  }
 }
 
 /* guide.css 的 .guide-pipeline-copy 原本只放一段說明文字；

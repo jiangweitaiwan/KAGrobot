@@ -12,7 +12,7 @@
  *   1. 完整流程 demo（六步驟,可點擊切換,每步都標註對應 dashboard 區塊,
  *      步驟②⑤複用真元件,其餘輕量仿製）
  *   2. 探索 GlobalBrain（真元件 playground）
- *   3. 探索 Personal Brain（切片示意圖 + 真元件 playground）
+ *   3. 觀測 Personal Brain（切片示意圖 + 真元件 playground）
  *   4. 可計算性（RC 送出後,套用模型算出結論;部分欄位先佔位）
  *
  * 四個區塊共用 guideData.ts 同一條敘事線（升息→物價黏性→
@@ -66,7 +66,7 @@ export default function GuidePage() {
         </section>
 
         <section className="guide-section">
-          <span className="guide-section-kicker">03 · 探索 Personal Brain</span>
+          <span className="guide-section-kicker">03 · 觀測 Personal Brain</span>
           <h2 className="intro-section-title">同一顆大腦，兩種切法</h2>
           <p className="intro-section-lede">
             BERTopic 是水平切片，看你的收藏在語意地形裡的分佈；Hourglass 是垂直切片，看單一 RC 的因果剖面。
