@@ -113,7 +113,8 @@ type Props = {
   walkIllumination?: WalkIllumination[];
   rcFoundationMap?: RCFoundationMap;
   onNodeClick?: (node: GlobalLayoutNode) => void;
-  dimBackground?: boolean;      // ← 新增：腦內模式開關
+  dimBackground?: boolean;  
+  forceFocusEid?: string | null;
   width?: number;
   height?: number;
   externalPause?: boolean; 
@@ -232,6 +233,7 @@ export default function GlobalBrainExplorer({
   onNodeClick,
   dimBackground = false,   
   externalPause = false,
+  forceFocusEid = null,
   width  = 480,
   height = 480,
 }: Props) {
@@ -293,6 +295,13 @@ export default function GlobalBrainExplorer({
     }
   }, [activeCandidateEids, focusedCandidateEid]);
 
+  // 外部模擬點擊：跟真實點擊走同一條路徑（只認 activeCandidateEids
+  // 裡的節點），所以視覺——光暈、foundation 路徑高亮——完全一致。
+  useEffect(() => {
+    if (forceFocusEid && activeCandidateEids.includes(forceFocusEid)) {
+      setFocusedCandidateEid(forceFocusEid);
+    }
+  }, [forceFocusEid, activeCandidateEids]);
   const nodeIdxMap = useMemo(() => {
     if (!layout) return new Map<string, number>();
     return new Map(layout.nodes.map((n, i) => [n.id, i]));

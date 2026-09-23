@@ -1,43 +1,40 @@
 "use client";
 
 /**
- * DashboardStage.tsx — Section 1 的「運鏡舞台」。
+ * DashboardStage.tsx — Section 1 的「定點導覽舞台」。
  *
- * 核心概念：畫面上只有一份 dashboard（固定 1440×900 的虛擬畫布），
- * 切換步驟時不換內容，只移動相機（對畫布套 translate + scale）。
- * 兩份畫面（縮圖 + 放大圖）永遠對不齊，一份畫面不會。
+ * 改版重點：不再運鏡。整個 dashboard 全景（1440×560 虛擬畫布）從頭到尾
+ * 都用同一個 overview 相機顯示——不放大、不位移、背景不調暗。使用者
+ * 隨時都看得到完整的五欄佈局，切換步驟只改變哪一欄是「作用中」：
+ * 作用中的欄位套用既有的金色框線＋光暈（.gds-slot[data-live="true"]），
+ * 內部從骨架換成真內容；其餘欄位維持原樣，不做任何壓暗處理。
  *
- * 運鏡規則：
- *   - 跨欄位（例如 chat → Global）先退回全景停一拍，再推進目標。
- *     直接從 A 補間到 B，使用者讀不出「我從左邊移到右邊」。
- *   - 同一欄位內換區域（Personal Brain 的剖面 → 送出列）只平移，
- *     不退回全景——因為要傳達的正是「這兩步在同一個面板」。
- *   - 目標完全相同（Detail Panel 的詳情 → 重心）則相機完全不動，
- *     只有面板內部換分頁。這是這個 demo 最想教會的一件事。
+ * 這是刻意的取捨：舊版靠鏡頭運動＋壓暗來製造「這一步在這裡」的戲劇性，
+ * 但代價是使用者看不清楚 dashboard 全貌、切換時有閃現感。現在反過來，
+ * 讓「隨時看得到完整佈局」優先於「炫技的鏡頭語言」。
  *
- * 退回全景那一拍會畫出聚焦框（.gds-focus-ring），把「等下要放大的
- * 是這一塊」先講清楚，再放大。聚焦框本身也是全景/聚焦兩個 phase
- * 共用的「聚光燈」——全景時只是個淺淺的預告框，讓五欄都維持清楚
- * 可讀；推進到聚焦後，陰影加深，把其他欄位壓進黑暗，只留目標欄位
- * 亮著。實際的深淺曲線在 guide-stage.css 的 .gds-focus-ring 規則。
+ * 原本「退全景 → 停一拍 → 推近放大」的狀態機已整個拿掉。唯一留著的
+ * 計時器是 SETTLE_MS：切到新欄位後隔一個很短的延遲才掛真元件
+ * （GlobalBrainExplorer / HourglassViz 等 WebGL 元件），純粹讓
+ * 骨架 → 真內容 的切換不要一瞬間跳出來，跟鏡頭無關。
  */
 
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import "../guide-stage.css";
 import {
   CANVAS_W, CANVAS_H, HEADER_RECT, SLOT_RECTS, SLOT_ORDER, SLOT_TITLES,
-  cameraFor, overviewCamera, sameRect,
-  type Rect, type SlotKey,
+  overviewCamera,
+  type SlotKey,
 } from "../dashboardMap";
 import { BoardHeader } from "./dashboardSlots";
 
-const PULLBACK_MS = 1800;  // 停在全景的時間：拉長到 1.8s，讓使用者看清楚五欄全景再推進
-const ZOOM_MS     = 720;   // 與 guide-stage.css 的 transition 時間一致
+const SETTLE_MS = 220; // 切欄位後多久才掛真元件，純粹讓切換不要太突兀，跟鏡頭無關
 
 type Props = {
-  focusSlot: SlotKey;
-  focusRect: Rect;
-  stepLabel: string;
+  focusSlot:  SlotKey;
+  stepLabel:  string;
+  stepIndex:  number;
+  stepCount:  number;
   renderSlot: (key: SlotKey, live: boolean, scale: number, settled: boolean) => ReactNode;
 };
 
@@ -53,16 +50,12 @@ function usePrefersReducedMotion(): boolean {
   return reduced;
 }
 
-export default function DashboardStage({ focusSlot, focusRect, stepLabel, renderSlot }: Props) {
+export default function DashboardStage({ focusSlot, stepLabel, stepIndex, stepCount, renderSlot }: Props) {
   const stageRef = useRef<HTMLDivElement | null>(null);
   const [vp, setVp] = useState({ w: 960, h: 540 });
   const reduced = usePrefersReducedMotion();
 
-  const [phase,   setPhase]   = useState<"overview" | "focus">("focus");
-  const [settled, setSettled] = useState(false);
-
-  const prevRect = useRef<Rect | null>(null);
-  const prevSlot = useRef<SlotKey | null>(null);
+  const [settled, setSettled] = useState(true);
 
   // ── 量測可視範圍 ─────────────────────────────────────────
   useLayoutEffect(() => {
@@ -78,43 +71,20 @@ export default function DashboardStage({ focusSlot, focusRect, stepLabel, render
     return () => ro.disconnect();
   }, []);
 
-  // ── 運鏡狀態機 ───────────────────────────────────────────
+  // ── 切欄位：短暫退回 skeleton，再掛真元件 ───────────────────
   useEffect(() => {
-    const rectUnchanged = sameRect(prevRect.current, focusRect);
-    const slotUnchanged = prevSlot.current === focusSlot;
-    const isFirst       = prevRect.current === null;
-    prevRect.current = focusRect;
-    prevSlot.current = focusSlot;
-
-    if (reduced || rectUnchanged) {
-      setPhase("focus");
-      setSettled(true);
-      return;
-    }
-
-    // 同一欄位內移動：不退回全景，直接平移過去。
-    if (slotUnchanged && !isFirst) {
-      setPhase("focus");
-      const t = setTimeout(() => setSettled(true), ZOOM_MS + 40);
-      return () => clearTimeout(t);
-    }
-
+    if (reduced) { setSettled(true); return; }
     setSettled(false);
-    setPhase("overview");
-    const t1 = setTimeout(() => setPhase("focus"), PULLBACK_MS);
-    const t2 = setTimeout(() => setSettled(true), PULLBACK_MS + ZOOM_MS + 40);
-    return () => { clearTimeout(t1); clearTimeout(t2); };
-  }, [focusRect, focusSlot, reduced]);
+    const t = setTimeout(() => setSettled(true), SETTLE_MS);
+    return () => clearTimeout(t);
+  }, [focusSlot, reduced]);
 
-  const cam = phase === "overview"
-    ? overviewCamera(vp.w, vp.h)
-    : cameraFor(focusRect, vp.w, vp.h);
+  const cam = overviewCamera(vp.w, vp.h);
 
   return (
     <div
       className="gds-stage"
       ref={stageRef}
-      data-phase={phase}
       data-motion={reduced ? "reduced" : "full"}
       aria-hidden="true"
     >
@@ -144,62 +114,32 @@ export default function DashboardStage({ focusSlot, focusRect, stepLabel, render
             </div>
           );
         })}
-
-        {/* 聚光燈：全景時只是淺淺的預告框，讓五欄維持清楚；
-            推進到聚焦後陰影加深，把其他欄位壓入黑暗。 */}
-        <div
-          className="gds-focus-ring"
-          style={{
-            left:   focusRect.x - 6,
-            top:    focusRect.y - 6,
-            width:  focusRect.w + 12,
-            height: focusRect.h + 12,
-          }}
-        />
       </div>
 
-      <Minimap focusRect={focusRect} focusSlot={focusSlot} stepLabel={stepLabel} />
+      <StepDots stepIndex={stepIndex} stepCount={stepCount} stepLabel={stepLabel} />
     </div>
   );
 }
 
 // ─────────────────────────────────────────────────────────────
-// Minimap — 放大到 2 倍以上時，使用者仍需要知道自己在哪
+// StepDots — 取代原本的 Minimap。全景本來就一直看得到，不需要縮圖
+// 再標示「這一格在畫布的哪裡」；只需要一個很輕量的「第幾步╱目前
+// 在做什麼」提示，讓使用者知道進度。
 // ─────────────────────────────────────────────────────────────
 
-function Minimap({
-  focusRect, focusSlot, stepLabel,
+function StepDots({
+  stepIndex, stepCount, stepLabel,
 }: {
-  focusRect: Rect; focusSlot: SlotKey; stepLabel: string;
+  stepIndex: number; stepCount: number; stepLabel: string;
 }) {
   return (
-    <div className="gds-minimap">
-      <svg viewBox={`0 0 ${CANVAS_W} ${CANVAS_H}`}>
-        <rect x="0" y="0" width={CANVAS_W} height={CANVAS_H} rx="18"
-              fill="rgba(232,238,248,0.03)" stroke="rgba(232,238,248,0.1)" strokeWidth="4" />
-        <rect x={HEADER_RECT.x + 8} y={HEADER_RECT.y + 8}
-              width={HEADER_RECT.w - 16} height={HEADER_RECT.h - 12}
-              rx="8" fill="rgba(232,238,248,0.05)" />
-        {SLOT_ORDER.map((key) => {
-          const r = SLOT_RECTS[key];
-          const on = key === focusSlot;
-          return (
-            <rect
-              key={key}
-              x={r.x} y={r.y} width={r.w} height={r.h} rx="12"
-              fill={on ? "rgba(201,162,39,0.12)" : "rgba(232,238,248,0.045)"}
-              stroke={on ? "rgba(201,162,39,0.55)" : "rgba(232,238,248,0.09)"}
-              strokeWidth="4"
-            />
-          );
-        })}
-        <rect
-          x={focusRect.x} y={focusRect.y} width={focusRect.w} height={focusRect.h}
-          rx="10" fill="rgba(201,162,39,0.3)" stroke="#c9a227" strokeWidth="8"
-          style={{ transition: "all 720ms cubic-bezier(0.66,0,0.26,1)" }}
-        />
-      </svg>
-      <div className="gds-minimap-caption">{stepLabel}</div>
+    <div className="gds-stepdots">
+      <div className="gds-stepdots-row">
+        {Array.from({ length: stepCount }).map((_, i) => (
+          <span key={i} className="gds-stepdot" data-on={i === stepIndex} />
+        ))}
+      </div>
+      <div className="gds-stepdots-caption">{stepLabel}</div>
     </div>
   );
 }

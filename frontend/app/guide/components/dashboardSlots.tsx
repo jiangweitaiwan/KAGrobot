@@ -10,12 +10,21 @@
  *     一個，這裡必須節制。
  *   - 作用中（live=true）：掛上真元件或高保真仿製卡片。
  *
- * 3D 元件另外要求「相機停穩後才掛」（settled），並且以最終螢幕像素
- * 尺寸 render、再反向 scale 回畫布座標——否則 canvas 被 CSS 放大 2 倍
- * 會糊掉，DOM 元素則不會有這個問題。
+ * 3D 元件另外要求「相機停穩後才掛」（settled，現在跟鏡頭無關，純粹
+ * 是切欄位後的短暫延遲），並且以最終螢幕像素尺寸 render、再反向
+ * scale 回畫布座標——否則 canvas 被 CSS 縮放會糊掉，DOM 元素則不會
+ * 有這個問題。
+ *
+ * 改版重點（Step 2 / Step 3）：
+ *   - ChatSlot：從「1問1答」改成 3 輪來回＋打字指示動畫，對話記錄
+ *     區改可捲動並自動貼底，示範真實對話的節奏感。
+ *   - GlobalSlot：設定停留一段時間後，透過 GlobalBrainExplorer 新增
+ *     的 forceFocusEid prop「模擬點擊」聚焦候選節點——這條路徑跟
+ *     使用者真的點擊完全共用同一個 state，所以光暈／聚焦路徑高亮
+ *     都是真實效果，不是另外疊一層假動畫。
  */
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import dynamic from "next/dynamic";
 import type { Rect } from "../dashboardMap";
 import {
@@ -92,27 +101,74 @@ export function BoardHeader({ rect }: { rect: Rect }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Chat
+// Chat — 3 輪來回，AI 訊息前有打字指示，對話記錄可捲動並自動貼底
 // ─────────────────────────────────────────────────────────────
 
+type ChatTurn = { role: "user" | "ai"; text: string };
+
+const CHAT_TURNS: ChatTurn[] = [
+  { role: "user", text: GUIDE_QUESTION },
+  { role: "ai",   text: "這牽涉到「價格為什麼不會馬上調整」。我先到知識場域裡找相關概念。" },
+  { role: "user", text: "所以廠商不是想漲就漲、想跌就跌？" },
+  { role: "ai",   text: "對，關鍵在「調價本身有成本」。我找到幾個概念可以說明這件事，你可以點進去看。" },
+  { role: "user", text: "有具體的模型可以參考嗎？" },
+  { role: "ai",   text: "有，Calvo 定價模型是這類理論的經典之一，我一併整理進候選概念。" },
+];
+
 export function ChatSlot({ live }: { live: boolean }) {
-  const [replied, setReplied] = useState(false);
+  const [shown, setShown]   = useState(0);      // 已顯示到第幾則（CHAT_TURNS 的長度）
+  const [typing, setTyping] = useState(false);  // 是否顯示「對方正在輸入…」
+  const logRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (!live) { setReplied(false); return; }
-    const t = setTimeout(() => setReplied(true), 900);
-    return () => clearTimeout(t);
+    if (!live) { setShown(0); setTyping(false); return; }
+
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    let t = 0;
+
+    setShown(1); // 使用者的提問立刻出現，不用等
+
+    for (let i = 1; i < CHAT_TURNS.length; i++) {
+      const turn = CHAT_TURNS[i];
+      if (turn.role === "ai") {
+        t += 500;
+        timers.push(setTimeout(() => setTyping(true), t));
+        t += 900;
+        const idx = i;
+        timers.push(setTimeout(() => { setTyping(false); setShown(idx + 1); }, t));
+      } else {
+        t += 900;
+        const idx = i;
+        timers.push(setTimeout(() => setShown(idx + 1), t));
+      }
+    }
+
+    return () => timers.forEach(clearTimeout);
   }, [live]);
+
+  useEffect(() => {
+    const el = logRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [shown, typing]);
 
   return (
     <div className="gds-slot-body">
-      <div className="gds-chat-log">
+      <div className="gds-chat-log" ref={logRef}>
         {live ? (
           <>
-            <div className="gds-msg gds-msg-user">{GUIDE_QUESTION}</div>
-            {replied && (
-              <div className="gds-msg gds-msg-ai guide-fade-in">
-                這牽涉到「價格為什麼不會馬上調整」。我先到知識場域裡找相關概念。
+            {CHAT_TURNS.slice(0, shown).map((m, i) => (
+              <div
+                key={i}
+                className={`gds-msg ${m.role === "user" ? "gds-msg-user" : "gds-msg-ai"} guide-fade-in`}
+              >
+                {m.text}
+              </div>
+            ))}
+            {typing && (
+              <div className="gds-msg gds-msg-ai gds-msg-typing guide-fade-in">
+                <span className="gds-typing-dot" />
+                <span className="gds-typing-dot" />
+                <span className="gds-typing-dot" />
               </div>
             )}
           </>
@@ -121,6 +177,7 @@ export function ChatSlot({ live }: { live: boolean }) {
             <div className="gds-bar" style={{ height: 22, width: "72%", alignSelf: "flex-end" }} />
             <div className="gds-bar" style={{ height: 32, width: "86%" }} />
             <div className="gds-bar" style={{ height: 22, width: "64%", alignSelf: "flex-end" }} />
+            <div className="gds-bar" style={{ height: 28, width: "78%" }} />
           </>
         )}
       </div>
@@ -133,8 +190,10 @@ export function ChatSlot({ live }: { live: boolean }) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Global Knowledge Field
+// Global Knowledge Field — 停留一段時間後模擬點擊聚焦「價格僵固性」
 // ─────────────────────────────────────────────────────────────
+
+const PICK_DELAY_MS = 900;
 
 export function GlobalSlot({
   live, settled, scale, rect,
@@ -143,6 +202,14 @@ export function GlobalSlot({
 }) {
   const w = rect.w - 24;
   const h = rect.h - 42;
+
+  const [picked, setPicked] = useState(false);
+
+  useEffect(() => {
+    if (!live || !settled) { setPicked(false); return; }
+    const t = setTimeout(() => setPicked(true), PICK_DELAY_MS);
+    return () => clearTimeout(t);
+  }, [live, settled]);
 
   if (!live || !settled) {
     return (
@@ -174,17 +241,23 @@ export function GlobalSlot({
   }
 
   return (
-    <div className="gds-slot-body">
+    <div className="gds-slot-body" style={{ position: "relative" }}>
       <CrispScale scale={scale} width={w} height={h}>
         {(pxW, pxH) => (
           <GlobalBrainExplorer
             layout={GUIDE_LAYOUT_MINI}
             activeCandidateEids={[GUIDE_IDS.priceStick]}
+            forceFocusEid={picked ? GUIDE_IDS.priceStick : null}
             width={pxW}
             height={pxH}
           />
         )}
       </CrispScale>
+      {picked && (
+        <div className="gds-picked-badge guide-fade-in">
+          已選取「價格僵固性」
+        </div>
+      )}
     </div>
   );
 }

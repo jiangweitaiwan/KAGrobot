@@ -3,19 +3,20 @@
 /**
  * PipelineDemo.tsx — Section 1:「完整流程」六步驟示範。
  *
- * 改版重點：不再是六張各自獨立的仿製卡片，而是一份完整的 dashboard
- * 骨架 + 一台相機。每切一步，相機退回全景、框出目標欄位、再推進去
- * 放大該欄位並在裡面演出這一步的操作。使用者因此同時得到兩件事：
- * 「這一步要做什麼」以及「這一步在 dashboard 的哪裡」。
+ * 改版重點：不再靠鏡頭運鏡+壓暗來凸顯「這一步在哪裡」，改成一份
+ * 完整的 dashboard 骨架全程以全景呈現、不放大不位移、背景不調暗；
+ * 作用中的欄位單純用既有的金色框線＋光暈標示（見 DashboardStage.tsx
+ * 的說明）。使用者因此隨時能看到完整佈局，減少切步驟時的閃現感。
  *
  * 六個步驟只落在四個相機位置上，這是刻意的：
  *   ③讀定義 / ④加重心 都在 Detail Panel，
  *   ⑤看剖面 / ⑥送出   都在 Personal Brain。
- * 相機不動、只有面板內部換分頁或冒出確認列，使用者就會自己讀出
+ * 欄位不動、只有面板內部換分頁或冒出確認列，使用者就會自己讀出
  * 「這兩步是在同一個面板做的」——這件事用六張獨立卡片講不出來。
  *
  * 真元件（GlobalBrainExplorer / HourglassViz）只在該欄位作用中、
- * 且相機停穩後才掛載，見 dashboardSlots.tsx 的說明。
+ * 且短暫延遲（跟鏡頭無關，純粹讓切換不要太突兀）後才掛載，見
+ * dashboardSlots.tsx 的說明。
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -134,7 +135,8 @@ export default function PipelineDemo() {
     >
       <DashboardStage
         focusSlot={step.slot}
-        focusRect={SLOT_RECTS[step.slot]}
+        stepIndex={active}
+        stepCount={STEPS.length}
         stepLabel={`${step.glyph} ${step.title}`}
         renderSlot={renderSlot}
       />
