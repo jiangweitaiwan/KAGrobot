@@ -116,8 +116,8 @@ export default function HomePage() {
           <svg className="intro-enso" viewBox="0 0 400 400" aria-hidden="true">
             <circle cx="200" cy="200" r="170" />
           </svg>
-          <span className="intro-eyebrow">ZenMind</span>
-          <h1 className="intro-headline">ZenMind：建立感知到行動的因果關係</h1>
+          <span className="intro-eyebrow">ZEN</span>
+          <h1 className="intro-headline">ZEN：建立感知到行動的因果關係</h1>
           <p className="intro-subhead">
             禪，是一顆包羅萬象的心。這個系統把龐雜、抽象的感知收攏成脈絡清晰的信念，
             再讓信念驅動出具體可執行的行動——從感受出發、經知識累積、至信念收斂，
