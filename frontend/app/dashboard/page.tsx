@@ -1609,7 +1609,7 @@ export default function Page() {
       {/* ── Header ── */}
       <header>
         <div>
-          <h1>ZenMind</h1>
+          <h1>ZEN</h1>
           <div className="session">
             {sessionId ? `${sessionId.slice(0, 20)}…` : "初始化中…"}
             {" · "}

@@ -33,7 +33,7 @@ export default function GuidePage() {
     <div className="intro-root">
       <div className="intro-inner">
         <section className="intro-hero" style={{ minHeight: "auto", paddingBottom: 20 }}>
-          <span className="intro-eyebrow">ZenMind · 操作心法</span>
+          <span className="intro-eyebrow">ZEN · 操作心法</span>
           <h1 className="intro-headline" style={{ maxWidth: "20ch" }}>
             在混亂的世界裡，收斂出屬於你的信念
           </h1>

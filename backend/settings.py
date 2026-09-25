@@ -189,7 +189,7 @@ class Settings(BaseSettings):
 
     # --- 會員 / 額度（Phase 1）---
     quota_enforce: bool = Field(
-        default=true, alias="QUOTA_ENFORCE",
+        default=True, alias="QUOTA_ENFORCE",
         description=(
             "False（預設）= 只計量、不擋（Phase 0）：不回 429，且慢想 / Personal Brain "
             "上限也一併放寬。跑一週看過真實用量、決定額度數字後再改成 true。"

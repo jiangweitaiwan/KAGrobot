@@ -88,7 +88,7 @@ export function BoardHeader({ rect }: { rect: Rect }) {
       style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }}
     >
       <div>
-        <div className="gds-header-title">ZenMind</div>
+        <div className="gds-header-title">ZEN</div>
         <div className="gds-header-meta">socratic · 4 in brain</div>
       </div>
       <div className="gds-header-chips">
