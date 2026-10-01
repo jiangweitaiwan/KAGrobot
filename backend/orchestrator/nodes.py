@@ -21,6 +21,8 @@ from core.skill_loader      import SkillLoader
 
 from orchestrator.state     import OrchestratorState
 from graph_service.bfs_coordinator import BFSCoordinator   # ← 新增 import
+from core.rc_briefing import BriefingCache, handoff_from_payload
+from core.session_store import load_rc_briefing_latest
 
 class OrchestratorNodes:
     """封裝 LangGraph 兩個主要節點的業務邏輯。
@@ -43,13 +45,14 @@ class OrchestratorNodes:
         skill_loader:        SkillLoader,
         sandbox_provisioner: "SkillSandboxProvisioner",
         coordinator:         BFSCoordinator,
+        briefing_cache: Optional[BriefingCache] = None
     ) -> None:
         self._socrates_bot        = socrates_bot
         self._main_agent          = main_agent
         self._skill_loader        = skill_loader
         self._sandbox_provisioner = sandbox_provisioner
         self._coordinator         = coordinator
-
+        self._briefing_cache      = briefing_cache
 
     # ------------------------------------------------------------------
     # Node: socratic
@@ -146,6 +149,17 @@ class OrchestratorNodes:
         if not user_msg:
             return {}
 
+        briefing_handoff = None
+        eid = selected_rc_eid or confirmed_rc_eid
+        sid = state.get("session_id")
+        if uid and eid and sid:
+            hit = (
+                self._briefing_cache.latest(uid, sid, eid)
+                if self._briefing_cache is not None else None
+            )
+            if not hit:
+                hit = await load_rc_briefing_latest(uid, sid, eid)
+            briefing_handoff = handoff_from_payload(hit)
         result = await asyncio.to_thread(
             self._main_agent.chat,
             user_msg,
@@ -154,6 +168,7 @@ class OrchestratorNodes:
             skill=skill,
             sandbox_id=sandbox_id,
             uid=uid,
+            briefing_handoff=briefing_handoff
         )
 
         output_messages: List[BaseMessage] = []

@@ -23,7 +23,7 @@ import asyncio
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-from fastapi import APIRouter, Request,Depends
+from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel
 import json
 import tempfile
@@ -31,8 +31,16 @@ from pathlib import Path
 
 from core.semantic_context import SemanticContext
 from graph_service.semantic_scorer import combine_score, type_overlap
-from core.firebase_auth import require_auth, require_admin
-from core.session_store import load_session_snapshot
+from core.firebase_auth import require_auth, require_admin, require_auth_claims
+from core.quota import compute_quota, quota_error_detail
+from core.session_store import (
+    append_briefing_display_message,
+    load_rc_briefing_for_context,
+    load_session_snapshot,
+    save_rc_briefing,
+)
+from core.rc_briefing import RCBriefing, context_hash, normalize_briefing_payload
+from core.usage import usage_scope
 router = APIRouter()
 
 
@@ -155,6 +163,14 @@ class BatchExpandRequest(BaseModel):
 class BatchExpandResponse(BaseModel):
     results: Dict[str, ExpandResponse]    
 
+class RCBriefingResponse(BaseModel):
+    session_id: str
+    eid:        str
+    rc_label:   str
+    briefing:   RCBriefing
+    labels:     Dict[str, str]     # briefing 引用到的 eid → label，前端直接渲染
+    cached:     bool = False
+
 # ── Helpers ───────────────────────────────────────────────────────────
 
 def _anchor_label_from_cache(
@@ -239,6 +255,29 @@ async def _get_semantic_context(request: Request, uid: str, session_id: str) -> 
         summary=socrates_state.get("context_summary") or "",
         thinking_process=values.get("thinking_process") or "",
     )
+
+
+async def _get_walk_visited(request: Request, uid: str, session_id: str) -> List[str]:
+    """取出 walk_session 所有 path 走過的 eid（沒有 walk 時回傳空清單）。
+ 
+    邏輯與 _get_semantic_context 對稱：先讀 orchestrator checkpoint，
+    沒有再降級讀 Firestore 備份。
+    """
+    orchestrator = request.app.state.orchestrator
+    config = {"configurable": {"thread_id": f"{uid}:{session_id}"}}
+    try:
+        values = orchestrator.get_state(config).values or {}
+    except Exception:
+        values = {}
+    if not values:
+        restored = await load_session_snapshot(uid, session_id)
+        values = restored or {}
+ 
+    walk = values.get("walk_session") or {}
+    eids: List[str] = []
+    for p in walk.get("paths", []):
+        eids.extend(n["eid"] for n in p.get("visited", []))
+    return list(dict.fromkeys(eids))
 
 # ── Routes ────────────────────────────────────────────────────────────
 
@@ -565,3 +604,128 @@ async def foundation_recommendations(
             for r in recs
         ],
     )
+
+
+async def _load_briefing_payload(
+    cache: Any,
+    key: tuple,
+    uid: str,
+    session_id: str,
+    eid: str,
+    ctx_hash: str,
+) -> tuple[Optional[dict], bool]:
+    """回傳 (payload, from_firestore)。from_firestore 時 caller 應補 display_messages。"""
+    hit = cache.get(key)
+    if hit:
+        return normalize_briefing_payload(hit), False
+    fs = await load_rc_briefing_for_context(uid, session_id, eid, ctx_hash)
+    if not fs:
+        return None, False
+    payload = normalize_briefing_payload(fs)
+    cache.put(key, payload)
+    return payload, True
+
+
+async def _ensure_briefing_display_row(
+    uid: str,
+    session_id: str,
+    *,
+    eid: str,
+    rc_label: str,
+    ctx_hash: str,
+    payload: dict,
+) -> None:
+    b = payload["briefing"]
+    briefing_dict = b.model_dump() if isinstance(b, RCBriefing) else dict(b)
+    await append_briefing_display_message(
+        uid, session_id,
+        eid=eid, rc_label=rc_label, ctx_hash=ctx_hash,
+        briefing=briefing_dict, labels=payload.get("labels") or {},
+    )
+
+
+@router.get("/brain/rc-briefing", response_model=RCBriefingResponse)
+async def rc_briefing(
+    session_id: str,
+    eid:        str,
+    request:    Request,
+    uid:        str = Depends(require_auth),
+    claims:     dict = Depends(require_auth_claims),
+) -> RCBriefingResponse:
+    """預覽用：RC 全局說明。無副作用（不改 selected_rc_eid / brain / sandbox）。"""
+    ctx = await _get_semantic_context(request, uid, session_id)
+    context_text = ctx.embedding_text
+    if not context_text.strip():
+        raise HTTPException(status_code=400, detail="尚無足夠的對話脈絡可產生說明。")
+
+    cache        = request.app.state.briefing_cache
+    generator    = request.app.state.briefing_generator
+    walk_visited = await _get_walk_visited(request, uid, session_id)
+    ctx_hash     = context_hash(context_text, walk_visited)
+    key          = (uid, session_id, eid, ctx_hash)
+    rc_label     = _get_anchor_label(request, eid)
+
+    payload, from_fs = await _load_briefing_payload(cache, key, uid, session_id, eid, ctx_hash)
+    if payload:
+        if from_fs:
+            await _ensure_briefing_display_row(
+                uid, session_id, eid=eid, rc_label=rc_label, ctx_hash=ctx_hash, payload=payload,
+            )
+        return RCBriefingResponse(
+            session_id=session_id, eid=eid, rc_label=rc_label, cached=True, **payload,
+        )
+
+    async with cache.lock_for(key):
+        payload, from_fs = await _load_briefing_payload(cache, key, uid, session_id, eid, ctx_hash)
+        if payload:
+            if from_fs:
+                await _ensure_briefing_display_row(
+                    uid, session_id, eid=eid, rc_label=rc_label, ctx_hash=ctx_hash, payload=payload,
+                )
+            return RCBriefingResponse(
+                session_id=session_id, eid=eid, rc_label=rc_label, cached=True, **payload,
+            )
+
+        quota_ctx = await compute_quota(claims)
+        if quota_ctx.enforced and quota_ctx.exceeded and not quota_ctx.membership.is_admin:
+            raise HTTPException(
+                status_code=429,
+                detail=quota_error_detail(quota_ctx),
+            )
+
+        coordinator = request.app.state.coordinator
+        result = await coordinator.get_expand_cached_async(eid, max_depth=6, max_branches=4)
+        tree   = result.get("foundation_tree", {}) or {}
+        nodes  = tree.get("nodes", [])
+        edges  = tree.get("edges", [])
+        if not any(n["element_id"] == eid for n in nodes):
+            nodes = nodes + [{"element_id": eid, "label": rc_label, "node_type": "support"}]
+
+        from core.rc_briefing import prune_tree
+        kept_nodes, _, _ = prune_tree(eid, nodes, edges)
+        details = await asyncio.to_thread(
+            request.app.state.concept_retriever.retrieve_batch,
+            [n["element_id"] for n in kept_nodes],
+        )
+
+        async with usage_scope(uid, session_id, plan=quota_ctx.membership.plan):
+            briefing, labels = await asyncio.to_thread(
+                generator.generate,
+                rc_eid=eid, rc_label=rc_label, context_text=context_text,
+                nodes=nodes, edges=edges, details=details, walk_visited=walk_visited,
+            )
+
+        payload = {"briefing": briefing, "labels": labels}
+        cache.put(key, payload)
+        briefing_dict = briefing.model_dump()
+        await save_rc_briefing(
+            uid, session_id, eid, ctx_hash, rc_label, briefing_dict, labels,
+        )
+        await append_briefing_display_message(
+            uid, session_id,
+            eid=eid, rc_label=rc_label, ctx_hash=ctx_hash,
+            briefing=briefing_dict, labels=labels,
+        )
+        return RCBriefingResponse(
+            session_id=session_id, eid=eid, rc_label=rc_label, cached=False, **payload,
+        )

@@ -39,6 +39,11 @@
   - title：使用者自訂的對話名稱（rename_session）。沒有 title 時前端退回
     顯示需求摘要。save_session_snapshot 用 merge=True，不會覆蓋 title。
   - delete_session / delete_all_sessions：刪除對話（後者供刪帳號使用）。
+
+【RC Briefing】
+  - rc_briefings.{eid}：該 session 內某 RC 最後一次生成的全局說明（含 context_hash），
+    供多 worker handoff 與避免重複計費。
+  - display_messages 可帶 briefing 欄（比照 widget），供歷史對話重播卡片。
 """
 
 from __future__ import annotations
@@ -248,3 +253,178 @@ async def delete_all_sessions(uid: str) -> None:
             count += 1
         if count < 100:
             break
+
+
+# ── RC Briefing（Firestore 持久化）────────────────────────────────
+
+def _briefing_display_entry(
+    *,
+    eid: str,
+    rc_label: str,
+    ctx_hash: str,
+    briefing: Dict[str, Any],
+    labels: Dict[str, str],
+    status: str = "ready",
+) -> Dict[str, Any]:
+    return {
+        "eid": eid,
+        "label": rc_label,
+        "status": status,
+        "context_hash": ctx_hash,
+        "data": briefing,
+        "labels": labels,
+    }
+
+
+def _display_has_briefing(
+    messages: List[Dict[str, Any]], eid: str, ctx_hash: str,
+) -> bool:
+    for m in messages:
+        b = m.get("briefing") or {}
+        if b.get("eid") == eid and b.get("context_hash") == ctx_hash:
+            return True
+    return False
+
+
+async def save_rc_briefing(
+    uid: str,
+    session_id: str,
+    eid: str,
+    ctx_hash: str,
+    rc_label: str,
+    briefing: Dict[str, Any],
+    labels: Dict[str, str],
+) -> None:
+    """寫入 rc_briefings[eid]（同 session 內每 RC 保留最新一筆）。"""
+    try:
+        now = int(time.time() * 1000)
+        ref = _session_ref(uid, session_id)
+        doc = await ref.get()
+        data = doc.to_dict() or {}
+        briefings = dict(data.get("rc_briefings") or {})
+        briefings[eid] = {
+            "context_hash": ctx_hash,
+            "rc_label":     rc_label,
+            "briefing":     briefing,
+            "labels":       labels,
+            "updated_at":   now,
+        }
+        payload: Dict[str, Any] = {"rc_briefings": briefings, "updated_at": now}
+        if not doc.exists:
+            payload["created_at"] = now
+        await ref.set(payload, merge=True)
+    except Exception as exc:
+        print(f"[session_store] save_rc_briefing failed "
+              f"(uid={uid}, session={session_id}, eid={eid}): {exc}")
+
+
+async def load_rc_briefing_for_context(
+    uid: str,
+    session_id: str,
+    eid: str,
+    ctx_hash: str,
+) -> Optional[Dict[str, Any]]:
+    """精確比對 context_hash；命中回傳 {briefing, labels}（briefing 為 dict）。"""
+    try:
+        doc = await _session_ref(uid, session_id).get()
+        if not doc.exists:
+            return None
+        entry = (doc.to_dict() or {}).get("rc_briefings", {}).get(eid)
+        if not entry or entry.get("context_hash") != ctx_hash:
+            return None
+        return {"briefing": entry["briefing"], "labels": entry.get("labels") or {}}
+    except Exception as exc:
+        print(f"[session_store] load_rc_briefing_for_context failed "
+              f"(uid={uid}, session={session_id}): {exc}")
+        return None
+
+
+async def load_rc_briefing_latest(
+    uid: str,
+    session_id: str,
+    eid: str,
+) -> Optional[Dict[str, Any]]:
+    """main_agent handoff：不需 context_hash，取該 RC 在 session 內最後存檔。"""
+    try:
+        doc = await _session_ref(uid, session_id).get()
+        if not doc.exists:
+            return None
+        entry = (doc.to_dict() or {}).get("rc_briefings", {}).get(eid)
+        if not entry:
+            return None
+        return {"briefing": entry["briefing"], "labels": entry.get("labels") or {}}
+    except Exception as exc:
+        print(f"[session_store] load_rc_briefing_latest failed "
+              f"(uid={uid}, session={session_id}): {exc}")
+        return None
+
+
+async def append_briefing_display_message(
+    uid: str,
+    session_id: str,
+    *,
+    eid: str,
+    rc_label: str,
+    ctx_hash: str,
+    briefing: Dict[str, Any],
+    labels: Dict[str, str],
+) -> None:
+    """在 display_messages 追加一則 briefing 卡片（同 eid+context_hash 去重）。"""
+    try:
+        now = int(time.time() * 1000)
+        ref = _session_ref(uid, session_id)
+        doc = await ref.get()
+        data = doc.to_dict() or {}
+        existing = list(data.get("display_messages") or [])
+        if _display_has_briefing(existing, eid, ctx_hash):
+            return
+        row: Dict[str, Any] = {
+            "role":        "ai",
+            "content":     "",
+            "attachments": [],
+            "created_at":  now,
+            "briefing":    _briefing_display_entry(
+                eid=eid, rc_label=rc_label, ctx_hash=ctx_hash,
+                briefing=briefing, labels=labels, status="ready",
+            ),
+        }
+        payload: Dict[str, Any] = {
+            "display_messages": (existing + [row])[-_MAX_DISPLAY_MESSAGES:],
+            "updated_at":       now,
+        }
+        if not doc.exists:
+            payload["created_at"] = now
+        await ref.set(payload, merge=True)
+    except Exception as exc:
+        print(f"[session_store] append_briefing_display_message failed "
+              f"(uid={uid}, session={session_id}): {exc}")
+
+
+async def mark_briefing_adopted_in_display(
+    uid: str,
+    session_id: str,
+    eid: str,
+) -> None:
+    """採用方案後，把 display_messages 內該 RC 的 briefing 標記為 adopted。"""
+    try:
+        ref = _session_ref(uid, session_id)
+        doc = await ref.get()
+        if not doc.exists:
+            return
+        data = doc.to_dict() or {}
+        messages = list(data.get("display_messages") or [])
+        changed = False
+        for m in messages:
+            b = m.get("briefing")
+            if b and b.get("eid") == eid and b.get("status") != "adopted":
+                b["status"] = "adopted"
+                changed = True
+        if not changed:
+            return
+        await ref.set({
+            "display_messages": messages,
+            "updated_at":       int(time.time() * 1000),
+        }, merge=True)
+    except Exception as exc:
+        print(f"[session_store] mark_briefing_adopted_in_display failed "
+              f"(uid={uid}, session={session_id}): {exc}")

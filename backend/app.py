@@ -80,6 +80,7 @@ from api.routes                    import (
 
 from core.skill_sandbox import SkillSandboxProvisioner
 from retrieval.rc_category_loader import RCCategoryLoader
+from core.rc_briefing import BriefingCache, RCBriefingGenerator
 
 
 async def _load_brain_weights(uid: Optional[str]) -> Dict[str, float]:
@@ -167,6 +168,7 @@ async def lifespan(app: FastAPI):
         bucket_name=s.skills_bucket_name,
         gcs_prefix="skills",
     )
+    briefing_cache = BriefingCache(maxsize=256)
 
     nodes = OrchestratorNodes(
         socrates_bot        = socrates_bot,
@@ -174,6 +176,7 @@ async def lifespan(app: FastAPI):
         skill_loader         = skill_loader,
         sandbox_provisioner  = sandbox_provisioner,
         coordinator          = coordinator,
+        briefing_cache       = briefing_cache,
     )
 
     foundation_recommender = FoundationRecommender(
@@ -232,7 +235,9 @@ async def lifespan(app: FastAPI):
     # Random Walk Mode 的狀態：
     app.state.start_concept_pool  = start_concept_pool
 
-
+    app.state.concept_retriever  = concept_retriever
+    app.state.briefing_cache     = briefing_cache
+    app.state.briefing_generator = RCBriefingGenerator(model=s.socrates_model)
     yield
 
     driver.close()

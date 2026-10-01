@@ -214,6 +214,7 @@ class MainAgent:
         skill:          Optional["RCSkill"] = None,
         sandbox_id:     Optional[str]       = None,
         uid:            Optional[str]       = None,
+        briefing_handoff: Optional[dict] = None
     ) -> dict:
         """單次處理對話請求（完全無狀態）。
 
@@ -274,8 +275,7 @@ class MainAgent:
         # widget 紀錄（單輪展示用，見 tools/skill_widget.py）。
         turn_widget_state: dict = {"item": None}
 
-        system_prompt = self._build_system_prompt(socrates_state, skill)
-        tools         = self._build_tools(
+        system_prompt = self._build_system_prompt(socrates_state, skill, briefing_handoff)        tools         = self._build_tools(
             socrates_state, skill, sandbox_state, attachment_state,
             turn_widget_state, uid=uid,
         )
@@ -420,6 +420,7 @@ class MainAgent:
         self,
         socrates_state: ChatState,
         skill:          Optional["RCSkill"],
+        briefing_handoff=None
     ) -> str:
         summary = socrates_state.get("context_summary") or "（未提供）"
 
@@ -442,14 +443,27 @@ class MainAgent:
 
         tool_section = self._build_tool_usage_section(skill)
 
-        return (
-            _BASE_SYSTEM_PROMPT
-            + "\n"
-            + need_section
-            + skill_section
-            + "\n"
-            + tool_section
-        )
+        handoff_section = ""
+        
+        if briefing_handoff:
+            assumptions = briefing_handoff.get("assumptions") or []
+            params_hint = briefing_handoff.get("params_hint") or []
+            gaps        = briefing_handoff.get("fit_gaps") or []
+            lines = []
+            if assumptions:
+                lines.append("前提假設：\n" + "\n".join(f"- {a}" for a in assumptions))
+            if gaps:
+                lines.append("已知需求缺口（回覆時主動說明）：\n" + "\n".join(f"- {g}" for g in gaps))
+            if params_hint:
+                lines.append("建議向使用者確認的參數方向：\n" + "\n".join(f"- {p}" for p in params_hint))
+            if lines:
+                handoff_section = (
+                    "\n══════════════════════════════\n"
+                    "採用前的全局說明（使用者已看過）\n"
+                    "══════════════════════════════\n" + "\n".join(lines) + "\n"
+                )
+        return (_BASE_SYSTEM_PROMPT + "\n" + need_section + skill_section
+                + handoff_section + "\n" + tool_section)
 
     def _build_tool_usage_section(self, skill: Optional["RCSkill"]) -> str:
         """組裝『可用工具』區塊，唯一負責解釋通用工具怎麼用、彼此怎麼分工。

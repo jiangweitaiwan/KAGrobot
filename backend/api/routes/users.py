@@ -16,7 +16,7 @@ users/{uid} 底下的資料。GET /me 只是如實反映 token 當下的
 is_anonymous / provider 狀態。
 
 【新增 — HTML Widget】
-  SessionDisplayMessage 多一個選填的 widget 欄位，對應
+  SessionDisplayMessage 多選填 widget / briefing 欄位，對應
   core/session_store.py 存進 display_messages 裡、某則 AI turn message
   可能帶的 "widget" 資料（見 api/routes/chat.py 的 ai_turn_message 組裝）。
   純粹透傳給前端重播用，這裡不做任何額外處理或驗證。
@@ -101,6 +101,8 @@ class SessionDisplayMessage(BaseModel):
     # 前端依 created_at + expires_in_hours 判斷是否過期（比照
     # AttachmentCard.isAttachmentExpired），過期則顯示灰階、不渲染 iframe。
     widget:      Optional[Dict[str, Any]] = None
+    # RC 全局說明卡片（重播用，見 core/session_store.py::append_briefing_display_message）
+    briefing:    Optional[Dict[str, Any]] = None
 
 
 class SessionDetailResponse(BaseModel):

@@ -146,3 +146,27 @@ class ConceptDetailRetriever:
             "key_assumptions": row["key_assumptions"], "function": row["function"],
             "analysis_types": row["analysis_types"] or [], "papers": papers,
         }
+    
+    def retrieve_batch(self, eids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """批次查詢 definition / mechanism / function，供 RC briefing 補節點描述。"""
+        if not eids:
+            return {}
+        with self._driver.session() as session:
+            rows = session.run(
+                """
+                MATCH (c:Concept) WHERE elementId(c) IN $eids
+                RETURN elementId(c) AS eid,
+                       c.name       AS name,
+                       c.definition AS definition,
+                       c.mechanism  AS mechanism,
+                       c.function   AS function
+                """,
+                eids=eids,
+            ).data()
+        return {
+            r["eid"]: {
+                "name": r["name"], "definition": r["definition"],
+                "mechanism": r["mechanism"], "function": r["function"],
+            }
+            for r in rows
+        }

@@ -24,7 +24,7 @@ import type { SemanticContextData, RecommendedFoundation } from "../components/S
 import { AttachmentCard, AttachmentTray, type Attachment } from "../components/AttachmentCard";
 import { SkillWidgetCard, type PendingWidget } from "../components/SkillWidgetCard";
 import WidgetOverlay, { type OverlayRect } from "../components/WidgetOverlay";
-
+import RCBriefingCard, { type BriefingState, type RCBriefingData } from "../components/RCBriefingCard";
 
 import { useAuth } from "../components/AuthProvider";
 import AuthPanel from "../components/AuthPanel";
@@ -60,6 +60,7 @@ type ChatMessage = {
   // user turn 的文字內容（"[widget_submission: ...]"）承載結果，
   // ChatBubble 會把那段原始文字轉譯成較友善的顯示（見 renderUserWidgetSubmission）。
   widget?: PendingWidget;
+  briefing?: BriefingState;
 };
 
 type ChatResponse = {
@@ -88,6 +89,7 @@ type SessionDisplayMessage = {
   created_at:  number;
   // 新增 — HTML Widget（重播用，見 backend api/routes/users.py::SessionDisplayMessage）
   widget?:     PendingWidget | null;
+  briefing?:   BriefingState | null;
 };
 
 type SessionDetail = {
@@ -469,12 +471,16 @@ async function fetchWalkStatus(sessionId: string): Promise<WalkStatusResponse | 
 
 function ChatBubble({
   msg, onWidgetSubmit, onWidgetCancel, widgetActionDisabled, isActiveWidget,
+  onBriefingAdopt, onBriefingDismiss, briefingDisabled,
 }: {
   msg: ChatMessage;
   onWidgetSubmit: (messageId: string, widgetId: string, data: unknown) => void;
   onWidgetCancel: (messageId: string, widgetId: string) => void;
   widgetActionDisabled: boolean;
   isActiveWidget: boolean;
+  onBriefingAdopt: (eid: string, label: string) => void;
+  onBriefingDismiss: (messageId: string) => void;
+  briefingDisabled: boolean;
 }) {
   const attachments = msg.attachments ?? [];
   const parts        = useMemo(() => splitByPlaceholder(msg.content), [msg.content]);
@@ -529,6 +535,14 @@ function ChatBubble({
             onCancel={(widgetId) => onWidgetCancel(msg.id, widgetId)}
           />
         )
+      )}
+      {msg.briefing && (
+        <RCBriefingCard
+          briefing={msg.briefing}
+          disabled={briefingDisabled}
+          onAdopt={onBriefingAdopt}
+          onDismiss={() => onBriefingDismiss(msg.id)}
+        />
       )}
     </div>
   );
@@ -1387,7 +1401,7 @@ export default function Page() {
     // 一般 dialogue mode（PersonalBrain 的 Top-3 標籤點擊）不帶這個
     // 參數，行為與改動前完全一致。
     const targetSessionId = sessionIdOverride ?? sessionId;
-    if (!targetSessionId || isLoading || !API_BASE || !userId) return;
+    if (!targetSessionId || isLoading || !API_BASE || !userId) return false;
 
     addFoundationsToBrain([{ eid: rcEid, label: rcLabel }]);
 
@@ -1435,6 +1449,7 @@ export default function Page() {
         setActiveWidget(null);
         setActiveWidgetMessageId(null);
       }
+      return true;
     } catch (err) {
       const q = asQuotaError(err);
       if (q) {
@@ -1445,6 +1460,7 @@ export default function Page() {
         setError(err instanceof Error ? err.message : "請求失敗,請稍後重試");
         setMessages((prev) => [...prev, { id: createId(), role: "ai", content: "抱歉,連線失敗。" }]);
       }
+      return false;
     } finally {
       setIsLoading(false);
       if (!isTypingRef.current) saveHistory(messagesRef.current);
@@ -1453,6 +1469,84 @@ export default function Page() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, isLoading, phase, userId, addFoundationsToBrain]);
 
+
+  // ──────────────────────────────────────────────────────────
+  // RC 全局說明（briefing）：點推薦標籤 → 預覽卡片 → 按「採用」才進 main_agent
+  // 預覽無副作用：不呼叫 addFoundationsToBrain、不送 selected_rc_eid。
+  // ──────────────────────────────────────────────────────────
+
+  const handlePreviewRC = useCallback(async (rcEid: string, rcLabel: string) => {
+    if (!sessionId || isLoading || walkStreaming || !API_BASE || !userId) return;
+    // 同一個 RC 已經有卡片就不重複產生
+    if (messagesRef.current.some((m) => m.briefing?.eid === rcEid)) return;
+
+    setError("");
+    setQuotaBlock(null);
+
+    const msgId = createId();
+    const cardMsg: ChatMessage = {
+      id: msgId, role: "ai", content: "",
+      briefing: { eid: rcEid, label: rcLabel, status: "loading" },
+    };
+    // 與 sendChatTurn 同樣的理由：ref 平常靠 effect 於下次 render 才同步，
+    // 這裡立刻同步，讓上面的「已有卡片」檢查在連點時也能擋住。
+    messagesRef.current = [...messagesRef.current, cardMsg];
+    setMessages(messagesRef.current);
+
+    const patch = (b: Partial<BriefingState>) =>
+      setMessages((prev) => {
+        const next = prev.map((m) =>
+          m.id === msgId && m.briefing ? { ...m, briefing: { ...m.briefing, ...b } } : m,
+        );
+        messagesRef.current = next;
+        saveHistory(next);
+        return next;
+      });
+    const removeCard = () => {
+      messagesRef.current = messagesRef.current.filter((m) => m.id !== msgId);
+      setMessages(messagesRef.current);
+    };
+
+    try {
+      const r = await apiFetch(
+        `${API_BASE.replace(/\/$/, "")}/brain/rc-briefing`
+        + `?session_id=${encodeURIComponent(sessionId)}&eid=${encodeURIComponent(rcEid)}`,
+      );
+      if (!r.ok) throw await apiErrorFromResponse(r);
+      const d = await r.json();
+      patch({ status: "ready", data: d.briefing as RCBriefingData, labels: d.labels });
+    } catch (err) {
+      const q = asQuotaError(err);
+      if (q) {
+        setQuotaBlock(q);
+        removeCard();                       // 被額度擋下：撤回卡片，不顯示錯誤卡
+      } else {
+        patch({ status: "error", error: err instanceof Error ? err.message : undefined });
+      }
+    } finally {
+      refreshUsage();
+    }
+  }, [sessionId, isLoading, walkStreaming, userId, refreshUsage]);
+
+  const handleBriefingAdopt = useCallback(async (rcEid: string, rcLabel: string) => {
+    const ok = await handleLaunchSkill(rcEid, rcLabel);
+    if (!ok) return;                        // 額度／連線失敗：卡片維持可再按
+    setMessages((prev) => {
+      const next = prev.map((m) =>
+        m.briefing?.eid === rcEid
+          ? { ...m, briefing: { ...m.briefing, status: "adopted" as const } }
+          : m,
+      );
+      messagesRef.current = next;
+      saveHistory(next);
+      return next;
+    });
+  }, [handleLaunchSkill]);
+
+  const handleBriefingDismiss = useCallback((messageId: string) => {
+    messagesRef.current = messagesRef.current.filter((m) => m.id !== messageId);
+    setMessages(messagesRef.current);
+  }, []);  
   function resetConversation() {
     walkAbortRef.current?.abort();
 
@@ -1519,6 +1613,7 @@ export default function Page() {
       // 歷史重播的 widget 不鎖輸入框（見上方 pendingWidgetKey 說明），
       // 只是靜態呈現；若已過期，SkillWidgetCard 會自行顯示灰階提示。
       widget:      m.widget ?? undefined,
+      briefing:    m.briefing ?? undefined,
     }));
 
     walkAbortRef.current?.abort();
@@ -1712,6 +1807,9 @@ export default function Page() {
                   onWidgetCancel={handleWidgetCancel}
                   widgetActionDisabled={widgetActionSubmitting || isLoading}
                   isActiveWidget={msg.id === activeWidgetMessageId}
+                  onBriefingAdopt={handleBriefingAdopt}
+                  onBriefingDismiss={handleBriefingDismiss}
+                  briefingDisabled={isLoading}
                 />
               ))
             )}
@@ -1805,7 +1903,7 @@ export default function Page() {
             rcCategoryMap={rcCategoryMap}
             justUpdated={walkRankingJustUpdated}
             fetchFoundationTree={fetchFoundationTree}
-            onLaunchSkill={handleLaunchSkill}
+            onLaunchSkill={handlePreviewRC}
             fetchRCPaths={fetchRCPaths}
             isSubmitting={isLoading}
             width={personalSize.w}

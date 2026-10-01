@@ -34,7 +34,11 @@ from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel
 
 from core.quota import QuotaContext, require_quota
-from core.session_store import load_session_snapshot, save_session_snapshot
+from core.session_store import (
+    load_session_snapshot,
+    mark_briefing_adopted_in_display,
+    save_session_snapshot,
+)
 from core.usage import usage_scope
 
 router = APIRouter()
@@ -160,6 +164,9 @@ async def chat_endpoint(
     ]
 
     await save_session_snapshot(uid, body.session_id, result, turn_messages=turn_messages)
+
+    if body.selected_rc_eid:
+        await mark_briefing_adopted_in_display(uid, body.session_id, body.selected_rc_eid)
 
     return ChatResponse(
         reply          = reply_text,
