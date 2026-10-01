@@ -1514,7 +1514,10 @@ export default function Page() {
       );
       if (!r.ok) throw await apiErrorFromResponse(r);
       const d = await r.json();
-      patch({ status: "ready", data: d.briefing as RCBriefingData, labels: d.labels });
+      patch({
+        status: "ready", data: d.briefing as RCBriefingData, labels: d.labels,
+        graph: d.graph ?? null,
+      });
     } catch (err) {
       const q = asQuotaError(err);
       if (q) {

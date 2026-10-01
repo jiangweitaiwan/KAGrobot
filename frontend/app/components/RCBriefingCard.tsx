@@ -1,5 +1,7 @@
 "use client";
 
+import BriefingGraph, { type BriefingGraphData } from "./BriefingGraph";
+
 // RC 全局說明卡片：顯示於聊天氣泡內（比照 SkillWidgetCard 的位置）。
 // 樣式沿用 dashboard 既有的 CSS 變數（--purple / --border / --muted / --text / --teal / --orange），
 // 不引入新的視覺語言。
@@ -23,6 +25,8 @@ export type BriefingState = {
   status:  "loading" | "ready" | "error" | "adopted";
   data?:   RCBriefingData;
   labels?: Record<string, string>;
+  // 剪枝後的拓樸圖（LLM 實際看到的那張）。舊資料沒有此欄位 → 不畫圖。
+  graph?:  BriefingGraphData | null;
   error?:  string;
 };
 
@@ -73,8 +77,16 @@ export default function RCBriefingCard({
 
       <section>
         <div style={h}>上游結構（由上游到方案）</div>
+        {briefing.graph && briefing.graph.nodes.length > 0 && (
+          <BriefingGraph
+            graph={briefing.graph}
+            rcEid={eid}
+            layers={data.layers}
+            walkOverlap={data.walk_overlap}
+          />
+        )}
         {data.layers.map((l, i) => (
-          <div key={i} style={{ marginBottom: 6 }}>
+          <div key={i} style={{ marginBottom: 6, marginTop: i === 0 ? 8 : 0 }}>
             <div><b>{l.name}</b>：{l.role}</div>
             <div style={{ color: "var(--muted)" }}>{l.node_eids.map(name).join("、")}</div>
           </div>

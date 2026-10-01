@@ -41,6 +41,16 @@ class SemanticContext:
         return " ".join(parts)
 
     @property
+    def requirement_text(self) -> str:
+        """只組 query + summary：使用者的「需求」本身，不含慢想探索軌跡。
+
+        RC briefing 需要把「使用者要什麼」與「使用者探索過什麼」分開呈現，
+        fit_gaps 只能對照需求，不能把探索當成需求，所以不能用 embedding_text。
+        """
+        parts = [p.strip() for p in (self.query, self.summary) if p and p.strip()]
+        return " ".join(parts)
+
+    @property
     def is_empty(self) -> bool:
         return not self.embedding_text and not self.intent_types
 

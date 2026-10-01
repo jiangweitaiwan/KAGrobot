@@ -264,6 +264,7 @@ def _briefing_display_entry(
     ctx_hash: str,
     briefing: Dict[str, Any],
     labels: Dict[str, str],
+    graph: Optional[Dict[str, Any]] = None,
     status: str = "ready",
 ) -> Dict[str, Any]:
     return {
@@ -273,6 +274,7 @@ def _briefing_display_entry(
         "context_hash": ctx_hash,
         "data": briefing,
         "labels": labels,
+        "graph": graph,          # 拓樸圖；舊資料沒有此欄位 → None，前端不畫圖
     }
 
 
@@ -294,6 +296,7 @@ async def save_rc_briefing(
     rc_label: str,
     briefing: Dict[str, Any],
     labels: Dict[str, str],
+    graph: Optional[Dict[str, Any]] = None,
 ) -> None:
     """寫入 rc_briefings[eid]（同 session 內每 RC 保留最新一筆）。"""
     try:
@@ -307,6 +310,7 @@ async def save_rc_briefing(
             "rc_label":     rc_label,
             "briefing":     briefing,
             "labels":       labels,
+            "graph":        graph,
             "updated_at":   now,
         }
         payload: Dict[str, Any] = {"rc_briefings": briefings, "updated_at": now}
@@ -332,7 +336,11 @@ async def load_rc_briefing_for_context(
         entry = (doc.to_dict() or {}).get("rc_briefings", {}).get(eid)
         if not entry or entry.get("context_hash") != ctx_hash:
             return None
-        return {"briefing": entry["briefing"], "labels": entry.get("labels") or {}}
+        return {
+            "briefing": entry["briefing"],
+            "labels":   entry.get("labels") or {},
+            "graph":    entry.get("graph"),
+        }
     except Exception as exc:
         print(f"[session_store] load_rc_briefing_for_context failed "
               f"(uid={uid}, session={session_id}): {exc}")
@@ -352,7 +360,11 @@ async def load_rc_briefing_latest(
         entry = (doc.to_dict() or {}).get("rc_briefings", {}).get(eid)
         if not entry:
             return None
-        return {"briefing": entry["briefing"], "labels": entry.get("labels") or {}}
+        return {
+            "briefing": entry["briefing"],
+            "labels":   entry.get("labels") or {},
+            "graph":    entry.get("graph"),
+        }
     except Exception as exc:
         print(f"[session_store] load_rc_briefing_latest failed "
               f"(uid={uid}, session={session_id}): {exc}")
@@ -368,6 +380,7 @@ async def append_briefing_display_message(
     ctx_hash: str,
     briefing: Dict[str, Any],
     labels: Dict[str, str],
+    graph: Optional[Dict[str, Any]] = None,
 ) -> None:
     """在 display_messages 追加一則 briefing 卡片（同 eid+context_hash 去重）。"""
     try:
@@ -385,7 +398,7 @@ async def append_briefing_display_message(
             "created_at":  now,
             "briefing":    _briefing_display_entry(
                 eid=eid, rc_label=rc_label, ctx_hash=ctx_hash,
-                briefing=briefing, labels=labels, status="ready",
+                briefing=briefing, labels=labels, graph=graph, status="ready",
             ),
         }
         payload: Dict[str, Any] = {

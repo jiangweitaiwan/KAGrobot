@@ -39,7 +39,9 @@ from core.sessions.session_store import (
     load_session_snapshot,
     save_rc_briefing,
 )
-from core.brain.rc_briefing import RCBriefing, context_hash, normalize_briefing_payload
+from core.brain.rc_briefing import (
+    BriefingGraph, RCBriefing, context_hash, normalize_briefing_payload, prune_tree,
+)
 from core.account.usage import usage_scope
 router = APIRouter()
 
@@ -169,6 +171,7 @@ class RCBriefingResponse(BaseModel):
     rc_label:   str
     briefing:   RCBriefing
     labels:     Dict[str, str]     # briefing 引用到的 eid → label，前端直接渲染
+    graph:      Optional[BriefingGraph] = None   # 剪枝後的拓樸圖；舊資料沒有 → None
     cached:     bool = False
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -641,6 +644,7 @@ async def _ensure_briefing_display_row(
         uid, session_id,
         eid=eid, rc_label=rc_label, ctx_hash=ctx_hash,
         briefing=briefing_dict, labels=payload.get("labels") or {},
+        graph=payload.get("graph"),
     )
 
 
@@ -654,14 +658,17 @@ async def rc_briefing(
 ) -> RCBriefingResponse:
     """預覽用：RC 全局說明。無副作用（不改 selected_rc_eid / brain / sandbox）。"""
     ctx = await _get_semantic_context(request, uid, session_id)
-    context_text = ctx.embedding_text
-    if not context_text.strip():
+    if not ctx.embedding_text.strip():
         raise HTTPException(status_code=400, detail="尚無足夠的對話脈絡可產生說明。")
+
+    # 需求（使用者要什麼）與探索軌跡（慢想）分開傳，fit_gaps 只對照需求
+    requirement_text = ctx.requirement_text
+    exploration_text = ctx.thinking_process
 
     cache        = request.app.state.briefing_cache
     generator    = request.app.state.briefing_generator
     walk_visited = await _get_walk_visited(request, uid, session_id)
-    ctx_hash     = context_hash(context_text, walk_visited)
+    ctx_hash     = context_hash(requirement_text, exploration_text, walk_visited)
     key          = (uid, session_id, eid, ctx_hash)
     rc_label     = _get_anchor_label(request, eid)
 
@@ -694,37 +701,38 @@ async def rc_briefing(
             )
 
         coordinator = request.app.state.coordinator
-        result = await coordinator.get_expand_cached_async(eid, max_depth=6, max_branches=4)
-        tree   = result.get("foundation_tree", {}) or {}
-        nodes  = tree.get("nodes", [])
-        edges  = tree.get("edges", [])
-        if not any(n["element_id"] == eid for n in nodes):
-            nodes = nodes + [{"element_id": eid, "label": rc_label, "node_type": "support"}]
+        result   = await coordinator.get_expand_cached_async(eid, max_depth=6, max_branches=4)
+        raw_tree = result.get("foundation_tree", {}) or {}
 
-        from core.brain.rc_briefing import prune_tree
-        kept_nodes, _, _ = prune_tree(eid, nodes, edges)
+        # 只剪一次：details、prompt、graph 共用同一份 tree。
+        # RC 若不在 tree 內，prune_tree 會用 anchor_label 補上。
+        tree = prune_tree(
+            eid, raw_tree.get("nodes", []), raw_tree.get("edges", []), anchor_label=rc_label,
+        )
         details = await asyncio.to_thread(
             request.app.state.concept_retriever.retrieve_batch,
-            [n["element_id"] for n in kept_nodes],
+            [n["element_id"] for n in tree.nodes],
         )
 
         async with usage_scope(uid, session_id, plan=quota_ctx.membership.plan):
-            briefing, labels = await asyncio.to_thread(
+            briefing, labels, graph = await asyncio.to_thread(
                 generator.generate,
-                rc_eid=eid, rc_label=rc_label, context_text=context_text,
-                nodes=nodes, edges=edges, details=details, walk_visited=walk_visited,
+                rc_eid=eid, rc_label=rc_label,
+                requirement_text=requirement_text, exploration_text=exploration_text,
+                tree=tree, details=details, walk_visited=walk_visited,
             )
 
-        payload = {"briefing": briefing, "labels": labels}
+        graph_dict = graph.model_dump()
+        payload = {"briefing": briefing, "labels": labels, "graph": graph_dict}
         cache.put(key, payload)
         briefing_dict = briefing.model_dump()
         await save_rc_briefing(
-            uid, session_id, eid, ctx_hash, rc_label, briefing_dict, labels,
+            uid, session_id, eid, ctx_hash, rc_label, briefing_dict, labels, graph_dict,
         )
         await append_briefing_display_message(
             uid, session_id,
             eid=eid, rc_label=rc_label, ctx_hash=ctx_hash,
-            briefing=briefing_dict, labels=labels,
+            briefing=briefing_dict, labels=labels, graph=graph_dict,
         )
         return RCBriefingResponse(
             session_id=session_id, eid=eid, rc_label=rc_label, cached=False, **payload,
