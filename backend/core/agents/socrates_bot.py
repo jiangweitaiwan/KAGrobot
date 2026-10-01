@@ -25,9 +25,9 @@ from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 
-from core.chat_state import ChatState, ConversationPhase
-from core.google_llm import create_chat_google_generative_ai
-from core.llm_retry  import call_with_retry
+from core.agents.chat_state import ChatState, ConversationPhase
+from core.llm.google_llm import create_chat_google_generative_ai
+from core.llm.llm_retry  import call_with_retry
 from retrieval.candidate_retriever import CandidateRetriever
 from retrieval.concept_retriever   import ConceptDetailRetriever
 

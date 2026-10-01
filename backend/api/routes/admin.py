@@ -18,14 +18,14 @@ VIP / 稽核
   GET  /admin/vips                            VIP 名單（含已到期者，已到期排最前）
   GET  /admin/audit?limit=&target_uid=        操作紀錄
 
-等級規則一律走 core.membership.plan_from_record，與額度檢查實際套用的規則是同一份，
+等級規則一律走 core.account.membership.plan_from_record，與額度檢查實際套用的規則是同一份，
 所以管理者看到的「有效等級」不會與系統行為不一致。
 
 PUT plan 使用範例（curl，token 為管理者的 Firebase ID token）：
     curl -X PUT $API/admin/users/<uid>/plan \
       -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
       -d '{"plan":"vip","expires_at":1798761600000}'
-金流串接後，webhook 只需呼叫 core.membership.set_user_plan()，不必動額度邏輯。
+金流串接後，webhook 只需呼叫 core.account.membership.set_user_plan()，不必動額度邏輯。
 """
 
 from __future__ import annotations
@@ -46,12 +46,12 @@ from api.routes.account import (
     UsageBucket,
     build_usage_response,
 )
-from core import admin_audit, admin_data, admin_directory
-from core.admin_directory import UserIdentity
-from core.firebase_auth import _admin_uids, require_admin
-from core.membership import plan_from_record, set_user_plan
-from core.quota import compute_quota
-from core.usage import get_daily_usage, get_global_daily_usage, month_key, now_local
+from core.admin import admin_audit, admin_data, admin_directory
+from core.admin.admin_directory import UserIdentity
+from core.infra.firebase_auth import _admin_uids, require_admin
+from core.account.membership import plan_from_record, set_user_plan
+from core.account.quota import compute_quota
+from core.account.usage import get_daily_usage, get_global_daily_usage, month_key, now_local
 
 router = APIRouter()
 

@@ -41,15 +41,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from firebase_admin import auth as fb_auth
 from pydantic import BaseModel
 
-from core.firebase_auth import require_auth, require_auth_claims
-from core.firestore_db import get_default_db
-from core.membership import resolve_membership
-from core.session_store import (  # ← 新增 import
+from core.infra.firebase_auth import require_auth, require_auth_claims
+from core.infra.firestore_db import get_default_db
+from core.account.membership import resolve_membership
+from core.sessions.session_store import (  # ← 新增 import
     delete_all_sessions,
     list_sessions,
     load_session_display,
 )
-from core.usage import delete_user_usage, get_sessions_usage
+from core.account.usage import delete_user_usage, get_sessions_usage
 
 router = APIRouter()
 

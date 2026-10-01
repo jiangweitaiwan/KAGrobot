@@ -46,7 +46,7 @@ from typing import List, Optional
 
 from langchain_core.tools import StructuredTool
 
-from core.skill_sandbox import SandboxComputer, SandboxPathError
+from core.skills.skill_sandbox import SandboxComputer, SandboxPathError
 from tools.gcs_utils import upload_and_sign
 
 

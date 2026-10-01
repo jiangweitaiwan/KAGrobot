@@ -56,7 +56,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 from langchain_core.callbacks import BaseCallbackHandler
 
-from core.firestore_db import get_default_db
+from core.infra.firestore_db import get_default_db
 from settings import get_settings
 
 log = logging.getLogger("usage")

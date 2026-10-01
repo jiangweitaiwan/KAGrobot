@@ -59,11 +59,11 @@ from graph_service.bfs_coordinator import BFSCoordinator
 from graph_service.foundation_recommender import FoundationRecommender
 from graph_service.walk_start_pool import StartConceptPool
 from graph_service.walk_frontier    import make_frontier_fetcher
-from core.socrates_bot             import SocratesChatBot
-from core.main_agent               import MainAgent
-from core.skill_loader             import SkillLoader
-from core.google_llm               import create_chat_google_generative_ai
-from core.llm_retry                import call_with_retry
+from core.agents.socrates_bot             import SocratesChatBot
+from core.agents.main_agent               import MainAgent
+from core.skills.skill_loader             import SkillLoader
+from core.llm.google_llm               import create_chat_google_generative_ai
+from core.llm.llm_retry                import call_with_retry
 from orchestrator                  import OrchestratorNodes, WalkOrchestratorNodes, build_orchestrator
 from api.routes                    import (
     chat_router,
@@ -78,9 +78,9 @@ from api.routes                    import (
     admin_router,
 )
 
-from core.skill_sandbox import SkillSandboxProvisioner
+from core.skills.skill_sandbox import SkillSandboxProvisioner
 from retrieval.rc_category_loader import RCCategoryLoader
-from core.rc_briefing import BriefingCache, RCBriefingGenerator
+from core.brain.rc_briefing import BriefingCache, RCBriefingGenerator
 
 
 async def _load_brain_weights(uid: Optional[str]) -> Dict[str, float]:
@@ -91,7 +91,7 @@ async def _load_brain_weights(uid: Optional[str]) -> Dict[str, float]:
     if not uid:
         return {}
     try:
-        from core.firestore_db import get_default_db
+        from core.infra.firestore_db import get_default_db
         db  = get_default_db()
         doc = await db.collection("users").document(uid).collection("brain").document("snapshot").get()
         if not doc.exists:

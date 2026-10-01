@@ -33,13 +33,13 @@ from fastapi import APIRouter, Depends, Request
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel
 
-from core.quota import QuotaContext, require_quota
-from core.session_store import (
+from core.account.quota import QuotaContext, require_quota
+from core.sessions.session_store import (
     load_session_snapshot,
     mark_briefing_adopted_in_display,
     save_session_snapshot,
 )
-from core.usage import usage_scope
+from core.account.usage import usage_scope
 
 router = APIRouter()
 

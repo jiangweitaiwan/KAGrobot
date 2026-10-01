@@ -30,10 +30,10 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
-from core.firebase_auth import require_auth
-from core.google_llm import create_chat_google_generative_ai
-from core.quota import QuotaContext, require_quota
-from core.usage import usage_scope
+from core.infra.firebase_auth import require_auth
+from core.llm.google_llm import create_chat_google_generative_ai
+from core.account.quota import QuotaContext, require_quota
+from core.account.usage import usage_scope
 
 router = APIRouter()
 

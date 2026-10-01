@@ -18,7 +18,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-from core.firestore_db import get_default_db
+from core.infra.firestore_db import get_default_db
 
 log = logging.getLogger("admin_audit")
 

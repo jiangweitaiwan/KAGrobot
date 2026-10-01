@@ -22,11 +22,11 @@ from fastapi.responses import StreamingResponse
 from langgraph.types import Command
 from pydantic import BaseModel
 
-from core.firebase_auth import require_auth
-from core.quota import QuotaContext, require_quota
-from core.session_store import save_session_snapshot
-from core.usage import usage_scope
-from core.walk_stream import stream_walk_via_orchestrator
+from core.infra.firebase_auth import require_auth
+from core.account.quota import QuotaContext, require_quota
+from core.sessions.session_store import save_session_snapshot
+from core.account.usage import usage_scope
+from core.agents.walk_stream import stream_walk_via_orchestrator
 
 router = APIRouter()
 

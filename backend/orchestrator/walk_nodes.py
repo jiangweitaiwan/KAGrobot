@@ -9,8 +9,8 @@ from typing import Any, Callable, Dict, List, Optional
 from langchain_core.messages import AIMessage
 from langgraph.types import interrupt
 
-from core.chat_state import ChatState, ConversationPhase
-from core.walk_bot import (
+from core.agents.chat_state import ChatState, ConversationPhase
+from core.agents.walk_bot import (
     _SYSTEM_PROMPT_TEMPLATE,
     _build_advance_tool,
     _format_frontier,

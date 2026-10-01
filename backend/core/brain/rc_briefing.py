@@ -28,8 +28,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
-from core.google_llm import create_chat_google_generative_ai
-from core.llm_retry import call_with_retry
+from core.llm.google_llm import create_chat_google_generative_ai
+from core.llm.llm_retry import call_with_retry
 
 MAX_NODES          = 28     # 送進 LLM 的節點上限（含 RC 本身）
 MAX_LAYERS         = 4

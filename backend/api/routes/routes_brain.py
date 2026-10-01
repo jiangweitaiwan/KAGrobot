@@ -29,18 +29,18 @@ import json
 import tempfile
 from pathlib import Path
 
-from core.semantic_context import SemanticContext
+from core.brain.semantic_context import SemanticContext
 from graph_service.semantic_scorer import combine_score, type_overlap
-from core.firebase_auth import require_auth, require_admin, require_auth_claims
-from core.quota import compute_quota, quota_error_detail
-from core.session_store import (
+from core.infra.firebase_auth import require_auth, require_admin, require_auth_claims
+from core.account.quota import compute_quota, quota_error_detail
+from core.sessions.session_store import (
     append_briefing_display_message,
     load_rc_briefing_for_context,
     load_session_snapshot,
     save_rc_briefing,
 )
-from core.rc_briefing import RCBriefing, context_hash, normalize_briefing_payload
-from core.usage import usage_scope
+from core.brain.rc_briefing import RCBriefing, context_hash, normalize_briefing_payload
+from core.account.usage import usage_scope
 router = APIRouter()
 
 
@@ -701,7 +701,7 @@ async def rc_briefing(
         if not any(n["element_id"] == eid for n in nodes):
             nodes = nodes + [{"element_id": eid, "label": rc_label, "node_type": "support"}]
 
-        from core.rc_briefing import prune_tree
+        from core.brain.rc_briefing import prune_tree
         kept_nodes, _, _ = prune_tree(eid, nodes, edges)
         details = await asyncio.to_thread(
             request.app.state.concept_retriever.retrieve_batch,

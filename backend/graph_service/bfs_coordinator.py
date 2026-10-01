@@ -44,7 +44,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict, Tuple
 
-from core.lru_cache            import DEFAULT_TTL_S, LRUCache
+from core.infra.lru_cache            import DEFAULT_TTL_S, LRUCache
 from graph_service.bfs_cache   import AdjacencyCache
 from graph_service.bfs_engine  import CachedDownstreamBFS, CachedUpstreamBFS
 from retrieval.path_selector   import PathSelector

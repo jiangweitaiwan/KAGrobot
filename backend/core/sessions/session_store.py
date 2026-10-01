@@ -53,7 +53,7 @@ from typing import Any, Dict, List, Optional
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
-from core.firestore_db import get_state_db as _get_db
+from core.infra.firestore_db import get_state_db as _get_db
 
 _MAX_DISPLAY_MESSAGES = 120  # 前端渲染用的訊息上限，避免單一 session 文件無限膨脹
 

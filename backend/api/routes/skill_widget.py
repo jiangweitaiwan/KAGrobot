@@ -35,8 +35,8 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from core.skill_compute import run_compute_function
-from core.widget_token import verify_token
+from core.skills.skill_compute import run_compute_function
+from core.infra.widget_token import verify_token
 
 router = APIRouter()
 

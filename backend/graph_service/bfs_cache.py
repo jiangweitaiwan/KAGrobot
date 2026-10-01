@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from core.lru_cache import DEFAULT_TTL_S, LRUCache
+from core.infra.lru_cache import DEFAULT_TTL_S, LRUCache
 
 
 # ══════════════════════════════════════════════════════════════

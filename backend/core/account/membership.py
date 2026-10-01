@@ -29,8 +29,8 @@ import time
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from core.firebase_auth import is_admin_claims, is_anonymous_claims
-from core.firestore_db import get_default_db
+from core.infra.firebase_auth import is_admin_claims, is_anonymous_claims
+from core.infra.firestore_db import get_default_db
 from settings import get_settings
 
 PLAN_GUEST = "guest"

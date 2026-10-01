@@ -35,9 +35,9 @@ from typing import Any, Dict, List, Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from core.firebase_auth import require_auth_claims
-from core.firestore_db import get_default_db as _get_db
-from core.membership import resolve_membership
+from core.infra.firebase_auth import require_auth_claims
+from core.infra.firestore_db import get_default_db as _get_db
+from core.account.membership import resolve_membership
 
 router = APIRouter()
 

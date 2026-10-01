@@ -98,17 +98,17 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from typing_extensions import Annotated
 
-from core.chat_state import ChatState, ConversationPhase
-from core.google_llm import create_chat_google_generative_ai
-from core.llm_retry  import call_with_retry
+from core.agents.chat_state import ChatState, ConversationPhase
+from core.llm.google_llm import create_chat_google_generative_ai
+from core.llm.llm_retry  import call_with_retry
 
-from core.skill_sandbox import SkillSandboxProvisioner
+from core.skills.skill_sandbox import SkillSandboxProvisioner
 from tools.params_resolver import make_resolve_params_tool
 from tools.knowledge import (
     make_trace_rc_logic_tool,
     make_read_skill_reference_tool,
 )
-from core.skill_sandbox import SandboxComputer
+from core.skills.skill_sandbox import SandboxComputer
 from tools.skill_code import (
     make_get_sandbox_file_tool,
     make_run_bash_tool,
@@ -118,7 +118,7 @@ from tools.skill_code import (
 from tools.skill_widget import make_show_interactive_html_tool
 
 if TYPE_CHECKING:
-    from core.skill_loader import RCSkill
+    from core.skills.skill_loader import RCSkill
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -275,7 +275,8 @@ class MainAgent:
         # widget 紀錄（單輪展示用，見 tools/skill_widget.py）。
         turn_widget_state: dict = {"item": None}
 
-        system_prompt = self._build_system_prompt(socrates_state, skill, briefing_handoff)        tools         = self._build_tools(
+        system_prompt = self._build_system_prompt(socrates_state, skill, briefing_handoff)
+        tools         = self._build_tools(
             socrates_state, skill, sandbox_state, attachment_state,
             turn_widget_state, uid=uid,
         )

@@ -32,8 +32,8 @@ from langchain_core.tools import StructuredTool
 from pydantic import Field, create_model
 from typing_extensions import Literal
 
-from core.skill_loader import HtmlWidgetSpec
-from core.widget_token import issue_token
+from core.skills.skill_loader import HtmlWidgetSpec
+from core.infra.widget_token import issue_token
 from tools.gcs_utils import upload_and_sign
 
 from settings import get_settings
@@ -63,7 +63,7 @@ def make_show_interactive_html_tool(
     uid                   : 已驗證的使用者 id，寫入 widget_token payload，
                              也用於 GCS 物件路徑命名空間。
     widget_token_secret   : settings.widget_token_secret，未設定時
-                             core.widget_token.issue_token 會直接拋出
+                             core.infra.widget_token.issue_token 會直接拋出
                              WidgetTokenError（見該模組說明）。
     widget_token_ttl_s    : widget token 與 GCS 簽名 URL 的有效秒數，
                              兩者刻意保持一致，token 過期後 URL 通常也

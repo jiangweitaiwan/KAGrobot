@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from core.firestore_db import get_default_db
-from core.usage import (
+from core.infra.firestore_db import get_default_db
+from core.account.usage import (
     USAGE_GLOBAL_MONTHLY,
     USAGE_META,
     USAGE_MONTHLY,

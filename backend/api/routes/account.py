@@ -21,11 +21,11 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from core.firebase_auth import require_auth, require_auth_claims
-from core.membership import plan_table
-from core.quota import QuotaContext, compute_quota
-from core.session_store import delete_session, rename_session
-from core.usage import get_daily_usage
+from core.infra.firebase_auth import require_auth, require_auth_claims
+from core.account.membership import plan_table
+from core.account.quota import QuotaContext, compute_quota
+from core.sessions.session_store import delete_session, rename_session
+from core.account.usage import get_daily_usage
 
 router = APIRouter()
 

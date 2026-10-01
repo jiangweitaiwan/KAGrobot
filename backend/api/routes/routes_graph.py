@@ -8,7 +8,7 @@ from pydantic import BaseModel
 import asyncio, os
 from pathlib import Path
 
-from core.firebase_auth import require_auth
+from core.infra.firebase_auth import require_auth
 
 router = APIRouter()
 

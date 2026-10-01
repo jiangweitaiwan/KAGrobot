@@ -11,18 +11,18 @@ import asyncio
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
-from core.socrates_bot import SocratesChatBot
-from core.chat_state   import ConversationPhase
+from core.agents.socrates_bot import SocratesChatBot
+from core.agents.chat_state   import ConversationPhase
 
-from core.main_agent        import MainAgent
-from core.skill_loader      import SkillLoader
+from core.agents.main_agent        import MainAgent
+from core.skills.skill_loader      import SkillLoader
 
 
 
 from orchestrator.state     import OrchestratorState
 from graph_service.bfs_coordinator import BFSCoordinator   # ← 新增 import
-from core.rc_briefing import BriefingCache, handoff_from_payload
-from core.session_store import load_rc_briefing_latest
+from core.brain.rc_briefing import BriefingCache, handoff_from_payload
+from core.sessions.session_store import load_rc_briefing_latest
 
 class OrchestratorNodes:
     """封裝 LangGraph 兩個主要節點的業務邏輯。

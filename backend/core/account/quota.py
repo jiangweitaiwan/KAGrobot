@@ -34,15 +34,15 @@ from typing import Any, Dict, Optional
 
 from fastapi import Depends, HTTPException
 
-from core.firebase_auth import is_anonymous_claims, require_auth_claims
-from core.membership import (
+from core.infra.firebase_auth import is_anonymous_claims, require_auth_claims
+from core.account.membership import (
     PLAN_GUEST,
     PLAN_VIP,
     Membership,
     PlanLimits,
     resolve_membership,
 )
-from core.usage import (
+from core.account.usage import (
     get_lifetime_usage,
     get_period_usage,
     month_key,

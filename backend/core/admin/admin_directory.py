@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from firebase_admin import auth as fb_auth
 
-from core.firebase_auth import _ensure_initialized
+from core.infra.firebase_auth import _ensure_initialized
 
 
 @dataclass
