@@ -242,8 +242,9 @@ class CachedUpstreamBFS:
         start_eid:    str,
         max_depth:    int = 10,
         max_branches: int = 4,
+        start_name:   str = "",
     ) -> Dict[str, Any]:
-        raw_paths = self._walk(start_eid, max_depth)
+        raw_paths = self._walk(start_eid, max_depth, start_name=start_name)
 
         # ── Score 用：對「全部」raw_paths 彙總（不受下方 diversity selection
         #    影響，確保同一 leaf 的分數不會因為多樣性演算法選中哪條代表路徑
@@ -331,6 +332,7 @@ class CachedUpstreamBFS:
         self,
         start_eid: str,
         max_depth: int = 10,
+        start_name: str = "",
     ) -> List[Dict[str, Any]]:
         """向上游追溯，透過 cache 取鄰接關係，沿路徑做 sign propagation。
 
@@ -339,7 +341,7 @@ class CachedUpstreamBFS:
         （對 score 無貢獻），直接標記為 completed、不再展開，
         避免白打 Neo4j。
         """
-        start_concept = {"element_id": start_eid, "name": "", "type": None}
+        start_concept = {"element_id": start_eid, "name": start_name or "", "type": None}
         queue         = deque([(start_concept, [], frozenset([start_eid]), "support")])
         completed:    List[Dict[str, Any]] = []
 

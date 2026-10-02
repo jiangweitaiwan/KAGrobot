@@ -25,15 +25,23 @@ from typing import Any, Dict, List
 import numpy as np
 
 from graph_service.bfs_coordinator import BFSCoordinator
+from graph_service.foundation_tree_labels import ExpandLabelEnricher
 from retrieval.encoder import SbertOnnxEncoder
 
 _TOP_N_FOUNDATIONS = 8
 
 
 class FoundationRecommender:
-    def __init__(self, coordinator: BFSCoordinator, encoder: SbertOnnxEncoder) -> None:
+    def __init__(
+        self,
+        coordinator: BFSCoordinator,
+        encoder: SbertOnnxEncoder,
+        *,
+        label_enricher: ExpandLabelEnricher | None = None,
+    ) -> None:
         self._coordinator = coordinator
         self._encoder     = encoder
+        self._label_enricher = label_enricher
         # element_id → embedding（圖譜結構不變即永久有效，process 生命週期）
         self._embedding_cache: Dict[str, np.ndarray] = {}
 
@@ -63,10 +71,16 @@ class FoundationRecommender:
 
     # ------------------------------------------------------------------
 
+    async def _fetch_expand(self, eid: str) -> Dict[str, Any]:
+        enricher = self._label_enricher
+        start_name = enricher.anchor_label(eid) if enricher else ""
+        result = await self._coordinator.get_expand_cached_async(eid, start_name=start_name)
+        if enricher:
+            enricher.enrich_result(eid, result)
+        return result
+
     async def _collect_foundation_labels(self, rc_eids: List[str]) -> Dict[str, str]:
-        results = await asyncio.gather(
-            *[self._coordinator.get_expand_cached_async(eid) for eid in rc_eids]
-        )
+        results = await asyncio.gather(*[self._fetch_expand(eid) for eid in rc_eids])
         labels: Dict[str, str] = {}
         for r in results:
             for f in r.get("final_foundations", []):

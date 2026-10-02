@@ -100,9 +100,10 @@ class BFSCoordinator:
         eid:          str,
         max_depth:    int = 10,
         max_branches: int = 4,
+        start_name:   str = "",
     ) -> Dict[str, Any]:
         """Upstream BFS，結果不快取（呼叫端自行決定是否快取）。"""
-        return self._up_bfs.run(eid, max_depth, max_branches)
+        return self._up_bfs.run(eid, max_depth, max_branches, start_name=start_name)
 
     # ──────────────────────────────────────────────────────────
     # Public API — 結果層 cache（取代 app.state 的各種 cache）
@@ -133,6 +134,7 @@ class BFSCoordinator:
         eid:          str,
         max_depth:    int = 6,
         max_branches: int = 4,
+        start_name:   str = "",
     ) -> Dict[str, Any]:
         """Upstream BFS 結果快取，對應 /graph/expand/{eid}。
 
@@ -144,7 +146,7 @@ class BFSCoordinator:
         if hit:
             return value
 
-        result = self._up_bfs.run(eid, max_depth, max_branches)
+        result = self._up_bfs.run(eid, max_depth, max_branches, start_name=start_name)
         self._expand_cache.set(key, result)
         return result
 
@@ -165,8 +167,11 @@ class BFSCoordinator:
         eid:          str,
         max_depth:    int = 10,
         max_branches: int = 4,
+        start_name:   str = "",
     ) -> Dict[str, Any]:
-        return await asyncio.to_thread(self.upstream, eid, max_depth, max_branches)
+        return await asyncio.to_thread(
+            self.upstream, eid, max_depth, max_branches, start_name,
+        )
 
     async def get_rcpath_cached_async(
         self,
@@ -186,9 +191,12 @@ class BFSCoordinator:
         eid:          str,
         max_depth:    int = 6,
         max_branches: int = 4,
+        start_name:   str = "",
     ) -> Dict[str, Any]:
         """get_expand_cached 的非同步版本，供 /graph/expand/batch 使用。"""
-        return await asyncio.to_thread(self.get_expand_cached, eid, max_depth, max_branches)
+        return await asyncio.to_thread(
+            self.get_expand_cached, eid, max_depth, max_branches, start_name,
+        )
 
     # ──────────────────────────────────────────────────────────
     # Stats & debug

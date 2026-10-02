@@ -43,6 +43,8 @@ from core.brain.rc_briefing import (
     BriefingGraph, RCBriefing, context_hash, normalize_briefing_payload, prune_tree,
 )
 from core.account.usage import usage_scope
+from graph_service.foundation_tree_labels import ExpandLabelEnricher
+from graph_service.layout_cache import ensure_layout_cache
 router = APIRouter()
 
 
@@ -176,28 +178,6 @@ class RCBriefingResponse(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
-def _anchor_label_from_cache(
-    layout_cache: Optional[Dict[str, Any]],
-    eid: str,
-) -> Optional[str]:
-    if not layout_cache:
-        return None
-    nodes: List[Dict[str, Any]] = layout_cache.get("nodes", [])
-    for n in nodes:
-        if n.get("id") == eid:
-            return n.get("name") or None
-    return None
-
-
-def _anchor_label_from_neo4j(driver, eid: str) -> str:
-    with driver.session() as session:
-        rec = session.run(
-            "MATCH (c:Concept) WHERE elementId(c) = $eid RETURN c.name AS name",
-            eid=eid,
-        ).single()
-    return (rec["name"] if rec and rec["name"] else None) or eid
-
-
 def _attach_skill_flags(nodes_raw: List[Dict[str, Any]], skill_loader) -> List["PathNode"]:
     """把 raw BFS 節點轉成 PathNode，附上 has_skill。
 
@@ -222,10 +202,27 @@ def _attach_skill_flags(nodes_raw: List[Dict[str, Any]], skill_loader) -> List["
 
 
 def _get_anchor_label(request: Request, eid: str) -> str:
-    label = _anchor_label_from_cache(request.app.state.layout_cache, eid)
-    if label:
-        return label
-    return _anchor_label_from_neo4j(request.app.state.driver, eid)
+    enricher: ExpandLabelEnricher = request.app.state.expand_label_enricher
+    return enricher.anchor_label(eid)
+
+
+async def _get_enriched_expand(
+    request: Request,
+    coordinator: Any,
+    eid: str,
+    *,
+    max_depth: int = 6,
+    max_branches: int = 4,
+) -> tuple[Dict[str, Any], str]:
+    """Upstream expand + layout_cache label 補齊（DetailPanel / briefing 共用）。"""
+    await ensure_layout_cache(request)
+    enricher: ExpandLabelEnricher = request.app.state.expand_label_enricher
+    anchor_label = enricher.anchor_label(eid)
+    result = await coordinator.get_expand_cached_async(
+        eid, max_depth=max_depth, max_branches=max_branches, start_name=anchor_label,
+    )
+    enricher.enrich_result(eid, result)
+    return result, anchor_label
 
 async def _get_semantic_context(request: Request, uid: str, session_id: str) -> SemanticContext:
     orchestrator = request.app.state.orchestrator
@@ -290,10 +287,10 @@ async def expand_concept(
     request: Request,
     _uid: str = Depends(require_auth),
 ) -> ExpandResponse:
-    coordinator  = request.app.state.coordinator
-    anchor_label = _get_anchor_label(request, eid)
-
-    result = await coordinator.get_expand_cached_async(eid, max_depth=6, max_branches=4)
+    coordinator = request.app.state.coordinator
+    result, anchor_label = await _get_enriched_expand(
+        request, coordinator, eid, max_depth=6, max_branches=4,
+    )
 
 
     foundations = [
@@ -352,9 +349,8 @@ async def expand_concept_batch(
     eids = list(dict.fromkeys(body.eids))[:50]
 
     async def _one(eid: str) -> tuple[str, ExpandResponse]:
-        anchor_label = _get_anchor_label(request, eid)
-        result = await coordinator.get_expand_cached_async(
-            eid, max_depth=6, max_branches=4
+        result, anchor_label = await _get_enriched_expand(
+            request, coordinator, eid, max_depth=6, max_branches=4,
         )
 
         foundations = [
@@ -596,6 +592,7 @@ async def foundation_recommendations(
     scored_rcs = await asyncio.to_thread(candidate_retriever.score_all, query_emb)
     top_rc_eids = [s["element_id"] for s in scored_rcs[:pool_size]]
 
+    await ensure_layout_cache(request)
     recs = await recommender.recommend(query_emb, top_rc_eids)
 
     return FoundationRecommendationsResponse(
@@ -701,7 +698,9 @@ async def rc_briefing(
             )
 
         coordinator = request.app.state.coordinator
-        result   = await coordinator.get_expand_cached_async(eid, max_depth=6, max_branches=4)
+        result, rc_label = await _get_enriched_expand(
+            request, coordinator, eid, max_depth=6, max_branches=4,
+        )
         raw_tree = result.get("foundation_tree", {}) or {}
 
         # 只剪一次：details、prompt、graph 共用同一份 tree。

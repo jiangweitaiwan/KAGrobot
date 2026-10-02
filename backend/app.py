@@ -56,6 +56,7 @@ from retrieval import (
 )
 from graph_service.bfs_cache       import AdjacencyCache
 from graph_service.bfs_coordinator import BFSCoordinator
+from graph_service.foundation_tree_labels import ExpandLabelEnricher
 from graph_service.foundation_recommender import FoundationRecommender
 from graph_service.walk_start_pool import StartConceptPool
 from graph_service.walk_frontier    import make_frontier_fetcher
@@ -179,9 +180,14 @@ async def lifespan(app: FastAPI):
         briefing_cache       = briefing_cache,
     )
 
+    expand_label_enricher = ExpandLabelEnricher(
+        driver,
+        layout_cache_getter=lambda: app.state.layout_cache,
+    )
     foundation_recommender = FoundationRecommender(
         coordinator=coordinator,
         encoder=encoder,
+        label_enricher=expand_label_enricher,
     )
     rc_category_loader = RCCategoryLoader(bucket_name=s.gcs_bucketforresult)
 
@@ -222,7 +228,8 @@ async def lifespan(app: FastAPI):
     app.state.settings        = s
     app.state.driver          = driver
     app.state.encoder         = encoder
-    app.state.coordinator     = coordinator
+    app.state.coordinator           = coordinator
+    app.state.expand_label_enricher = expand_label_enricher
     app.state.candidate_retriever   = candidate_retriever
     app.state.foundation_recommender = foundation_recommender
     app.state.skill_loader          = skill_loader
