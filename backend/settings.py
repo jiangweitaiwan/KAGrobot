@@ -151,7 +151,7 @@ class Settings(BaseSettings):
         description="即時試算 compute function 的 subprocess RLIMIT_AS 上限（MB）。",
     )
     frontend_origin: str = Field(
-        default="", alias="FRONTEND_ORIGIN",
+        default="project-l0r8z.vercel.app", alias="FRONTEND_ORIGIN",
         description=(
             "前端部署的實際 origin（例如 https://your-project.vercel.app），"
             "供 show_interactive_html 注入的 widget HTML 呼叫 "
