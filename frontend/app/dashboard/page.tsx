@@ -47,6 +47,19 @@ const GlobalBrainExplorer = dynamic(() => import("../components/GlobalBrainExplo
 const PersonalBrain       = dynamic(() => import("../components/PersonalBrain"),       { ssr: false });
 const DetailPanel         = dynamic(() => import("../components/DetailPanel"),         { ssr: false });
 const WALK_PATH_COLORS = ["#00d4aa", "#7f77dd", "#e8a030"]; // teal / purple / amber
+
+const CHAT_COLUMN_WIDTH_KEY = "kag-dashboard-chat-column-width";
+const CHAT_COLUMN_WIDTH_DEFAULT = 220;
+const CHAT_COLUMN_WIDTH_MIN = 180;
+const CHAT_COLUMN_WIDTH_MAX = 640;
+
+function readStoredChatColumnWidth(): number {
+  if (typeof window === "undefined") return CHAT_COLUMN_WIDTH_DEFAULT;
+  const raw = localStorage.getItem(CHAT_COLUMN_WIDTH_KEY);
+  const n = raw ? parseInt(raw, 10) : NaN;
+  if (!Number.isFinite(n)) return CHAT_COLUMN_WIDTH_DEFAULT;
+  return Math.min(CHAT_COLUMN_WIDTH_MAX, Math.max(CHAT_COLUMN_WIDTH_MIN, n));
+}
 // ─────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────
@@ -471,7 +484,7 @@ async function fetchWalkStatus(sessionId: string): Promise<WalkStatusResponse | 
 
 function ChatBubble({
   msg, onWidgetSubmit, onWidgetCancel, widgetActionDisabled, isActiveWidget,
-  onBriefingAdopt, onBriefingDismiss, briefingDisabled,
+  onBriefingAdopt, onBriefingDismiss, briefingDisabled, contentMaxWidth,
 }: {
   msg: ChatMessage;
   onWidgetSubmit: (messageId: string, widgetId: string, data: unknown) => void;
@@ -481,6 +494,7 @@ function ChatBubble({
   onBriefingAdopt: (eid: string, label: string) => void;
   onBriefingDismiss: (messageId: string) => void;
   briefingDisabled: boolean;
+  contentMaxWidth?: number;
 }) {
   const attachments = msg.attachments ?? [];
   const parts        = useMemo(() => splitByPlaceholder(msg.content), [msg.content]);
@@ -493,9 +507,16 @@ function ChatBubble({
   const unreferenced = attachments.filter((a) => !referencedRefs.has(a.ref));
 
   const friendlyWidgetLabel = msg.role === "user" ? friendlyWidgetSubmissionLabel(msg.content) : null;
+  const embedsWideBlock = Boolean(msg.briefing || (msg.widget && !isActiveWidget));
+  const bubbleStyle: React.CSSProperties | undefined = contentMaxWidth && contentMaxWidth > 0
+    ? {
+        maxWidth: `${contentMaxWidth}px`,
+        ...(embedsWideBlock ? { width: `${contentMaxWidth}px` } : {}),
+      }
+    : undefined;
 
   return (
-    <div className={`msg ${msg.role}`}>
+    <div className={`msg ${msg.role}`} style={bubbleStyle}>
       {friendlyWidgetLabel !== null ? (
         <span style={{ fontStyle: "italic", opacity: 0.85 }}>{friendlyWidgetLabel}</span>
       ) : (
@@ -533,6 +554,7 @@ function ChatBubble({
             disabled={widgetActionDisabled}
             onSubmit={(widgetId, data) => onWidgetSubmit(msg.id, widgetId, data)}
             onCancel={(widgetId) => onWidgetCancel(msg.id, widgetId)}
+            maxWidthPx={contentMaxWidth ? Math.max(120, contentMaxWidth - 20) : undefined}
           />
         )
       )}
@@ -669,12 +691,49 @@ export default function Page() {
   const isTypingRef    = useRef(false);
   const messagesRef    = useRef<ChatMessage[]>([]);
   const boxRef         = useRef<HTMLDivElement | null>(null);
+  const chatWidthDragRef = useRef(CHAT_COLUMN_WIDTH_DEFAULT);
   const explorerColRef = useRef<HTMLDivElement>(null);
   const personalColRef = useRef<HTMLDivElement>(null);
   const detailPanelRef  = useRef<HTMLDivElement>(null);
   const semanticPanelRef = useRef<HTMLDivElement>(null);
   const explorerSize   = usePanelSize(explorerColRef as React.RefObject<HTMLDivElement>);
   const personalSize   = usePanelSize(personalColRef  as React.RefObject<HTMLDivElement>);
+  const chatBoxSize    = usePanelSize(boxRef as React.RefObject<HTMLDivElement>);
+  const chatContentMaxWidth = chatBoxSize.w > 0 ? chatBoxSize.w : undefined;
+
+  const [chatColumnWidth, setChatColumnWidth] = useState(CHAT_COLUMN_WIDTH_DEFAULT);
+  useEffect(() => {
+    setChatColumnWidth(readStoredChatColumnWidth());
+  }, []);
+  useEffect(() => {
+    chatWidthDragRef.current = chatColumnWidth;
+  }, [chatColumnWidth]);
+
+  const beginChatColumnResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = chatWidthDragRef.current;
+    document.body.classList.add("chat-column-resizing");
+
+    const onMove = (ev: MouseEvent) => {
+      const next = Math.min(
+        CHAT_COLUMN_WIDTH_MAX,
+        Math.max(CHAT_COLUMN_WIDTH_MIN, startW + ev.clientX - startX),
+      );
+      chatWidthDragRef.current = next;
+      setChatColumnWidth(next);
+    };
+    const onUp = () => {
+      document.body.classList.remove("chat-column-resizing");
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      try {
+        localStorage.setItem(CHAT_COLUMN_WIDTH_KEY, String(chatWidthDragRef.current));
+      } catch { /* private mode */ }
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, []);
 
   // ── 避免同一個 eid 重複觸發 batch expand ──────────────────
   const expandFetchedRef = useRef<Set<string>>(new Set());
@@ -1792,10 +1851,21 @@ export default function Page() {
       </header>
 
       {/* ── Four-column layout ── */}
-      <div className="content-area">
+      <div
+        className="content-area"
+        style={{ ["--chat-column-width" as string]: `${chatColumnWidth}px` }}
+      >
 
         {/* ══ Chat ══ */}
         <div className="chat-column" style={activeWidget ? { pointerEvents: "none" } : undefined}>
+          <div
+            className="chat-column-resize-handle"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="拖曳調整對話欄寬度"
+            title="拖曳調整對話欄寬度"
+            onMouseDown={beginChatColumnResize}
+          />
           <div className="chat-box" ref={boxRef}>
             {messages.length === 0 ? (
               <div className="meta" style={{ textAlign: "center", marginTop: 24 }}>
@@ -1813,6 +1883,7 @@ export default function Page() {
                   onBriefingAdopt={handleBriefingAdopt}
                   onBriefingDismiss={handleBriefingDismiss}
                   briefingDisabled={isLoading}
+                  contentMaxWidth={chatContentMaxWidth}
                 />
               ))
             )}

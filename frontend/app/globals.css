@@ -95,7 +95,7 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .content-area {
   display:               grid;
-  grid-template-columns: 220px 1fr 300px 260px 1fr;
+  grid-template-columns: var(--chat-column-width, 220px) 1fr 300px 260px 1fr;
   gap:                   12px;
   min-height:            0;
   overflow:              hidden;
@@ -110,6 +110,38 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   min-height:     0;
   overflow:       hidden;
   opacity:        0.92;
+  position:       relative;
+}
+
+.chat-column-resize-handle {
+  position:   absolute;
+  top:        0;
+  right:      -8px;
+  width:      14px;
+  height:     100%;
+  cursor:     col-resize;
+  z-index:    3;
+  touch-action: none;
+}
+.chat-column-resize-handle::after {
+  content:    "";
+  position:   absolute;
+  top:        8%;
+  bottom:     8%;
+  left:       50%;
+  width:      2px;
+  transform:  translateX(-50%);
+  border-radius: 1px;
+  background: rgba(201, 162, 39, 0.12);
+  transition: background 0.15s;
+}
+.chat-column-resize-handle:hover::after,
+body.chat-column-resizing .chat-column-resize-handle::after {
+  background: rgba(201, 162, 39, 0.45);
+}
+body.chat-column-resizing {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 
 .chat-box {
@@ -132,11 +164,13 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .msg {
   max-width:     100%;
+  width:         fit-content;
   border-radius: 10px;
   padding:       8px 10px;
   white-space:   pre-wrap;
   line-height:   1.55;
   font-size:     0.82rem;
+  overflow-wrap: anywhere;
 }
 .msg.user {
   align-self: flex-end;
@@ -344,7 +378,7 @@ textarea:focus {
 /* ── responsive ──────────────────────────────────────────── */
 @media (max-width: 1500px) {
   .content-area {
-    grid-template-columns: 200px 1fr 280px 240px 1fr;
+    grid-template-columns: var(--chat-column-width, 220px) 1fr 280px 240px 1fr;
   }
 }
 

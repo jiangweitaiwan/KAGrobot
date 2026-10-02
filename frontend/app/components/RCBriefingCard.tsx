@@ -33,7 +33,8 @@ export type BriefingState = {
 const box: React.CSSProperties = {
   marginTop: 8, border: "1px solid rgba(83,74,183,0.4)", borderRadius: 10,
   padding: "10px 12px", display: "flex", flexDirection: "column", gap: 10,
-  fontSize: "0.78rem", lineHeight: 1.55, maxWidth: 520,
+  fontSize: "0.78rem", lineHeight: 1.55, maxWidth: "100%", width: "100%",
+  boxSizing: "border-box",
 };
 const h: React.CSSProperties = { fontSize: "0.7rem", color: "var(--muted)", marginBottom: 2 };
 
